@@ -34,6 +34,7 @@ type Server struct {
 	storageDir    string
 	pythonBin     string
 	extractScript string
+	webDistDir    string
 	offlineMeta   bool
 }
 
@@ -111,6 +112,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /api/docs/{id}", s.requireAuth(s.handleUpdateDoc))
 	mux.HandleFunc("DELETE /api/docs/{id}", s.requireAuth(s.handleDeleteDoc))
 
+	if s.webDistDir != "" {
+		if info, err := os.Stat(s.webDistDir); err == nil && info.IsDir() {
+			fileServer := http.FileServer(http.Dir(s.webDistDir))
+			mux.Handle("/", fileServer)
+		}
+	}
+
 	return mux
 }
 
@@ -179,6 +187,7 @@ func main() {
 
 	pythonBin := envOrDefault("PYTHON_BIN", resolveDefaultPath("../.venv/bin/python3", "./.venv/bin/python3", "python3"))
 	extractScript := envOrDefault("EXTRACT_SCRIPT", resolveDefaultPath("../scripts/extract_meta.py", "./scripts/extract_meta.py"))
+	webDistDir := envOrDefault("WEB_DIST_DIR", resolveDefaultPath("../web/dist", "./web/dist"))
 	listenAddr := *addrFlag
 	if listenAddr == "" {
 		listenAddr = envOrDefault("ADDR", "127.0.0.1:8080")
@@ -190,6 +199,7 @@ func main() {
 		storageDir:    storageDir,
 		pythonBin:     pythonBin,
 		extractScript: extractScript,
+		webDistDir:    webDistDir,
 	}
 
 	httpServer := &http.Server{
