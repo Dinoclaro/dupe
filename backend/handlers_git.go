@@ -67,6 +67,20 @@ func validateRemoteURL(rawURL string) error {
 	return nil
 }
 
+func githubHTTPSFallbackToSSH(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	const prefix = "https://github.com/"
+	if strings.HasPrefix(trimmed, prefix) {
+		rest := strings.TrimPrefix(trimmed, prefix)
+		rest = strings.TrimPrefix(rest, "/")
+		if !strings.HasSuffix(rest, ".git") {
+			rest += ".git"
+		}
+		return "git@github.com:" + rest
+	}
+	return ""
+}
+
 type createRepoRequest struct {
 	Name        string `json:"name"`
 	RemoteURL   string `json:"remote_url"`
@@ -172,10 +186,20 @@ func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := runGitCommand(r.Context(), "", "clone", "--", req.RemoteURL, absLocalPath); err != nil {
+	remoteURL := strings.TrimSpace(req.RemoteURL)
+	if _, err := runGitCommand(r.Context(), "", "clone", "--", remoteURL, absLocalPath); err != nil {
 		_ = os.RemoveAll(absLocalPath)
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("git clone failed: %v", err))
-		return
+		sshFallback := githubHTTPSFallbackToSSH(remoteURL)
+		if sshFallback == "" {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("git clone failed: %v", err))
+			return
+		}
+		if _, sshErr := runGitCommand(r.Context(), "", "clone", "--", sshFallback, absLocalPath); sshErr != nil {
+			_ = os.RemoveAll(absLocalPath)
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("git clone failed: %v", sshErr))
+			return
+		}
+		remoteURL = sshFallback
 	}
 
 	_, _ = runGitCommand(r.Context(), absLocalPath, "config", "user.name", claims.Username)
@@ -193,7 +217,7 @@ func (s *Server) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		repoID,
 		claims.UserID,
 		name,
-		strings.TrimSpace(req.RemoteURL),
+		remoteURL,
 		bibPath,
 		figuresDir,
 		relLocalPath,

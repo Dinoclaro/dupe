@@ -12,11 +12,49 @@ export interface DiagramElement {
   label: string;
 }
 
-export interface ExcalidrawCompatibleScene {
-  type: 'excalidraw';
-  version: 2;
-  source: 'dupe';
-  elements: DiagramElement[];
+export const DEFAULT_DRAWIO_XML = `<mxfile host="embed.diagrams.net" agent="dupe" version="24.0.0">
+  <diagram id="dupe-fig" name="Page-1">
+    <mxGraphModel dx="1000" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="600" math="1" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="PDF Library&#xa;$$\mathcal{D}_{pdf}$$" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="80" y="140" width="150" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="Auto-BibTeX&#xa;\texttt{references.bib}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="320" y="140" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="4" value="Overleaf / LaTeX&#xa;$$f_\theta(x)$$" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="570" y="140" width="160" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="PyMuPDF" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;" edge="1" parent="1" source="2" target="3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="Git Push" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;" edge="1" parent="1" source="3" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>`;
+
+export function decodeDrawioSvgDataUri(dataUriOrSvg: string): string {
+  const trimmed = dataUriOrSvg.trim();
+  if (trimmed.startsWith('<svg') || trimmed.startsWith('<?xml')) {
+    return trimmed;
+  }
+  const base64Prefix = 'data:image/svg+xml;base64,';
+  if (trimmed.startsWith(base64Prefix)) {
+    const b64 = trimmed.slice(base64Prefix.length);
+    const binary = atob(b64);
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+  const utf8Prefix = 'data:image/svg+xml;utf8,';
+  if (trimmed.startsWith(utf8Prefix)) {
+    return decodeURIComponent(trimmed.slice(utf8Prefix.length));
+  }
+  return trimmed;
 }
 
 function escapeXml(str: string): string {
@@ -29,7 +67,7 @@ function escapeXml(str: string): string {
 
 export function exportDiagramToSvg(elements: DiagramElement[]): string {
   if (elements.length === 0) {
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 320" width="600" height="320"><rect width="100%" height="100%" fill="#ffffff"/></svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 220" width="600" height="220"><rect width="100%" height="100%" fill="#ffffff"/></svg>`;
   }
 
   const padding = 32;

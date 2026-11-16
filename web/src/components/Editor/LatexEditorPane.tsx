@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { EditorState } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
@@ -7,21 +7,17 @@ import { StreamLanguage } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { Paper } from '../../api/client';
-import {
-  CompileRequest,
-  CompileResponse,
-  compileLatexPreview,
-} from '../../workers/latexCompiler';
 import { createCitationCompletionSource } from './citationCompletion';
 
 interface LatexEditorPaneProps {
   fileLabel: string;
   source: string;
   papers: Paper[];
-  figures: Record<string, string>;
   saving: boolean;
+  readOnly?: boolean;
   onChangeSource: (next: string) => void;
   onSaveSource: () => Promise<void>;
+  onOpenPreviewSplit?: () => void;
   registerInsertSnippet: (fn: (snippet: string) => void) => void;
 }
 
@@ -29,10 +25,11 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   fileLabel,
   source,
   papers,
-  figures,
   saving,
+  readOnly = false,
   onChangeSource,
   onSaveSource,
+  onOpenPreviewSplit,
   registerInsertSnippet,
 }) => {
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
@@ -42,64 +39,6 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
 
   const onChangeRef = useRef(onChangeSource);
   onChangeRef.current = onChangeSource;
-
-  const workerRef = useRef<Worker | null>(null);
-  const requestIdRef = useRef(0);
-  const [compiled, setCompiled] = useState<CompileResponse>(() =>
-    compileLatexPreview({
-      requestId: 0,
-      source,
-      papers,
-      figures,
-    }),
-  );
-  const [showPreview, setShowPreview] = useState(true);
-
-  useEffect(() => {
-    try {
-      const worker = new Worker(
-        new URL('../../workers/latexWorker.ts', import.meta.url),
-        { type: 'module' },
-      );
-      worker.onmessage = (event: MessageEvent<CompileResponse>) => {
-        setCompiled(event.data);
-      };
-      workerRef.current = worker;
-      return () => {
-        worker.terminate();
-        workerRef.current = null;
-      };
-    } catch {
-      workerRef.current = null;
-      return undefined;
-    }
-  }, []);
-
-  useEffect(() => {
-    const reqId = ++requestIdRef.current;
-    const payload: CompileRequest = {
-      requestId: reqId,
-      source,
-      papers: papers.map((p) => ({
-        bibtex_key: p.bibtex_key,
-        title: p.title,
-        authors: p.authors,
-        publication_year: p.publication_year,
-        doi: p.doi,
-      })),
-      figures,
-    };
-
-    const timer = window.setTimeout(() => {
-      if (workerRef.current) {
-        workerRef.current.postMessage(payload);
-      } else {
-        setCompiled(compileLatexPreview(payload));
-      }
-    }, 120);
-
-    return () => window.clearTimeout(timer);
-  }, [source, papers, figures]);
 
   useEffect(() => {
     const container = editorContainerRef.current;
@@ -116,6 +55,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
         StreamLanguage.define(stex),
         oneDark,
         EditorView.lineWrapping,
+        EditorState.readOnly.of(readOnly),
         autocompletion({
           override: [createCitationCompletionSource(() => papersRef.current)],
           activateOnTyping: true,
@@ -151,9 +91,8 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       view.destroy();
       editorViewRef.current = null;
     };
-    // Only recreate editor when container mounts
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [readOnly]);
 
   useEffect(() => {
     const view = editorViewRef.current;
@@ -173,48 +112,38 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       <div className="editor-toolbar">
         <div className="editor-file-badge">
           <code>{fileLabel}</code>
-          <span className="muted-hint">Type @ or \cite&#123; for BibTeX autocomplete</span>
+          <span className="muted-hint">
+            {readOnly
+              ? 'Auto-generated from PDF Library'
+              : 'Type @ or \\cite{ for BibTeX autocomplete'}
+          </span>
         </div>
         <div className="editor-actions">
-          <span className="compile-stats">
-            {compiled.citedKeys.length} cited · {compiled.durationMs} ms
-          </span>
-          <button
-            type="button"
-            className="btn-tiny"
-            onClick={() => setShowPreview((p) => !p)}
-          >
-            {showPreview ? 'Hide Preview' : 'Show Preview'}
-          </button>
-          <button
-            type="button"
-            className="btn-primary btn-small"
-            disabled={saving}
-            onClick={() => void onSaveSource()}
-          >
-            {saving ? 'Saving...' : 'Save File'}
-          </button>
+          {onOpenPreviewSplit && (
+            <button
+              type="button"
+              className="btn-tiny"
+              onClick={onOpenPreviewSplit}
+              title="Open Compiled LaTeX Preview in Right Split"
+            >
+              ◫ Open Compiled Preview
+            </button>
+          )}
+          {!readOnly && (
+            <button
+              type="button"
+              className="btn-primary btn-tiny"
+              disabled={saving}
+              onClick={() => void onSaveSource()}
+            >
+              {saving ? 'Saving...' : 'Save (Ctrl+S)'}
+            </button>
+          )}
         </div>
       </div>
 
-      {compiled.diagnostics.length > 0 && (
-        <div className="editor-diagnostics">
-          {compiled.diagnostics.map((d, i) => (
-            <span key={i} className="diag-chip">
-              {d}
-            </span>
-          ))}
-        </div>
-      )}
-
       <div className="editor-split">
         <div className="codemirror-host" ref={editorContainerRef} />
-        {showPreview && (
-          <div
-            className="latex-preview-pane"
-            dangerouslySetInnerHTML={{ __html: compiled.html }}
-          />
-        )}
       </div>
     </div>
   );
