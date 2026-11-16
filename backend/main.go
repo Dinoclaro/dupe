@@ -147,7 +147,7 @@ func main() {
 	createUser := flag.String("create-user", "", "Create or update a user account and exit")
 	password := flag.String("password", "", "Password for --create-user")
 	colorHex := flag.String("color", "#FFEB3B", "Highlight color hex for --create-user")
-	addrFlag := flag.String("addr", "", "HTTP listen address (default 127.0.0.1:8080)")
+	addrFlag := flag.String("addr", "", "HTTP listen address (default 0.0.0.0:8080)")
 	flag.Parse()
 
 	databaseURL := envOrDefault("DATABASE_URL", "postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable")
@@ -192,7 +192,7 @@ func main() {
 	webDistDir := envOrDefault("WEB_DIST_DIR", resolveDefaultPath("../web/dist", "./web/dist"))
 	listenAddr := *addrFlag
 	if listenAddr == "" {
-		listenAddr = envOrDefault("ADDR", "127.0.0.1:8080")
+		listenAddr = envOrDefault("ADDR", "0.0.0.0:8080")
 	}
 
 	srv := &Server{
