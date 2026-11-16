@@ -1,0 +1,31 @@
+# Local runtime storage (PDFs and cloned Git repositories)
+storage/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Go build artifacts and hot-reload tmp
+backend/server
+backend/tmp/
+tmp/
+*.exe
+*.out
+*.test
+
+# Python virtualenvs and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Frontend dependencies and build output
+web/node_modules/
+web/dist/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
