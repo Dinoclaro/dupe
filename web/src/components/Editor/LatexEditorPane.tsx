@@ -15,12 +15,14 @@ interface LatexEditorPaneProps {
   fileLabel: string;
   source: string;
   headContent?: string;
+  hasExternalAgentEdit?: boolean;
   papers: Paper[];
   saving: boolean;
   readOnly?: boolean;
   onChangeSource: (next: string) => void;
   onSaveSource: () => Promise<void>;
   onRevertToHead?: () => Promise<void>;
+  onAcceptAgentEdits?: () => void;
   onOpenPreviewSplit?: () => void;
   registerInsertSnippet: (fn: (snippet: string) => void) => void;
 }
@@ -29,12 +31,14 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   fileLabel,
   source,
   headContent = '',
+  hasExternalAgentEdit = false,
   papers,
   saving,
   readOnly = false,
   onChangeSource,
   onSaveSource,
   onRevertToHead,
+  onAcceptAgentEdits,
   onOpenPreviewSplit,
   registerInsertSnippet,
 }) => {
@@ -46,15 +50,15 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   const onChangeRef = useRef(onChangeSource);
   onChangeRef.current = onChangeSource;
 
-  const isModifiedFromHead = Boolean(headContent && headContent !== source);
-  const [diffEnabled, setDiffEnabled] = useState<boolean>(isModifiedFromHead);
+  const [diffEnabled, setDiffEnabled] = useState<boolean>(false);
   const isMarkdown = fileLabel.endsWith('.md');
+  const hasHeadDiff = Boolean(headContent && headContent !== source);
 
+  // Only auto-open diff mode when switching to a file that was modified externally by an agent
   useEffect(() => {
-    if (headContent && headContent !== source) {
-      setDiffEnabled(true);
-    }
-  }, [fileLabel, headContent, source]);
+    setDiffEnabled(Boolean(hasExternalAgentEdit && headContent && headContent !== source));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileLabel, hasExternalAgentEdit]);
 
   useEffect(() => {
     const container = editorContainerRef.current;
@@ -125,9 +129,9 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       view.destroy();
       editorViewRef.current = null;
     };
-    // Recreate editor when switching file, readOnly, or diff view
+    // Only recreate editor when fileLabel, readOnly, or diff toggle changes (never on user typing)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileLabel, readOnly, diffEnabled, headContent, isMarkdown]);
+  }, [fileLabel, readOnly, diffEnabled, isMarkdown]);
 
   useEffect(() => {
     const view = editorViewRef.current;
@@ -147,9 +151,12 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       <div className="editor-toolbar">
         <div className="editor-file-badge">
           <code>{fileLabel}</code>
-          {isModifiedFromHead && (
-            <span className="git-badge git-badge-m" title="Modified since last Git commit (HEAD)">
-              M · Modified
+          {hasExternalAgentEdit && (
+            <span
+              className="git-badge git-badge-m"
+              title="Modified externally on disk (e.g. by an agent)"
+            >
+              Agent Edit
             </span>
           )}
           <span className="muted-hint">
@@ -166,19 +173,35 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
               type="button"
               className={`btn-tiny ${diffEnabled ? 'active-btn' : ''}`}
               onClick={() => setDiffEnabled((v) => !v)}
-              title="Toggle inline @codemirror/merge diff view against Git HEAD"
+              title="Compare current file against last Git commit (HEAD)"
             >
-              {diffEnabled ? '✓ Inline Diff vs HEAD' : 'Diff vs HEAD'}
+              {diffEnabled ? 'Hide Diff' : 'Diff vs HEAD'}
             </button>
           )}
-          {isModifiedFromHead && onRevertToHead && !readOnly && (
+          {diffEnabled && onAcceptAgentEdits && (
+            <button
+              type="button"
+              className="btn-tiny"
+              onClick={() => {
+                onAcceptAgentEdits();
+                setDiffEnabled(false);
+              }}
+              title="Accept current changes as your baseline"
+            >
+              ✓ Accept All
+            </button>
+          )}
+          {hasHeadDiff && diffEnabled && onRevertToHead && !readOnly && (
             <button
               type="button"
               className="btn-tiny danger"
-              onClick={() => void onRevertToHead()}
+              onClick={() => {
+                void onRevertToHead();
+                setDiffEnabled(false);
+              }}
               title="Discard uncommitted edits and restore Git HEAD version"
             >
-              Revert File to HEAD
+              Revert to HEAD
             </button>
           )}
           {onOpenPreviewSplit && (

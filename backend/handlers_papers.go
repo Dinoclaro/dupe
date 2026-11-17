@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	maxUploadSize       = 100 << 20 // 100 MB per upload request
+	maxUploadSize       = 500 << 20 // 500 MB per upload request
 	extractMetaTimeout  = 15 * time.Second
 	pdfMagicHeader      = "%PDF-"
 )
@@ -76,12 +76,12 @@ func fallbackMetadata(filename string) extractedMeta {
 	}
 }
 
-func (s *Server) runExtractMeta(ctx context.Context, pdfPath, originalFilename string) (extractedMeta, error) {
+func (s *Server) runExtractMeta(ctx context.Context, pdfPath, originalFilename string, forceOffline bool) (extractedMeta, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, extractMetaTimeout)
 	defer cancel()
 
 	args := []string{s.extractScript, pdfPath, "--filename", originalFilename}
-	if s.offlineMeta {
+	if s.offlineMeta || forceOffline {
 		args = append(args, "--offline")
 	}
 
@@ -189,6 +189,7 @@ func (s *Server) handleUploadPapers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isShared := strings.EqualFold(r.FormValue("is_shared"), "true")
+	skipNetwork := strings.EqualFold(r.FormValue("skip_network"), "true")
 	var uploaded []Paper
 
 	for _, fh := range fileHeaders {
@@ -233,7 +234,7 @@ func (s *Server) handleUploadPapers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		absPath := filepath.Join(s.storageDir, relPath)
-		meta, _ := s.runExtractMeta(r.Context(), absPath, fh.Filename)
+		meta, _ := s.runExtractMeta(r.Context(), absPath, fh.Filename, skipNetwork)
 
 		var created Paper
 		const insertQuery = `
@@ -644,7 +645,7 @@ func (s *Server) handleReextractPaper(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	meta, err := s.runExtractMeta(r.Context(), fullPath, currentTitle)
+	meta, err := s.runExtractMeta(r.Context(), fullPath, currentTitle, false)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return

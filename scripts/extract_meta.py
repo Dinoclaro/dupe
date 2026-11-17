@@ -22,6 +22,7 @@ except ImportError:
 DOI_PATTERN = re.compile(r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\b")
 ARXIV_PATTERN = re.compile(r"arXiv:\s*(\d{4}\.\d{4,5}(?:v\d+)?)", re.IGNORECASE)
 YEAR_PATTERN = re.compile(r"\b(19\d{2}|20\d{2})\b")
+ZOTERO_FILENAME_PATTERN = re.compile(r"^(.+?)\s+-\s+(19\d{2}|20\d{2})\s+-\s+(.+)$")
 STOPWORDS = frozenset({"a", "an", "and", "for", "in", "of", "on", "the", "to", "with", "via"})
 HTTP_TIMEOUT_SECONDS = 5.0
 USER_AGENT = "dupe-metadata-extractor/1.0 (mailto:admin@localhost)"
@@ -163,8 +164,20 @@ def fetch_arxiv(arxiv_id: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> dict[st
     }
 
 
+def parse_zotero_filename(stem: str) -> tuple[str, int | None, str]:
+    match = ZOTERO_FILENAME_PATTERN.match(stem.strip())
+    if not match:
+        return "", None, ""
+    authors_part = match.group(1).strip()
+    year_part = int(match.group(2))
+    title_part = match.group(3).strip()
+    return authors_part, year_part, title_part
+
+
 def build_bibtex_key(authors: str, year: int | None, title: str) -> str:
     first_author = authors.split(",")[0].strip() if authors else "unknown"
+    first_author = re.sub(r"\bet\s+al\.?$", "", first_author, flags=re.IGNORECASE).strip()
+    first_author = re.sub(r"\band\s+.+$", "", first_author, flags=re.IGNORECASE).strip()
     surname = first_author.split()[-1] if first_author else "unknown"
     surname_clean = re.sub(r"[^a-z0-9]", "", surname.lower()) or "paper"
 
@@ -218,9 +231,11 @@ def infer_from_pdf(
     largest_title: str,
     fallback_name: str,
 ) -> tuple[str, str, int | None]:
+    z_authors, z_year, z_title = parse_zotero_filename(fallback_name)
+
     title = info.get("title", "").strip()
     if not title or title.lower().startswith("untitled") or title.lower().endswith(".pdf"):
-        title = largest_title.strip()
+        title = z_title or largest_title.strip()
     if not title:
         for line in text.splitlines():
             candidate = line.strip()
@@ -230,12 +245,13 @@ def infer_from_pdf(
     if not title:
         title = fallback_name
 
-    authors = info.get("author", "").strip()
-    year: int | None = None
-    creation = info.get("creationDate", "") or info.get("modDate", "")
-    year_match = YEAR_PATTERN.search(creation) or YEAR_PATTERN.search(text[:2000])
-    if year_match:
-        year = int(year_match.group(1))
+    authors = info.get("author", "").strip() or z_authors
+    year: int | None = z_year
+    if year is None:
+        creation = info.get("creationDate", "") or info.get("modDate", "")
+        year_match = YEAR_PATTERN.search(creation) or YEAR_PATTERN.search(text[:2000])
+        if year_match:
+            year = int(year_match.group(1))
 
     return title, authors, year
 

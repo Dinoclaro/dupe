@@ -155,7 +155,7 @@ func TestRunExtractMetaFallbackWhenFileMissing(t *testing.T) {
 		extractScript: "../scripts/extract_meta.py",
 		offlineMeta:   true,
 	}
-	meta, err := srv.runExtractMeta(context.Background(), "/nonexistent/paper.pdf", "My_Paper_2025.pdf")
+	meta, err := srv.runExtractMeta(context.Background(), "/nonexistent/paper.pdf", "My_Paper_2025.pdf", true)
 	if err == nil {
 		t.Fatal("expected error for missing PDF path")
 	}

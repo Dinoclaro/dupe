@@ -143,6 +143,7 @@ export const App: React.FC = () => {
     'paper/main.tex': DEFAULT_LATEX_TEMPLATE,
   });
   const [headBuffers, setHeadBuffers] = useState<Record<string, string>>({});
+  const [externalAgentEdits, setExternalAgentEdits] = useState<Record<string, boolean>>({});
   const [activeEditorPath, setActiveEditorPath] = useState<string>('paper/main.tex');
   const [savingSource, setSavingSource] = useState(false);
 
@@ -400,8 +401,15 @@ export const App: React.FC = () => {
     if (projId) {
       try {
         const res = await api.readProjectFile(projId, file.path);
+        const diskDiffersFromHead = Boolean(
+          res.head_content && res.head_content !== res.content,
+        );
         setFileBuffers((prev) => ({ ...prev, [res.path]: res.content }));
         setHeadBuffers((prev) => ({ ...prev, [res.path]: res.head_content }));
+        setExternalAgentEdits((prev) => ({
+          ...prev,
+          [res.path]: diskDiffersFromHead && prev[res.path] !== false,
+        }));
         if (file.kind === 'diagram' && res.content.trim().startsWith('<')) {
           const stem = file.path
             .replace(/^(diagrams|paper\/figures)\//, '')
@@ -539,6 +547,7 @@ export const App: React.FC = () => {
     try {
       const res = await api.writeProjectFile(activeProject.id, filePath, content, false);
       setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
+      setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
       await refreshProjectTree(activeProject.id);
       setStatusMessage(`Saved ${filePath}.`);
     } catch {
@@ -708,15 +717,21 @@ export const App: React.FC = () => {
         fileLabel={filePath}
         source={source}
         headContent={headContent}
+        hasExternalAgentEdit={Boolean(externalAgentEdits[filePath])}
         papers={papers}
         saving={savingSource}
         readOnly={isGeneratedReadOnly}
         onChangeSource={(next) => {
           setActiveEditorPath(filePath);
+          setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
           setFileBuffers((prev) => ({ ...prev, [filePath]: next }));
         }}
         onSaveSource={() => handleSaveProjectFile(filePath)}
         onRevertToHead={() => handleRevertProjectFile(filePath)}
+        onAcceptAgentEdits={() => {
+          setHeadBuffers((prev) => ({ ...prev, [filePath]: source }));
+          setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
+        }}
         onOpenPreviewSplit={() => handleOpenCompiledPreview(true)}
         registerInsertSnippet={(fn) => {
           insertSnippetRef.current = fn;

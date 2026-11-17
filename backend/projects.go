@@ -262,13 +262,14 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 		refMdPath := filepath.Join(refsTextDir, key+".md")
 		if _, err := os.Stat(refMdPath); errors.Is(err, os.ErrNotExist) {
 			header := fmt.Sprintf("# %s\n\n- **Authors:** %s\n- **BibTeX Key:** `%s`\n- **DOI:** %s\n\n", p.Title, p.Authors, key, p.DOI)
-			pdfAbsPath, joinErr := safeJoin(s.storageDir, p.FilePath)
 			bodyText := ""
-			if joinErr == nil {
-				bodyText = s.extractFullTextMarkdown(ctx, pdfAbsPath)
+			if len(papers) <= 5 {
+				if pdfAbsPath, joinErr := safeJoin(s.storageDir, p.FilePath); joinErr == nil {
+					bodyText = s.extractFullTextMarkdown(ctx, pdfAbsPath)
+				}
 			}
 			if bodyText == "" {
-				bodyText = "_Full text pending extraction._"
+				bodyText = "_Full text available via dupe MCP `read_paper` tool._"
 			}
 			_ = os.WriteFile(refMdPath, []byte(header+bodyText+"\n"), 0o644)
 		}
