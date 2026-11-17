@@ -976,6 +976,13 @@ func (s *Server) handleSyncProject(w http.ResponseWriter, r *http.Request) {
 	pushed := false
 	pushWarning := ""
 	if cfg.OverleafRemote != "" {
+		cleanRemote := normalizeOverleafRemote(cfg.OverleafRemote, "")
+		if cleanRemote != cfg.OverleafRemote {
+			cfg.OverleafRemote = cleanRemote
+		}
+		if _, err := runGitCommand(r.Context(), paperDir, "remote", "set-url", "origin", cleanRemote); err != nil {
+			_, _ = runGitCommand(r.Context(), paperDir, "remote", "add", "origin", cleanRemote)
+		}
 		if _, pushErr := runGitCommand(r.Context(), paperDir, "push", "-u", "origin", "HEAD"); pushErr != nil {
 			cfg.PendingPush = true
 			pushWarning = pushErr.Error()
