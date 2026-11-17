@@ -359,6 +359,13 @@ export const api = {
     return apiFetch<User>('/api/auth/me');
   },
 
+  async changePassword(newPassword: string): Promise<void> {
+    await apiFetch<{ status: string }>('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ new_password: newPassword }),
+    });
+  },
+
   async listPapers(): Promise<Paper[]> {
     return apiFetch<Paper[]>('/api/papers');
   },

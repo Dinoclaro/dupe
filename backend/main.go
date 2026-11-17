@@ -96,6 +96,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/me", s.requireAuth(s.handleMe))
+	mux.HandleFunc("POST /api/auth/password", s.requireAuth(s.handleChangePassword))
 
 	mux.HandleFunc("GET /api/papers", s.requireAuth(s.handleListPapers))
 	mux.HandleFunc("POST /api/papers/upload", s.requireAuth(s.handleUploadPapers))

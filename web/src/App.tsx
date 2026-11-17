@@ -1116,9 +1116,40 @@ export const App: React.FC = () => {
             {user.username} ({runtimeMode})
           </span>
           {runtimeMode !== 'local' && (
-            <button type="button" className="btn-tiny" onClick={handleLogout}>
-              Sign Out
-            </button>
+            <>
+              <button
+                type="button"
+                className="btn-tiny"
+                title="Change account password"
+                onClick={async () => {
+                  const nextPw = window.prompt(
+                    'Enter a new password (at least 8 characters):',
+                  );
+                  if (!nextPw) {
+                    return;
+                  }
+                  if (nextPw.length < 8) {
+                    setStatusMessage('Password must be at least 8 characters.');
+                    return;
+                  }
+                  try {
+                    await api.changePassword(nextPw);
+                    setStatusMessage('Password updated.');
+                  } catch (err) {
+                    setStatusMessage(
+                      `Failed to update password: ${
+                        err instanceof Error ? err.message : String(err)
+                      }`,
+                    );
+                  }
+                }}
+              >
+                🔑 Password
+              </button>
+              <button type="button" className="btn-tiny" onClick={handleLogout}>
+                Sign Out
+              </button>
+            </>
           )}
         </div>
       </header>
