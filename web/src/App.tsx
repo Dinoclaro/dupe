@@ -376,10 +376,60 @@ export const App: React.FC = () => {
     }
   };
 
-  const moveTabToOtherGroup = (tab: StudioTab, fromGroup: 0 | 1, event: React.MouseEvent) => {
-    event.stopPropagation();
+  const moveTabToOtherGroup = (tab: StudioTab, fromGroup: 0 | 1, event?: React.MouseEvent) => {
+    if (event) {
+      event.stopPropagation();
+    }
     const targetGroup: 0 | 1 = fromGroup === 0 ? 1 : 0;
+    if (fromGroup === 0) {
+      setLeftTabs((prev) => {
+        const next = prev.filter((t) => t.id !== tab.id);
+        if (activeLeftTabId === tab.id) {
+          setActiveLeftTabId(next[next.length - 1]?.id || null);
+        }
+        return next;
+      });
+    } else {
+      setRightTabs((prev) => {
+        const next = prev.filter((t) => t.id !== tab.id);
+        if (activeRightTabId === tab.id) {
+          setActiveRightTabId(next[next.length - 1]?.id || null);
+        }
+        return next;
+      });
+    }
     openTabInGroup(tab, targetGroup);
+  };
+
+  const handleTabDropOnGroup = (targetGroup: 0 | 1, event: React.DragEvent) => {
+    event.preventDefault();
+    const rawTab = event.dataTransfer.getData('application/x-dupe-tab');
+    if (rawTab) {
+      try {
+        const parsed = JSON.parse(rawTab) as { tab: StudioTab; fromGroup: 0 | 1 };
+        if (parsed.fromGroup !== targetGroup) {
+          moveTabToOtherGroup(parsed.tab, parsed.fromGroup);
+        } else {
+          openTabInGroup(parsed.tab, targetGroup);
+        }
+        return;
+      } catch {
+        // ignore invalid payload
+      }
+    }
+    const droppedPaperId = event.dataTransfer.getData('application/x-dupe-paper-id');
+    if (droppedPaperId) {
+      const found = papers.find((p) => p.id === droppedPaperId);
+      if (found) {
+        const tab: StudioTab = {
+          id: `pdf:${found.id}`,
+          title: found.title.length > 28 ? `${found.title.slice(0, 28)}…` : found.title,
+          kind: 'pdf',
+          paperId: found.id,
+        };
+        openTabInGroup(tab, targetGroup);
+      }
+    }
   };
 
   const handleOpenPaper = (paper: Paper, inSplit: boolean) => {
@@ -684,11 +734,23 @@ export const App: React.FC = () => {
 
     if (tab.kind === 'pdf') {
       const paper = papers.find((p) => p.id === tab.paperId) || null;
-      return <PdfReaderPane paper={paper} onInsertCitation={handleInsertCitation} />;
+      return (
+        <PdfReaderPane
+          key={tab.id}
+          paper={paper}
+          onInsertCitation={handleInsertCitation}
+        />
+      );
     }
 
     if (tab.kind === 'preview') {
-      return <CompiledPreviewPane compiled={compiled} sourceLabel={activeEditorPath} />;
+      return (
+        <CompiledPreviewPane
+          key={tab.id}
+          compiled={compiled}
+          sourceLabel={activeEditorPath}
+        />
+      );
     }
 
     if (tab.kind === 'diagram') {
@@ -696,6 +758,7 @@ export const App: React.FC = () => {
       const initialXml = diagramsXmlByStem[stem] || DEFAULT_DRAWIO_XML;
       return (
         <DiagramPane
+          key={tab.id}
           figureName={stem}
           initialXmlOrSvg={initialXml}
           hasActiveRepo={Boolean(activeProject?.overleaf_remote)}
@@ -714,6 +777,7 @@ export const App: React.FC = () => {
 
     return (
       <LatexEditorPane
+        key={tab.id}
         fileLabel={filePath}
         source={source}
         headContent={headContent}
@@ -895,20 +959,41 @@ export const App: React.FC = () => {
             style={{ flex: hasRightSplit ? `${splitRatio} 1 0%` : '1 1 0%' }}
             onPointerDown={() => setFocusedGroup(0)}
           >
-            <div className="vscode-tabbar">
+            <div
+              className="vscode-tabbar"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => handleTabDropOnGroup(0, e)}
+            >
               {leftTabs.map((tab) => {
                 const isActive = activeLeftTab?.id === tab.id;
+                const livePaper =
+                  tab.kind === 'pdf'
+                    ? papers.find((p) => p.id === tab.paperId)
+                    : undefined;
+                const displayTitle = livePaper
+                  ? livePaper.title.length > 28
+                    ? `${livePaper.title.slice(0, 28)}…`
+                    : livePaper.title
+                  : tab.title;
                 return (
                   <div
                     key={tab.id}
                     className={`vscode-tab ${isActive ? 'active' : ''}`}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(
+                        'application/x-dupe-tab',
+                        JSON.stringify({ tab, fromGroup: 0 }),
+                      );
+                    }}
                     onClick={() => setActiveLeftTabId(tab.id)}
+                    title={livePaper ? `${livePaper.title} (@${livePaper.bibtex_key}) — Drag tab to right split` : `${tab.title} — Drag tab to right split`}
                   >
-                    <span className="vscode-tab-title">{tab.title}</span>
+                    <span className="vscode-tab-title">{displayTitle}</span>
                     <button
                       type="button"
                       className="tab-icon-btn"
-                      title="Open in Right Split"
+                      title="Move to Right Split"
                       onClick={(e) => moveTabToOtherGroup(tab, 0, e)}
                     >
                       ◫
@@ -924,6 +1009,16 @@ export const App: React.FC = () => {
                   </div>
                 );
               })}
+              {!hasRightSplit && (
+                <div
+                  className="tab-drop-split-zone"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => handleTabDropOnGroup(1, e)}
+                  title="Drag any tab or paper here to open in Right Split"
+                >
+                  ⇢ Drop here to Split Right
+                </div>
+              )}
             </div>
             <div className="editor-group-body">{renderTabContent(activeLeftTab)}</div>
           </section>
@@ -942,16 +1037,37 @@ export const App: React.FC = () => {
                 style={{ flex: `${1 - splitRatio} 1 0%` }}
                 onPointerDown={() => setFocusedGroup(1)}
               >
-                <div className="vscode-tabbar">
+                <div
+                  className="vscode-tabbar"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => handleTabDropOnGroup(1, e)}
+                >
                   {rightTabs.map((tab) => {
                     const isActive = activeRightTab?.id === tab.id;
+                    const livePaper =
+                      tab.kind === 'pdf'
+                        ? papers.find((p) => p.id === tab.paperId)
+                        : undefined;
+                    const displayTitle = livePaper
+                      ? livePaper.title.length > 28
+                        ? `${livePaper.title.slice(0, 28)}…`
+                        : livePaper.title
+                      : tab.title;
                     return (
                       <div
                         key={tab.id}
                         className={`vscode-tab ${isActive ? 'active' : ''}`}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData(
+                            'application/x-dupe-tab',
+                            JSON.stringify({ tab, fromGroup: 1 }),
+                          );
+                        }}
                         onClick={() => setActiveRightTabId(tab.id)}
+                        title={livePaper ? `${livePaper.title} (@${livePaper.bibtex_key}) — Drag tab to left split` : `${tab.title} — Drag tab to left split`}
                       >
-                        <span className="vscode-tab-title">{tab.title}</span>
+                        <span className="vscode-tab-title">{displayTitle}</span>
                         <button
                           type="button"
                           className="tab-icon-btn"

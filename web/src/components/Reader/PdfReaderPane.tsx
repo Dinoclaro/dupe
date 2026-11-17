@@ -29,26 +29,86 @@ export function normalizeRect(
   };
 }
 
+interface PdfPageCanvasProps {
+  doc: pdfjsLib.PDFDocumentProxy;
+  pageNumber: number;
+  scale: number;
+}
+
+const PdfPageCanvas: React.FC<PdfPageCanvasProps> = ({ doc, pageNumber, scale }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let renderTask: pdfjsLib.RenderTask | null = null;
+
+    const render = async () => {
+      try {
+        const page = await doc.getPage(pageNumber);
+        if (cancelled) {
+          return;
+        }
+        const dpr = window.devicePixelRatio || 1;
+        const viewport = page.getViewport({ scale });
+        const canvas = canvasRef.current;
+        if (!canvas) {
+          return;
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return;
+        }
+        canvas.width = Math.floor(viewport.width * dpr);
+        canvas.height = Math.floor(viewport.height * dpr);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        renderTask = page.render({ canvasContext: ctx, viewport });
+        await renderTask.promise;
+      } catch {
+        // ignore cancelled render
+      }
+    };
+
+    void render();
+    return () => {
+      cancelled = true;
+      if (renderTask) {
+        renderTask.cancel();
+      }
+    };
+  }, [doc, pageNumber, scale]);
+
+  return (
+    <div className="pdf-page-wrapper">
+      <canvas ref={canvasRef} className="pdf-canvas" />
+      <div className="pdf-page-Badge">Page {pageNumber}</div>
+    </div>
+  );
+};
+
 interface PdfReaderPaneProps {
   paper: Paper | null;
   onInsertCitation: (bibtexKey: string) => void;
 }
 
-export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({ paper, onInsertCitation }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
-  const [pageNumber, setPageNumber] = useState(1);
+export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({
+  paper,
+  onInsertCitation,
+}) => {
+  const [viewerMode, setViewerMode] = useState<'native' | 'pdfjs'>('native');
+  const [zoomPercent, setZoomPercent] = useState(110);
+  const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
-  const [scale, setScale] = useState(1.2);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    if (!paper) {
-      pdfDocRef.current = null;
+    if (!paper || viewerMode !== 'pdfjs') {
+      setPdfDoc(null);
       setNumPages(0);
-      setPageNumber(1);
       return;
     }
 
@@ -65,9 +125,8 @@ export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({ paper, onInsertCit
         if (cancelled) {
           return;
         }
-        pdfDocRef.current = doc;
+        setPdfDoc(doc);
         setNumPages(doc.numPages);
-        setPageNumber(1);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Failed to load PDF');
@@ -83,132 +142,102 @@ export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({ paper, onInsertCit
     return () => {
       cancelled = true;
     };
-  }, [paper]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const renderPage = async () => {
-      const doc = pdfDocRef.current;
-      const canvas = canvasRef.current;
-      if (!doc || !canvas || pageNumber < 1 || pageNumber > doc.numPages) {
-        return;
-      }
-
-      try {
-        const page = await doc.getPage(pageNumber);
-        if (cancelled) {
-          return;
-        }
-        const viewport = page.getViewport({ scale });
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          return;
-        }
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        await page.render({ canvasContext: ctx, viewport }).promise;
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to render page');
-        }
-      }
-    };
-
-    void renderPage();
-    return () => {
-      cancelled = true;
-    };
-  }, [pageNumber, scale, numPages, paper]);
+  }, [paper, viewerMode]);
 
   if (!paper) {
     return (
       <div className="empty-hint">
-        Select a paper from the Library to read its PDF alongside your LaTeX manuscript.
+        Select a paper from the PDF Library to read it alongside your manuscript.
       </div>
     );
   }
+
+  const fileUrl = api.paperFileUrl(paper.id);
+  const scale = zoomPercent / 100;
 
   return (
     <div className="reader-pane">
       <div className="reader-toolbar">
         <div className="reader-meta">
+          <code className="bibkey-badge">@{paper.bibtex_key || 'paper'}</code>
           <strong className="truncate-text" title={paper.title}>
             {paper.title}
           </strong>
+        </div>
+        <div className="reader-controls">
           {paper.bibtex_key && (
             <button
               type="button"
               className="btn-tiny"
               onClick={() => onInsertCitation(paper.bibtex_key)}
+              title="Insert citation into active editor"
             >
-              Insert \cite&#123;{paper.bibtex_key}&#125;
+              Cite \cite&#123;{paper.bibtex_key}&#125;
             </button>
           )}
-        </div>
-        <div className="reader-controls">
           <button
             type="button"
             className="btn-tiny"
-            disabled={pageNumber <= 1}
-            onClick={() => setPageNumber((p) => Math.max(1, p - 1))}
+            onClick={() => setZoomPercent((z) => Math.max(50, z - 15))}
+            title="Zoom Out"
           >
-            Prev
+            −
           </button>
-          <span className="reader-page-indicator">
-            {pageNumber} / {numPages || 1}
-          </span>
+          <span className="reader-page-indicator">{zoomPercent}%</span>
           <button
             type="button"
             className="btn-tiny"
-            disabled={pageNumber >= numPages}
-            onClick={() => setPageNumber((p) => Math.min(numPages, p + 1))}
-          >
-            Next
-          </button>
-          <button
-            type="button"
-            className="btn-tiny"
-            onClick={() => setScale((s) => Math.max(0.6, Number((s - 0.2).toFixed(1))))}
-          >
-            -
-          </button>
-          <span className="reader-page-indicator">{Math.round(scale * 100)}%</span>
-          <button
-            type="button"
-            className="btn-tiny"
-            onClick={() => setScale((s) => Math.min(2.5, Number((s + 0.2).toFixed(1))))}
+            onClick={() => setZoomPercent((z) => Math.min(250, z + 15))}
+            title="Zoom In"
           >
             +
           </button>
+          <button
+            type="button"
+            className="btn-tiny"
+            onClick={() =>
+              setViewerMode((m) => (m === 'native' ? 'pdfjs' : 'native'))
+            }
+            title="Switch between Native Browser PDF Renderer and Continuous PDF.js Canvas"
+          >
+            {viewerMode === 'native' ? 'Engine: Native PDF' : `Engine: PDF.js (${numPages}p)`}
+          </button>
           <a
-            href={api.paperFileUrl(paper.id)}
+            href={fileUrl}
             target="_blank"
             rel="noreferrer"
             className="btn-tiny"
+            title="Open PDF in a new browser tab"
           >
-            Native PDF
+            ↗ Pop Out
           </a>
         </div>
       </div>
 
-      <div className="reader-canvas-stage">
-        {loading && <div className="empty-hint">Loading PDF...</div>}
-        {error && (
-          <div className="reader-fallback">
-            <p className="muted-hint">Canvas preview notice: {error}</p>
-            <iframe
-              title={paper.title}
-              src={api.paperFileUrl(paper.id)}
-              className="reader-iframe"
-            />
-          </div>
-        )}
-        <canvas
-          ref={canvasRef}
-          className="pdf-canvas"
-          style={{ display: error ? 'none' : 'block' }}
-        />
-      </div>
+      {viewerMode === 'native' ? (
+        <div className="reader-native-stage">
+          <iframe
+            key={`${paper.id}-${zoomPercent}`}
+            title={paper.title}
+            src={`${fileUrl}#zoom=${zoomPercent}`}
+            className="reader-native-iframe"
+          />
+        </div>
+      ) : (
+        <div className="reader-canvas-stage">
+          {loading && <div className="empty-hint">Rendering {paper.title}…</div>}
+          {error && <div className="auth-error">{error}</div>}
+          {pdfDoc &&
+            Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
+              <PdfPageCanvas
+                key={`${paper.id}-p${pageNum}`}
+                doc={pdfDoc}
+                pageNumber={pageNum}
+                scale={scale}
+              />
+            ))}
+        </div>
+      )}
     </div>
   );
 };
