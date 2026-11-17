@@ -1291,14 +1291,23 @@ func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	qLower := strings.ToLower(rawQuery)
-	results := make([]SearchMatchItem, 0, 60)
-	const maxResults = 120
+	results := make([]SearchMatchItem, 0, 80)
+	const maxPerCategory = 50
+	catCounts := map[string]int{
+		"pdf":   0,
+		"latex": 0,
+		"notes": 0,
+		"code":  0,
+	}
 
 	// 1. Search PDF Library metadata (title, authors, bibtex_key, doi, tags)
 	papers, _ := s.queryLinkedPapersForProject(r.Context(), claims.UserID, cfg)
+	paperByBibKey := make(map[string]Paper, len(papers))
+	matchedPaperMeta := make(map[string]bool)
 	for _, p := range papers {
-		if len(results) >= maxResults {
-			break
+		paperByBibKey[p.BibtexKey] = p
+		if catCounts["pdf"] >= maxPerCategory {
+			continue
 		}
 		haystack := strings.ToLower(p.Title + " " + p.Authors + " " + p.BibtexKey + " " + p.DOI + " " + strings.Join(p.Tags, " "))
 		if strings.Contains(haystack, qLower) {
@@ -1315,23 +1324,29 @@ func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
 				Snippet:  fmt.Sprintf("@%s%s — %s", p.BibtexKey, yr, p.Authors),
 				Kind:     "pdf",
 			})
+			catCounts["pdf"]++
+			matchedPaperMeta[p.ID] = true
 		}
 	}
 
-	// 2. Search across Project Files (LaTeX in paper/, Notes in notes/, Code in code/)
+	// 2. Search across Project Files (LaTeX in paper/, Notes in notes/, Code in code/, and PDF text in refs/text/)
 	treeEntries, _ := collectProjectTree(r.Context(), projDir)
 	for _, entry := range treeEntries {
-		if len(results) >= maxResults {
-			break
-		}
-		if strings.HasPrefix(entry.Path, "refs/text/") || entry.Path == "refs/index.json" {
+		if entry.Path == "refs/index.json" {
 			continue
 		}
+		isRefText := strings.HasPrefix(entry.Path, "refs/text/") && strings.HasSuffix(entry.Path, ".md")
 		cat := categorizeProjectPath(entry.Path)
+		if isRefText {
+			cat = "pdf"
+		}
+		if catCounts[cat] >= maxPerCategory {
+			continue
+		}
 		fileKind := entry.Kind
 
-		// Check filename match first
-		if strings.Contains(strings.ToLower(entry.Path), qLower) {
+		// Check filename match first (for non-ref-text files)
+		if !isRefText && strings.Contains(strings.ToLower(entry.Path), qLower) {
 			results = append(results, SearchMatchItem{
 				Category: cat,
 				Path:     entry.Path,
@@ -1339,6 +1354,10 @@ func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
 				Snippet:  entry.Path,
 				Kind:     fileKind,
 			})
+			catCounts[cat]++
+			if catCounts[cat] >= maxPerCategory {
+				continue
+			}
 		}
 
 		fullPath, joinErr := safeJoin(projDir, entry.Path)
@@ -1361,6 +1380,30 @@ func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
 				if len(snippet) > 140 {
 					snippet = snippet[:140] + "…"
 				}
+				if isRefText {
+					bibKey := strings.TrimSuffix(filepath.Base(entry.Path), ".md")
+					if p, exists := paperByBibKey[bibKey]; exists {
+						if matchedPaperMeta[p.ID] && matchesInFile >= 1 {
+							break
+						}
+						results = append(results, SearchMatchItem{
+							Category: "pdf",
+							Path:     "pdf:" + p.ID,
+							Title:    p.Title,
+							PaperID:  p.ID,
+							BibKey:   p.BibtexKey,
+							Line:     lineIdx + 1,
+							Snippet:  snippet,
+							Kind:     "pdf",
+						})
+						catCounts["pdf"]++
+						matchesInFile++
+						if matchesInFile >= 2 || catCounts["pdf"] >= maxPerCategory {
+							break
+						}
+					}
+					continue
+				}
 				results = append(results, SearchMatchItem{
 					Category: cat,
 					Path:     entry.Path,
@@ -1369,8 +1412,9 @@ func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
 					Snippet:  snippet,
 					Kind:     fileKind,
 				})
+				catCounts[cat]++
 				matchesInFile++
-				if matchesInFile >= 5 || len(results) >= maxResults {
+				if matchesInFile >= 5 || catCounts[cat] >= maxPerCategory {
 					break
 				}
 			}
