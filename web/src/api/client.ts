@@ -275,6 +275,7 @@ export const api = {
     patch: {
       name?: string;
       overleaf_remote?: string;
+      overleaf_token?: string;
       linked_paper_ids?: string[];
       link_all_papers?: boolean;
     },

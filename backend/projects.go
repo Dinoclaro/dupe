@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -55,6 +54,25 @@ func sanitizeProjectFolderName(name string) string {
 		return "project"
 	}
 	return slug
+}
+
+func normalizeOverleafRemote(rawRemote, gitToken string) string {
+	cleaned := strings.TrimSpace(rawRemote)
+	if strings.HasPrefix(strings.ToLower(cleaned), "git clone ") {
+		cleaned = strings.TrimSpace(cleaned[len("git clone "):])
+	}
+	fields := strings.Fields(cleaned)
+	if len(fields) > 0 {
+		cleaned = fields[len(fields)-1]
+	}
+	token := strings.TrimSpace(gitToken)
+	if token != "" && strings.Contains(cleaned, "git.overleaf.com/") {
+		cleaned = strings.Replace(cleaned, "https://git@git.overleaf.com/", "https://git:"+token+"@git.overleaf.com/", 1)
+		if !strings.Contains(cleaned, "@git.overleaf.com/") {
+			cleaned = strings.Replace(cleaned, "https://git.overleaf.com/", "https://git:"+token+"@git.overleaf.com/", 1)
+		}
+	}
+	return cleaned
 }
 
 func (s *Server) userProjectsRoot(userID int) string {
@@ -348,7 +366,7 @@ func (s *Server) createProjectOnDisk(
 		ID:             projID,
 		Name:           strings.TrimSpace(name),
 		FolderName:     filepath.Base(projDir),
-		OverleafRemote: strings.TrimSpace(overleafRemote),
+		OverleafRemote: normalizeOverleafRemote(overleafRemote, ""),
 		LinkedPaperIDs: []string{},
 		LinkAllPapers:  linkAll,
 	}
@@ -482,39 +500,78 @@ func classifyProjectFileKind(relSlash string) string {
 	}
 }
 
+func isIgnoredProjectDirName(name string) bool {
+	switch name {
+	case ".git", ".dupe", "node_modules", "__pycache__", "wandb", "logs", "results", ".vscode", ".github", "build", "dist", "assets":
+		return true
+	default:
+		return strings.HasSuffix(name, ".egg-info")
+	}
+}
+
+func isBinaryAssetExt(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".pt", ".pth", ".onnx", ".ckpt", ".npz", ".npy", ".pkl", ".usd", ".urdf", ".dae", ".stl", ".obj", ".mp4", ".mov", ".avi", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".pyc", ".so":
+		return true
+	default:
+		return false
+	}
+}
+
 func collectProjectTree(ctx context.Context, projectDir string) ([]ProjectTreeEntry, error) {
 	rootStatus := parseGitStatusMap(ctx, projectDir, "")
 	paperStatus := parseGitStatusMap(ctx, filepath.Join(projectDir, "paper"), "paper")
 
 	entries := make([]ProjectTreeEntry, 0)
-	walkErr := filepath.WalkDir(projectDir, func(path string, d fs.DirEntry, err error) error {
+	var walkFolder func(absRoot, relPrefix string, depth int) error
+	walkFolder = func(absRoot, relPrefix string, depth int) error {
+		if depth > 6 {
+			return nil
+		}
+		dirItems, err := os.ReadDir(absRoot)
 		if err != nil {
-			return err
-		}
-		if d.IsDir() && (d.Name() == ".git" || d.Name() == ".dupe" || d.Name() == "node_modules") {
-			return filepath.SkipDir
-		}
-		if d.IsDir() {
 			return nil
 		}
-		rel, relErr := filepath.Rel(projectDir, path)
-		if relErr != nil {
-			return nil
+		for _, item := range dirItems {
+			name := item.Name()
+			if isIgnoredProjectDirName(name) {
+				continue
+			}
+			fullPath := filepath.Join(absRoot, name)
+			relSlash := name
+			if relPrefix != "" {
+				relSlash = relPrefix + "/" + name
+			}
+
+			info, statErr := os.Stat(fullPath)
+			if statErr != nil {
+				continue
+			}
+			if info.IsDir() {
+				if err := walkFolder(fullPath, relSlash, depth+1); err != nil {
+					return err
+				}
+				continue
+			}
+			if isBinaryAssetExt(name) {
+				continue
+			}
+			status := paperStatus[relSlash]
+			if status == "" {
+				status = rootStatus[relSlash]
+			}
+			entries = append(entries, ProjectTreeEntry{
+				Path:      relSlash,
+				Kind:      classifyProjectFileKind(relSlash),
+				GitStatus: status,
+			})
 		}
-		relSlash := filepath.ToSlash(rel)
-		status := paperStatus[relSlash]
-		if status == "" {
-			status = rootStatus[relSlash]
-		}
-		entries = append(entries, ProjectTreeEntry{
-			Path:      relSlash,
-			Kind:      classifyProjectFileKind(relSlash),
-			GitStatus: status,
-		})
 		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
+	}
+
+	if err := walkFolder(projectDir, "", 0); err != nil {
+		return nil, err
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -611,8 +668,35 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 type updateProjectRequest struct {
 	Name           *string  `json:"name"`
 	OverleafRemote *string  `json:"overleaf_remote"`
+	OverleafToken  *string  `json:"overleaf_token"`
 	LinkedPaperIDs []string `json:"linked_paper_ids"`
 	LinkAllPapers  *bool    `json:"link_all_papers"`
+}
+
+func syncOverleafRemoteIntoPaperDir(ctx context.Context, paperDir, remoteURL, username string) (string, error) {
+	initGitRepoIfNeeded(ctx, paperDir, username)
+	if _, err := runGitCommand(ctx, paperDir, "remote", "set-url", "origin", remoteURL); err != nil {
+		_, _ = runGitCommand(ctx, paperDir, "remote", "add", "origin", remoteURL)
+	}
+	if _, err := runGitCommand(ctx, paperDir, "fetch", "origin"); err != nil {
+		sshURL := githubHTTPSFallbackToSSH(remoteURL)
+		if sshURL == "" {
+			return remoteURL, err
+		}
+		_, _ = runGitCommand(ctx, paperDir, "remote", "set-url", "origin", sshURL)
+		if _, sshErr := runGitCommand(ctx, paperDir, "fetch", "origin"); sshErr != nil {
+			return remoteURL, err
+		}
+		remoteURL = sshURL
+	}
+
+	for _, branch := range []string{"master", "main"} {
+		if _, err := runGitCommand(ctx, paperDir, "rev-parse", "--verify", "origin/"+branch); err == nil {
+			_, _ = runGitCommand(ctx, paperDir, "checkout", "-B", branch, "origin/"+branch)
+			break
+		}
+	}
+	return remoteURL, nil
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
@@ -644,19 +728,27 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		cfg.LinkAllPapers = *req.LinkAllPapers
 	}
 	if req.OverleafRemote != nil {
-		remote := strings.TrimSpace(*req.OverleafRemote)
+		token := ""
+		if req.OverleafToken != nil {
+			token = *req.OverleafToken
+		}
+		remote := normalizeOverleafRemote(*req.OverleafRemote, token)
 		if remote != "" {
 			if err := validateRemoteURL(remote); err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			paperDir := filepath.Join(projDir, "paper")
-			initGitRepoIfNeeded(r.Context(), paperDir, claims.Username)
-			if _, err := runGitCommand(r.Context(), paperDir, "remote", "set-url", "origin", remote); err != nil {
-				_, _ = runGitCommand(r.Context(), paperDir, "remote", "add", "origin", remote)
+			resolvedRemote, fetchErr := syncOverleafRemoteIntoPaperDir(r.Context(), paperDir, remote, claims.Username)
+			cfg.OverleafRemote = resolvedRemote
+			_ = writeProjectConfig(projDir, cfg)
+			if fetchErr != nil {
+				writeError(w, http.StatusBadGateway, fmt.Sprintf("Failed to fetch remote (if using git.overleaf.com, provide your Overleaf Git Token 'olp_...' or link via GitHub): %v", fetchErr))
+				return
 			}
+		} else {
+			cfg.OverleafRemote = ""
 		}
-		cfg.OverleafRemote = remote
 	}
 
 	if err := writeProjectConfig(projDir, cfg); err != nil {

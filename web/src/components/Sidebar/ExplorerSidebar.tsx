@@ -82,9 +82,10 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const [showNewPdfFolder, setShowNewPdfFolder] = useState(false);
   const [newPdfFolderName, setNewPdfFolderName] = useState('');
 
-  // Project Folders state ('refs' collapsed by default so 230+ ref files don't clutter!)
+  // Project Folders state ('refs' and 'code' collapsed by default)
   const [collapsedProjDirs, setCollapsedProjDirs] = useState<Record<string, boolean>>({
     refs: true,
+    code: true,
     '.gitignore': true,
   });
 
@@ -94,6 +95,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
 
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [settingsRemote, setSettingsRemote] = useState('');
+  const [settingsToken, setSettingsToken] = useState('');
   const [syncingGit, setSyncingGit] = useState(false);
 
   const [newFileKind, setNewFileKind] = useState<
@@ -137,10 +139,10 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     };
   }, [filteredPapers, customPdfFolders]);
 
-  // Group project files by top-level directory (paper/, notes/, diagrams/, refs/, etc.)
+  // Group project files by top-level directory (paper/, code/, notes/, diagrams/, refs/)
   const groupedProjectTree = useMemo(() => {
     const groups = new Map<string, ProjectTreeEntry[]>();
-    for (const name of ['paper', 'notes', 'diagrams', 'refs']) {
+    for (const name of ['paper', 'code', 'notes', 'diagrams', 'refs']) {
       groups.set(name, []);
     }
     const rootFiles: ProjectTreeEntry[] = [];
@@ -313,12 +315,14 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     try {
       await api.updateProject(activeProject.id, {
         overleaf_remote: settingsRemote.trim(),
+        overleaf_token: settingsToken.trim(),
       });
       setShowProjectSettings(false);
+      setSettingsToken('');
       await onProjectsChanged();
-      onStatusMessage('Updated Overleaf GitHub remote and regenerated AGENTS.md + references.bib.');
+      onStatusMessage('Pulled Overleaf remote into paper/ and regenerated references.bib.');
     } catch (err) {
-      onStatusMessage(`Project update failed: ${err instanceof Error ? err.message : String(err)}`);
+      onStatusMessage(`Overleaf sync failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSyncingGit(false);
     }
@@ -713,16 +717,22 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
 
         {showProjectSettings && activeProject && (
           <form className="inline-bib-drawer" onSubmit={handleSaveProjectSettings}>
-            <strong>Overleaf GitHub Remote (paper/)</strong>
+            <strong>Overleaf / GitHub Remote (paper/)</strong>
             <input
               type="text"
-              placeholder="git@github.com:user/overleaf-paper.git"
+              placeholder="https://git@git.overleaf.com/... or git@github.com:..."
               value={settingsRemote}
               onChange={(e) => setSettingsRemote(e.target.value)}
             />
+            <input
+              type="password"
+              placeholder="Overleaf Git Token (olp_... if using git.overleaf.com)"
+              value={settingsToken}
+              onChange={(e) => setSettingsToken(e.target.value)}
+            />
             <div className="row-gap">
               <button type="submit" className="btn-primary btn-tiny" disabled={syncingGit}>
-                Save Remote
+                {syncingGit ? 'Pulling…' : 'Save & Pull Remote'}
               </button>
               <button
                 type="button"
