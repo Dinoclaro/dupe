@@ -2,11 +2,88 @@
 
 `dupe` (Dino's Ultimate Paper Editor) is a self-hosted, VS Code-style academic paper studio. It combines a SHA-256 deduplicated PDF library, automatic BibTeX extraction, an Overleaf-GitHub repository bridge, an embedded Draw.io diagram studio with LaTeX math support, a CodeMirror 6 LaTeX editor with live preview, and a full-page server PTY terminal.
 
-## Accessing `dupe` from Another Laptop
+## Exposing `dupe.ing` with Cloudflare Tunnel and Zero Trust
+
+Cloudflare Tunnel connects the server to `https://dupe.ing` without inbound firewall ports or client VPN software.
+
+### 1. Activate `dupe.ing` in Cloudflare
+
+1. Open `https://dash.cloudflare.com` and click **Add a domain**.
+2. Enter `dupe.ing` and select the **Free** plan.
+3. Copy the two Cloudflare nameservers from the dashboard.
+4. Set those two nameservers at your domain registrar.
+5. Wait until Cloudflare marks `dupe.ing` as **Active**.
+
+### 2. Install `cloudflared` on Ubuntu 24.04
+
+```bash
+sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt-get update && sudo apt-get install -y cloudflared
+```
+
+### 3. Authenticate and Create the Tunnel
+
+1. Authenticate `cloudflared` with your Cloudflare account:
+   ```bash
+   cloudflared tunnel login
+   ```
+   Open the printed URL in a browser and authorize `dupe.ing`.
+2. Create the tunnel:
+   ```bash
+   cloudflared tunnel create dupe-home
+   ```
+   Record the `<TUNNEL-UUID>` and the credentials path in `~/.cloudflared/<TUNNEL-UUID>.json`.
+
+### 4. Route DNS and Configure Ingress
+
+1. Route `dupe.ing` and `www.dupe.ing` to the tunnel:
+   ```bash
+   cloudflared tunnel route dns dupe-home dupe.ing
+   cloudflared tunnel route dns dupe-home www.dupe.ing
+   ```
+2. Create `~/.cloudflared/config.yml`:
+   ```yaml
+   tunnel: <TUNNEL-UUID>
+   credentials-file: /home/dino/.cloudflared/<TUNNEL-UUID>.json
+
+   ingress:
+     - hostname: dupe.ing
+       service: http://127.0.0.1:8080
+     - hostname: www.dupe.ing
+       service: http://127.0.0.1:8080
+     - service: http_status:404
+   ```
+
+### 5. Run `cloudflared` as a System Service
+
+Test the tunnel first:
+
+```bash
+cloudflared tunnel run dupe-home
+```
+
+Install and start the background service:
+
+```bash
+sudo cloudflared --config /home/dino/.cloudflared/config.yml service install
+sudo systemctl enable --now cloudflared
+```
+
+### 6. Enable Cloudflare Zero Trust Access
+
+1. Open `https://one.dash.cloudflare.com`.
+2. Navigate to **Access** -> **Applications** -> **Add an application** -> **Self-hosted**.
+3. Set **Application name** to `dupe` and **Application domain** to `dupe.ing`.
+4. Create an **Allow** policy and add your personal Gmail and work email under **Include** -> **Emails**.
+5. Save the application. Cloudflare challenges every visitor before forwarding traffic to the server.
+
+## Accessing `dupe` on a Local Network or Tailscale
 
 The `dupe` server and PostgreSQL 16 database run persistently on `dinolaptop`.
 
-### 1. Access via Tailscale (Recommended from Anywhere)
+### 1. Access via Tailscale (Personal Devices)
 
 Ensure Tailscale is connected on your second laptop (`dinos-macbook-pro`), then open your browser to:
 
@@ -78,7 +155,12 @@ cd /home/dino/dupe && docker compose up -d
 ## TODO
 
 - Decide the database for the local-mode library cache. SQLite is the current choice. It means the library schema runs on PostgreSQL and SQLite. Postgres in Docker on the laptop is the alternative.
-- Hide the terminal now. Any user who can log in gets a shell as the server user.
-- Add a "New project" action to the frontend. It creates a folder with the project layout from `ARCHITECTURE.md`: `paper/`, `code/`, `notes/`, `diagrams/`, and `refs/`.
-- Let the user link an Overleaf GitHub repository as `paper/` in the project settings.
-- Save new notes in `notes/` and new diagrams in `diagrams/`.
+- Add `--mode local|hosted` and bind the server to `127.0.0.1:8080` by default.
+- Disable the PTY terminal in hosted mode and verify WebSocket `Origin` headers in local mode.
+- Enforce a GitHub remote URL allowlist (`https://github.com/...` and `git@github.com:...`) and `GIT_ALLOW_PROTOCOL=https:ssh` on Git commands.
+- Add login rate limiting and reject the default development `JWT_SECRET` in hosted mode.
+- Add a "New project" action and a top-bar project switcher (`?project=<slug>`) to support multiple projects across browser windows.
+- Store per-project Git identity (`git_user_name`, `git_user_email`) and sync policy (`local_only` or `synced`) in `.dupe/project.json`.
+- Let the user link an Overleaf GitHub repository as `paper/` for both new and existing projects.
+- Support nested Obsidian-style Markdown folders in `notes/`.
+- Save Draw.io diagram sources in `diagrams/<name>.drawio`, export SVGs to `paper/figures/<name>.svg`, and sync notes and diagrams with the server.
