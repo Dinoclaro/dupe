@@ -136,12 +136,15 @@ cd /home/dino/dupe/backend
 
 ## Server Service Management
 
-`dupe` runs as a user `systemd` service (`~/.config/systemd/user/dupe.service`) backed by `dupe_postgres` in Docker.
+`dupe` runs as two user `systemd` services (`dupe.service` and `dupe-tunnel.service`) backed by `dupe_postgres` in Docker.
 
 ```bash
-# Check server status and logs
-systemctl --user status dupe.service
-journalctl --user -u dupe.service -f
+# Check server and Cloudflare Tunnel status
+systemctl --user status dupe.service dupe-tunnel.service
+journalctl --user -u dupe.service -u dupe-tunnel.service -f
+
+# Re-run Cloudflare Tunnel provisioning if needed
+./scripts/setup_cloudflare_tunnel.sh dupe.ing
 
 # Restart the server after code updates
 cd /home/dino/dupe/web && npm run build
