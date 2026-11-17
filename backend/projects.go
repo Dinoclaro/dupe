@@ -398,26 +398,35 @@ func (s *Server) createProjectOnDisk(
 		return ProjectConfig{}, "", err
 	}
 
+	hasTexFile := false
+	if dirEntries, err := os.ReadDir(paperDir); err == nil {
+		for _, de := range dirEntries {
+			if !de.IsDir() && strings.HasSuffix(de.Name(), ".tex") {
+				hasTexFile = true
+				break
+			}
+		}
+	}
 	mainTexPath := filepath.Join(paperDir, "main.tex")
-	if _, err := os.Stat(mainTexPath); errors.Is(err, os.ErrNotExist) {
-		defaultTex := fmt.Sprintf(`\\documentclass{article}
-\\title{%s}
-\\author{%s}
-\\date{\\today}
+	if !hasTexFile {
+		defaultTex := fmt.Sprintf(`\documentclass{article}
+\title{%s}
+\author{%s}
+\date{\today}
 
-\\begin{document}
-\\maketitle
+\begin{document}
+\maketitle
 
-\\begin{abstract}
+\begin{abstract}
 Manuscript managed in dupe with automatic BibTeX and Overleaf Git synchronization.
-\\end{abstract}
+\end{abstract}
 
-\\section{Introduction}
-Type @ or \\cite{} to insert citations from your PDF library.
+\section{Introduction}
+Type @ or \cite{} to insert citations from your PDF library.
 
-\\bibliographystyle{plain}
-\\bibliography{references}
-\\end{document}
+\bibliographystyle{plain}
+\bibliography{references}
+\end{document}
 `, cfg.Name, username)
 		_ = os.WriteFile(mainTexPath, []byte(defaultTex), 0o644)
 	}
@@ -1006,4 +1015,233 @@ func (s *Server) handleSyncProject(w http.ResponseWriter, r *http.Request) {
 		"push_warning":   pushWarning,
 		"last_synced_at": nowStr,
 	})
+}
+
+type LatexDiagnostic struct {
+	Level   string `json:"level"`
+	File    string `json:"file"`
+	Line    int    `json:"line,omitempty"`
+	Message string `json:"message"`
+}
+
+type CompileProjectResponse struct {
+	Success      bool              `json:"success"`
+	RootTex      string            `json:"root_tex"`
+	PdfAvailable bool              `json:"pdf_available"`
+	DurationMs   int64             `json:"duration_ms"`
+	Errors       []LatexDiagnostic `json:"errors"`
+	Warnings     []LatexDiagnostic `json:"warnings"`
+	RawLog       string            `json:"raw_log"`
+}
+
+var tectonicDiagRegex = regexp.MustCompile(`^(error|warning):\s*(?:([^:\s]+\.[a-zA-Z0-9]+|[a-zA-Z0-9_/-]+):(\d+):)?\s*(.+)$`)
+
+func parseTectonicDiagnostics(rawLog string) ([]LatexDiagnostic, []LatexDiagnostic) {
+	errorsList := make([]LatexDiagnostic, 0)
+	warningsList := make([]LatexDiagnostic, 0)
+	seen := make(map[string]bool)
+
+	for _, rawLine := range strings.Split(rawLog, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		m := tectonicDiagRegex.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		level := m[1]
+		file := strings.TrimSpace(m[2])
+		lineNum := 0
+		if m[3] != "" {
+			_, _ = fmt.Sscanf(m[3], "%d", &lineNum)
+		}
+		msg := strings.TrimSpace(m[4])
+		if msg == "" || strings.HasPrefix(msg, "warnings were issued by the TeX engine") || strings.HasPrefix(msg, "TeX rerun seems needed") {
+			continue
+		}
+		if file != "" && !strings.Contains(file, ".") {
+			file += ".tex"
+		}
+		dedupKey := fmt.Sprintf("%s|%s|%d|%s", level, file, lineNum, msg)
+		if seen[dedupKey] {
+			continue
+		}
+		seen[dedupKey] = true
+
+		diag := LatexDiagnostic{
+			Level:   level,
+			File:    file,
+			Line:    lineNum,
+			Message: msg,
+		}
+		if level == "error" {
+			errorsList = append(errorsList, diag)
+		} else {
+			warningsList = append(warningsList, diag)
+		}
+	}
+	return errorsList, warningsList
+}
+
+func findProjectRootTex(paperDir, preferredRel string) string {
+	cleanedPref := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(preferredRel)), "paper/")
+	if cleanedPref != "" && strings.HasSuffix(cleanedPref, ".tex") {
+		if data, err := os.ReadFile(filepath.Join(paperDir, cleanedPref)); err == nil {
+			if strings.Contains(string(data), "\\documentclass") {
+				return cleanedPref
+			}
+		}
+	}
+
+	entries, err := os.ReadDir(paperDir)
+	if err != nil {
+		return "main.tex"
+	}
+	var fallbackTex string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tex") {
+			continue
+		}
+		if fallbackTex == "" {
+			fallbackTex = e.Name()
+		}
+		data, readErr := os.ReadFile(filepath.Join(paperDir, e.Name()))
+		if readErr == nil && strings.Contains(string(data), "\\documentclass") {
+			if e.Name() != "main.tex" {
+				return e.Name()
+			}
+			fallbackTex = e.Name()
+		}
+	}
+	if fallbackTex != "" {
+		return fallbackTex
+	}
+	return "main.tex"
+}
+
+func resolveTectonicBinary() string {
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "tectonic"),
+		"/home/dinoclaro/.local/bin/tectonic",
+		"/home/dino/.local/bin/tectonic",
+		"/home/linuxbrew/.linuxbrew/bin/tectonic",
+		"tectonic",
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return "tectonic"
+}
+
+type compileProjectRequest struct {
+	Target string `json:"target"`
+}
+
+func (s *Server) handleCompileProject(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	cfg, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var req compileProjectRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req)
+	}
+
+	_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
+
+	paperDir := filepath.Join(projDir, "paper")
+	rootTexName := findProjectRootTex(paperDir, req.Target)
+	rootTexPath := filepath.Join(paperDir, rootTexName)
+	if _, err := os.Stat(rootTexPath); errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("root LaTeX file %q not found", rootTexName))
+		return
+	}
+
+	started := time.Now()
+	ctxTimeout, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	tectonicBin := resolveTectonicBinary()
+	cmd := exec.CommandContext(ctxTimeout, tectonicBin, "-X", "compile", rootTexName)
+	cmd.Dir = paperDir
+	var combinedOut bytes.Buffer
+	cmd.Stdout = &combinedOut
+	cmd.Stderr = &combinedOut
+
+	runErr := cmd.Run()
+	durationMs := time.Since(started).Milliseconds()
+	rawLog := combinedOut.String()
+	errs, warns := parseTectonicDiagnostics(rawLog)
+
+	pdfStem := strings.TrimSuffix(rootTexName, filepath.Ext(rootTexName))
+	pdfPath := filepath.Join(paperDir, pdfStem+".pdf")
+	_, pdfStatErr := os.Stat(pdfPath)
+	pdfAvailable := pdfStatErr == nil
+
+	if runErr != nil && len(errs) == 0 {
+		errs = append(errs, LatexDiagnostic{
+			Level:   "error",
+			File:    rootTexName,
+			Message: fmt.Sprintf("LaTeX compiler exited with error: %v", runErr),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, CompileProjectResponse{
+		Success:      runErr == nil && pdfAvailable,
+		RootTex:      "paper/" + rootTexName,
+		PdfAvailable: pdfAvailable,
+		DurationMs:   durationMs,
+		Errors:       errs,
+		Warnings:     warns,
+		RawLog:       rawLog,
+	})
+}
+
+func (s *Server) handleStreamCompiledPDF(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	_, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	paperDir := filepath.Join(projDir, "paper")
+	rootTexName := findProjectRootTex(paperDir, r.URL.Query().Get("target"))
+	pdfStem := strings.TrimSuffix(rootTexName, filepath.Ext(rootTexName))
+	pdfPath := filepath.Join(paperDir, pdfStem+".pdf")
+
+	f, err := os.Open(pdfPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "compiled PDF not found; click Recompile first")
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	stat, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to stat compiled PDF")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", pdfStem+".pdf"))
+	http.ServeContent(w, r, pdfStem+".pdf", stat.ModTime(), f)
 }

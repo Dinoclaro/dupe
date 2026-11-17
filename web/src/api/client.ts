@@ -86,6 +86,23 @@ export interface ProjectSyncResponse {
   last_synced_at: string;
 }
 
+export interface LatexDiagnostic {
+  level: 'error' | 'warning';
+  file: string;
+  line?: number;
+  message: string;
+}
+
+export interface CompileProjectResponse {
+  success: boolean;
+  root_tex: string;
+  pdf_available: boolean;
+  duration_ms: number;
+  errors: LatexDiagnostic[];
+  warnings: LatexDiagnostic[];
+  raw_log: string;
+}
+
 export interface OutboxEntry {
   id: string;
   kind: 'paper_patch' | 'project_file';
@@ -444,6 +461,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ commit_message: commitMessage || '' }),
     });
+  },
+
+  async compileProject(id: string, target?: string): Promise<CompileProjectResponse> {
+    return apiFetch<CompileProjectResponse>(`/api/projects/${id}/compile`, {
+      method: 'POST',
+      body: JSON.stringify({ target: target || '' }),
+    });
+  },
+
+  compiledPdfUrl(id: string, target?: string, version?: number): string {
+    const params = new URLSearchParams();
+    const token = getStoredToken();
+    if (token) {
+      params.set('token', token);
+    }
+    if (target) {
+      params.set('target', target);
+    }
+    if (version !== undefined) {
+      params.set('v', String(version));
+    }
+    return `/api/projects/${id}/compiled.pdf?${params.toString()}`;
   },
 
   async flushOutbox(): Promise<number> {

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CompileProjectResponse,
   Paper,
   ProjectConfig,
   ProjectTreeEntry,
@@ -151,6 +152,9 @@ export const App: React.FC = () => {
   const [externalAgentEdits, setExternalAgentEdits] = useState<Record<string, boolean>>({});
   const [activeEditorPath, setActiveEditorPath] = useState<string>('paper/main.tex');
   const [savingSource, setSavingSource] = useState(false);
+  const [compileResult, setCompileResult] = useState<CompileProjectResponse | null>(null);
+  const [compilingPdf, setCompilingPdf] = useState(false);
+  const [pdfVersion, setPdfVersion] = useState(1);
 
   // Diagrams keyed by figure stem (e.g. 'architecture')
   const [diagramsXmlByStem, setDiagramsXmlByStem] = useState<Record<string, string>>({
@@ -290,6 +294,33 @@ export const App: React.FC = () => {
     return res.files;
   }, []);
 
+  const triggerProjectCompile = useCallback(
+    async (projectId: string, targetTex?: string) => {
+      setCompilingPdf(true);
+      try {
+        const res = await api.compileProject(projectId, targetTex);
+        setCompileResult(res);
+        setPdfVersion((v) => v + 1);
+        if (!res.success || res.errors.length > 0) {
+          setStatusMessage(
+            `LaTeX compile finished with ${res.errors.length} error(s) — check Logs tab.`,
+          );
+        } else {
+          setStatusMessage(
+            `Compiled ${res.root_tex} (${(res.duration_ms / 1000).toFixed(1)}s, ${res.warnings.length} warnings).`,
+          );
+        }
+      } catch (err) {
+        setStatusMessage(
+          `Compiler call failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        setCompilingPdf(false);
+      }
+    },
+    [],
+  );
+
   const loadProjects = useCallback(async () => {
     const list = await api.listProjects();
     setProjects(list);
@@ -301,10 +332,30 @@ export const App: React.FC = () => {
           : list[0].id;
       setActiveProjectId(chosenId);
       const files = await refreshProjectTree(chosenId);
-      const mainTexEntry = files.find((f) => f.path === 'paper/main.tex');
-      if (mainTexEntry) {
+      const preferredTex =
+        files.find(
+          (f) =>
+            f.kind === 'tex' &&
+            f.path.startsWith('paper/') &&
+            f.path !== 'paper/main.tex' &&
+            (f.path.includes('conference') || f.path.includes('paper') || f.path.includes('root')),
+        ) ||
+        files.find((f) => f.path === 'paper/main.tex') ||
+        files.find((f) => f.kind === 'tex');
+
+      if (preferredTex) {
         try {
-          const payload = await api.readProjectFile(chosenId, 'paper/main.tex');
+          const payload = await api.readProjectFile(chosenId, preferredTex.path);
+          setActiveEditorPath(payload.path);
+          setLeftTabs([
+            {
+              id: `file:${payload.path}`,
+              title: payload.path,
+              kind: 'tex',
+              filePath: payload.path,
+            },
+          ]);
+          setActiveLeftTabId(`file:${payload.path}`);
           setFileBuffers((prev) => {
             const next = { ...prev, [payload.path]: payload.content };
             saveWorkspaceSnapshot({ fileBuffers: next });
@@ -315,8 +366,9 @@ export const App: React.FC = () => {
           // keep fallback buffer
         }
       }
+      void triggerProjectCompile(chosenId, preferredTex?.path);
     }
-  }, [activeProjectId, refreshProjectTree]);
+  }, [activeProjectId, refreshProjectTree, triggerProjectCompile]);
 
   const loadInitialWorkspace = useCallback(async () => {
     await Promise.all([loadPapers(), loadProjects()]);
@@ -658,7 +710,12 @@ export const App: React.FC = () => {
       setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
       setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
       await refreshProjectTree(activeProject.id);
-      setStatusMessage(`Saved ${filePath}.`);
+      if (filePath.endsWith('.tex') || filePath.endsWith('.bib')) {
+        setStatusMessage(`Saved ${filePath} — recompiling PDF…`);
+        void triggerProjectCompile(activeProject.id, filePath);
+      } else {
+        setStatusMessage(`Saved ${filePath}.`);
+      }
     } catch {
       const q = enqueueOutboxEntry({
         id: `file:${activeProject.id}:${filePath}`,
@@ -867,8 +924,20 @@ export const App: React.FC = () => {
       return (
         <CompiledPreviewPane
           key={tab.id}
+          projectId={activeProject?.id || null}
+          compileResult={compileResult}
+          compiling={compilingPdf}
+          pdfVersion={pdfVersion}
           compiled={compiled}
           sourceLabel={activeEditorPath}
+          onTriggerCompile={async () => {
+            if (activeProject) {
+              await triggerProjectCompile(activeProject.id, activeEditorPath);
+            }
+          }}
+          onJumpToFile={(relPath) => {
+            void handleOpenProjectFile({ path: relPath, kind: 'tex' }, false);
+          }}
         />
       );
     }
