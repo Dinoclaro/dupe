@@ -21,6 +21,7 @@ import {
   parseGitHubOwnerRepo,
   saveWorkspaceSnapshot,
 } from '../api/client';
+import { buildFolderTree } from '../components/Sidebar/ExplorerSidebar';
 
 const SAMPLE_PAPERS: Paper[] = [
   {
@@ -200,5 +201,22 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     const snap = loadWorkspaceSnapshot();
     expect(snap.papers).toHaveLength(2);
     expect(snap.fileBuffers?.['paper/main.tex']).toBe('\\section{Cached}');
+  });
+
+  it('builds a recursive multi-level folder tree from project file entries', () => {
+    const root = buildFolderTree([
+      { path: 'code/mbrl_soft/source/train.py', kind: 'other', git_status: '' },
+      { path: 'code/mbrl_soft/README.md', kind: 'markdown', git_status: '' },
+      { path: 'code/rsl_rl/rsl_rl/runners/on_policy_runner.py', kind: 'other', git_status: 'M' },
+    ]);
+
+    const codeDir = root.childrenDirs.find((d) => d.name === 'code');
+    expect(codeDir).toBeDefined();
+    expect(codeDir!.childrenDirs.map((d) => d.name)).toEqual(['mbrl_soft', 'rsl_rl']);
+
+    const mbrlDir = codeDir!.childrenDirs.find((d) => d.name === 'mbrl_soft')!;
+    expect(mbrlDir.files.map((f) => f.path)).toEqual(['code/mbrl_soft/README.md']);
+    const sourceDir = mbrlDir.childrenDirs.find((d) => d.name === 'source')!;
+    expect(sourceDir.files.map((f) => f.path)).toEqual(['code/mbrl_soft/source/train.py']);
   });
 });

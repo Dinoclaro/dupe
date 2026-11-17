@@ -131,6 +131,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/sync", s.requireAuth(s.handleSyncProject))
 	mux.HandleFunc("POST /api/projects/{id}/compile", s.requireAuth(s.handleCompileProject))
 	mux.HandleFunc("GET /api/projects/{id}/compiled.pdf", s.requireAuth(s.handleStreamCompiledPDF))
+	mux.HandleFunc("GET /api/projects/{id}/search", s.requireAuth(s.handleSearchProject))
 
 	mux.HandleFunc("GET /api/library/changes", s.requireAuth(s.handleLibraryChanges))
 	mux.HandleFunc("POST /api/library/sync", s.requireAuth(s.handleLibrarySync))

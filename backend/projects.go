@@ -1245,3 +1245,137 @@ func (s *Server) handleStreamCompiledPDF(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", pdfStem+".pdf"))
 	http.ServeContent(w, r, pdfStem+".pdf", stat.ModTime(), f)
 }
+
+type SearchMatchItem struct {
+	Category string `json:"category"` // "pdf" | "latex" | "notes" | "code"
+	Path     string `json:"path"`
+	Title    string `json:"title"`
+	PaperID  string `json:"paper_id,omitempty"`
+	BibKey   string `json:"bibtex_key,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Snippet  string `json:"snippet"`
+	Kind     string `json:"kind"`
+}
+
+func categorizeProjectPath(relSlash string) string {
+	switch {
+	case strings.HasPrefix(relSlash, "paper/"):
+		return "latex"
+	case strings.HasPrefix(relSlash, "code/"):
+		return "code"
+	case strings.HasPrefix(relSlash, "notes/") || relSlash == "AGENTS.md":
+		return "notes"
+	case strings.HasPrefix(relSlash, "refs/"):
+		return "pdf"
+	default:
+		return "notes"
+	}
+}
+
+func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	cfg, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	rawQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(rawQuery) < 2 {
+		writeJSON(w, http.StatusOK, map[string]any{"results": []SearchMatchItem{}})
+		return
+	}
+	qLower := strings.ToLower(rawQuery)
+	results := make([]SearchMatchItem, 0, 60)
+	const maxResults = 120
+
+	// 1. Search PDF Library metadata (title, authors, bibtex_key, doi, tags)
+	papers, _ := s.queryLinkedPapersForProject(r.Context(), claims.UserID, cfg)
+	for _, p := range papers {
+		if len(results) >= maxResults {
+			break
+		}
+		haystack := strings.ToLower(p.Title + " " + p.Authors + " " + p.BibtexKey + " " + p.DOI + " " + strings.Join(p.Tags, " "))
+		if strings.Contains(haystack, qLower) {
+			yr := ""
+			if p.PublicationYear != nil {
+				yr = fmt.Sprintf(" (%d)", *p.PublicationYear)
+			}
+			results = append(results, SearchMatchItem{
+				Category: "pdf",
+				Path:     "pdf:" + p.ID,
+				Title:    p.Title,
+				PaperID:  p.ID,
+				BibKey:   p.BibtexKey,
+				Snippet:  fmt.Sprintf("@%s%s — %s", p.BibtexKey, yr, p.Authors),
+				Kind:     "pdf",
+			})
+		}
+	}
+
+	// 2. Search across Project Files (LaTeX in paper/, Notes in notes/, Code in code/)
+	treeEntries, _ := collectProjectTree(r.Context(), projDir)
+	for _, entry := range treeEntries {
+		if len(results) >= maxResults {
+			break
+		}
+		if strings.HasPrefix(entry.Path, "refs/text/") || entry.Path == "refs/index.json" {
+			continue
+		}
+		cat := categorizeProjectPath(entry.Path)
+		fileKind := entry.Kind
+
+		// Check filename match first
+		if strings.Contains(strings.ToLower(entry.Path), qLower) {
+			results = append(results, SearchMatchItem{
+				Category: cat,
+				Path:     entry.Path,
+				Title:    filepath.Base(entry.Path),
+				Snippet:  entry.Path,
+				Kind:     fileKind,
+			})
+		}
+
+		fullPath, joinErr := safeJoin(projDir, entry.Path)
+		if joinErr != nil {
+			continue
+		}
+		info, statErr := os.Stat(fullPath)
+		if statErr != nil || info.Size() > (2<<20) {
+			continue
+		}
+		rawBytes, readErr := os.ReadFile(fullPath)
+		if readErr != nil {
+			continue
+		}
+		lines := strings.Split(string(rawBytes), "\n")
+		matchesInFile := 0
+		for lineIdx, lineText := range lines {
+			if strings.Contains(strings.ToLower(lineText), qLower) {
+				snippet := strings.TrimSpace(lineText)
+				if len(snippet) > 140 {
+					snippet = snippet[:140] + "…"
+				}
+				results = append(results, SearchMatchItem{
+					Category: cat,
+					Path:     entry.Path,
+					Title:    filepath.Base(entry.Path),
+					Line:     lineIdx + 1,
+					Snippet:  snippet,
+					Kind:     fileKind,
+				})
+				matchesInFile++
+				if matchesInFile >= 5 || len(results) >= maxResults {
+					break
+				}
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}

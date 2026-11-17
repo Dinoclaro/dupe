@@ -1156,3 +1156,77 @@ textarea:focus {
   padding: 28px;
   text-align: center;
 }
+
+/* Sidebar Mode Switcher & Global Search */
+.sidebar-mode-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.sidebar-mode-btn {
+  flex: 1;
+  background: var(--bg-1);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.sidebar-mode-btn:hover {
+  color: var(--text);
+  border-color: #475569;
+}
+
+.sidebar-mode-btn.active {
+  background: var(--accent-soft);
+  color: #93c5fd;
+  border-color: var(--accent);
+}
+
+.search-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.tag-pill {
+  background: var(--bg-1);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.tag-pill:hover {
+  color: var(--text);
+  border-color: #475569;
+}
+
+.tag-pill.active {
+  background: var(--accent-soft);
+  color: #93c5fd;
+  border-color: var(--accent);
+}
+
+.search-hit-row {
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.search-hit-row:hover {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+}
+

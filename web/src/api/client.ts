@@ -103,6 +103,17 @@ export interface CompileProjectResponse {
   raw_log: string;
 }
 
+export interface SearchMatchItem {
+  category: 'pdf' | 'latex' | 'notes' | 'code';
+  path: string;
+  title: string;
+  paper_id?: string;
+  bibtex_key?: string;
+  line?: number;
+  snippet: string;
+  kind: ProjectTreeEntry['kind'] | 'pdf';
+}
+
 export interface OutboxEntry {
   id: string;
   kind: 'paper_patch' | 'project_file';
@@ -468,6 +479,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ target: target || '' }),
     });
+  },
+
+  async searchProject(id: string, query: string): Promise<SearchMatchItem[]> {
+    const res = await apiFetch<{ results: SearchMatchItem[] }>(
+      `/api/projects/${id}/search?q=${encodeURIComponent(query)}`,
+    );
+    return res.results || [];
   },
 
   compiledPdfUrl(id: string, target?: string, version?: number): string {
