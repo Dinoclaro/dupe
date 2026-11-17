@@ -17,6 +17,9 @@ import {
   clearOutboxQueue,
   enqueueOutboxEntry,
   getOutboxQueue,
+  loadWorkspaceSnapshot,
+  parseGitHubOwnerRepo,
+  saveWorkspaceSnapshot,
 } from '../api/client';
 
 const SAMPLE_PAPERS: Paper[] = [
@@ -178,5 +181,24 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     expect(res.missingKeys).toHaveLength(0);
     expect(res.html).toContain('<table class="md-table">');
     expect(res.html).toContain('vaswani2017attention');
+  });
+
+  it('parses GitHub remote URLs and persists workspace cache for server-down fallback', () => {
+    expect(parseGitHubOwnerRepo('git@github.com:Dinoclaro/overleaf-paper.git')).toEqual({
+      owner: 'Dinoclaro',
+      repo: 'overleaf-paper',
+    });
+    expect(parseGitHubOwnerRepo('https://github.com/Dinoclaro/overleaf-paper.git')).toEqual({
+      owner: 'Dinoclaro',
+      repo: 'overleaf-paper',
+    });
+
+    saveWorkspaceSnapshot({
+      papers: SAMPLE_PAPERS,
+      fileBuffers: { 'paper/main.tex': '\\section{Cached}' },
+    });
+    const snap = loadWorkspaceSnapshot();
+    expect(snap.papers).toHaveLength(2);
+    expect(snap.fileBuffers?.['paper/main.tex']).toBe('\\section{Cached}');
   });
 });

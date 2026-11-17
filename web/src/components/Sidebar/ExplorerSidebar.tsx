@@ -4,6 +4,8 @@ import {
   ProjectConfig,
   ProjectTreeEntry,
   api,
+  getStoredGitHubPat,
+  setStoredGitHubPat,
 } from '../../api/client';
 
 interface ExplorerSidebarProps {
@@ -19,6 +21,7 @@ interface ExplorerSidebarProps {
   onOpenCompiledPreview: (inSplit: boolean) => void;
   onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
   onSyncProject: () => Promise<void>;
+  onExportOverleafBundle: () => void;
   onInsertCitation: (bibtexKey: string) => void;
   onPapersChanged: () => Promise<void>;
   onStatusMessage: (msg: string) => void;
@@ -61,6 +64,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   onOpenCompiledPreview,
   onCreateProjectFile,
   onSyncProject,
+  onExportOverleafBundle,
   onInsertCitation,
   onPapersChanged,
   onStatusMessage,
@@ -96,6 +100,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [settingsRemote, setSettingsRemote] = useState('');
   const [settingsToken, setSettingsToken] = useState('');
+  const [settingsGithubPat, setSettingsGithubPat] = useState(getStoredGitHubPat);
   const [syncingGit, setSyncingGit] = useState(false);
 
   const [newFileKind, setNewFileKind] = useState<
@@ -311,6 +316,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     if (!activeProject) {
       return;
     }
+    setStoredGitHubPat(settingsGithubPat);
     setSyncingGit(true);
     try {
       await api.updateProject(activeProject.id, {
@@ -730,9 +736,23 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
               value={settingsToken}
               onChange={(e) => setSettingsToken(e.target.value)}
             />
+            <input
+              type="password"
+              placeholder="GitHub PAT (ghp_... for direct browser push if server is down)"
+              value={settingsGithubPat}
+              onChange={(e) => setSettingsGithubPat(e.target.value)}
+            />
             <div className="row-gap">
               <button type="submit" className="btn-primary btn-tiny" disabled={syncingGit}>
                 {syncingGit ? 'Pulling…' : 'Save & Pull Remote'}
+              </button>
+              <button
+                type="button"
+                className="btn-tiny"
+                onClick={onExportOverleafBundle}
+                title="Download main.tex + references.bib directly from browser cache (works even if server is down)"
+              >
+                ⬇ Export .tex + .bib
               </button>
               <button
                 type="button"

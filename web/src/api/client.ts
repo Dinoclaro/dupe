@@ -98,6 +98,8 @@ export interface OutboxEntry {
 
 const TOKEN_STORAGE_KEY = 'dupe_jwt_token';
 const OUTBOX_STORAGE_KEY = 'dupe_sync_outbox_v1';
+const SNAPSHOT_STORAGE_KEY = 'dupe_workspace_snapshot_v1';
+const GITHUB_PAT_STORAGE_KEY = 'dupe_github_pat_v1';
 const memoryStorageFallback = new Map<string, string>();
 
 function storageGet(key: string): string | null {
@@ -157,6 +159,125 @@ export function enqueueOutboxEntry(entry: OutboxEntry): OutboxEntry[] {
 
 export function clearOutboxQueue(): void {
   storageRemove(OUTBOX_STORAGE_KEY);
+}
+
+export interface CachedWorkspaceSnapshot {
+  user?: User;
+  papers?: Paper[];
+  projects?: ProjectConfig[];
+  projectTree?: ProjectTreeEntry[];
+  fileBuffers?: Record<string, string>;
+}
+
+export function loadWorkspaceSnapshot(): CachedWorkspaceSnapshot {
+  try {
+    const raw = storageGet(SNAPSHOT_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    return JSON.parse(raw) as CachedWorkspaceSnapshot;
+  } catch {
+    return {};
+  }
+}
+
+export function saveWorkspaceSnapshot(patch: Partial<CachedWorkspaceSnapshot>): void {
+  try {
+    const current = loadWorkspaceSnapshot();
+    const merged: CachedWorkspaceSnapshot = {
+      ...current,
+      ...patch,
+      fileBuffers: {
+        ...(current.fileBuffers || {}),
+        ...(patch.fileBuffers || {}),
+      },
+    };
+    storageSet(SNAPSHOT_STORAGE_KEY, JSON.stringify(merged));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function getStoredGitHubPat(): string {
+  return storageGet(GITHUB_PAT_STORAGE_KEY) || '';
+}
+
+export function setStoredGitHubPat(token: string): void {
+  if (token.trim()) {
+    storageSet(GITHUB_PAT_STORAGE_KEY, token.trim());
+  } else {
+    storageRemove(GITHUB_PAT_STORAGE_KEY);
+  }
+}
+
+export function parseGitHubOwnerRepo(remoteUrl: string): { owner: string; repo: string } | null {
+  const trimmed = remoteUrl.trim().replace(/\.git$/i, '');
+  const sshMatch = trimmed.match(/git@github\.com:([^/]+)\/([^/\s]+)$/i);
+  if (sshMatch) {
+    return { owner: sshMatch[1], repo: sshMatch[2] };
+  }
+  const httpsMatch = trimmed.match(/github\.com\/([^/]+)\/([^/\s]+)$/i);
+  if (httpsMatch) {
+    return { owner: httpsMatch[1], repo: httpsMatch[2] };
+  }
+  return null;
+}
+
+export async function pushFilesToGitHubDirect(
+  remoteUrl: string,
+  githubPat: string,
+  files: Array<{ path: string; content: string }>,
+  commitMessage = 'chore(dupe): direct browser commit while home server offline',
+): Promise<number> {
+  const parsed = parseGitHubOwnerRepo(remoteUrl);
+  if (!parsed) {
+    throw new Error('Remote URL is not a GitHub repository (expected github.com/owner/repo)');
+  }
+  if (!githubPat.trim()) {
+    throw new Error('GitHub Personal Access Token (ghp_...) is required for direct browser push');
+  }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${githubPat.trim()}`,
+    Accept: 'application/vnd.github+json',
+    'Content-Type': 'application/json',
+  };
+
+  let pushedCount = 0;
+  for (const file of files) {
+    const cleanRel = file.path.replace(/^paper\//, '');
+    const apiUrl = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/contents/${cleanRel}`;
+
+    let existingSha: string | undefined;
+    const getResp = await fetch(apiUrl, { headers });
+    if (getResp.ok) {
+      const existingData = (await getResp.json()) as { sha?: string };
+      existingSha = existingData.sha;
+    }
+
+    const utf8Bytes = new TextEncoder().encode(file.content);
+    let binary = '';
+    utf8Bytes.forEach((b) => {
+      binary += String.fromCharCode(b);
+    });
+    const contentBase64 = btoa(binary);
+
+    const putResp = await fetch(apiUrl, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        message: commitMessage,
+        content: contentBase64,
+        ...(existingSha ? { sha: existingSha } : {}),
+      }),
+    });
+    if (!putResp.ok) {
+      const errText = await putResp.text();
+      throw new Error(`GitHub API error (${putResp.status}) on ${cleanRel}: ${errText.slice(0, 120)}`);
+    }
+    pushedCount++;
+  }
+  return pushedCount;
 }
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
