@@ -1,10 +1,12 @@
-import React, { useEffect, useRef } from 'react';
-import { EditorState } from '@codemirror/state';
+import React, { useEffect, useRef, useState } from 'react';
+import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { autocompletion } from '@codemirror/autocomplete';
 import { StreamLanguage } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
+import { markdown } from '@codemirror/lang-markdown';
+import { unifiedMergeView } from '@codemirror/merge';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { Paper } from '../../api/client';
 import { createCitationCompletionSource } from './citationCompletion';
@@ -12,11 +14,13 @@ import { createCitationCompletionSource } from './citationCompletion';
 interface LatexEditorPaneProps {
   fileLabel: string;
   source: string;
+  headContent?: string;
   papers: Paper[];
   saving: boolean;
   readOnly?: boolean;
   onChangeSource: (next: string) => void;
   onSaveSource: () => Promise<void>;
+  onRevertToHead?: () => Promise<void>;
   onOpenPreviewSplit?: () => void;
   registerInsertSnippet: (fn: (snippet: string) => void) => void;
 }
@@ -24,11 +28,13 @@ interface LatexEditorPaneProps {
 export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   fileLabel,
   source,
+  headContent = '',
   papers,
   saving,
   readOnly = false,
   onChangeSource,
   onSaveSource,
+  onRevertToHead,
   onOpenPreviewSplit,
   registerInsertSnippet,
 }) => {
@@ -40,32 +46,60 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   const onChangeRef = useRef(onChangeSource);
   onChangeRef.current = onChangeSource;
 
+  const isModifiedFromHead = Boolean(headContent && headContent !== source);
+  const [diffEnabled, setDiffEnabled] = useState<boolean>(isModifiedFromHead);
+  const isMarkdown = fileLabel.endsWith('.md');
+
+  useEffect(() => {
+    if (headContent && headContent !== source) {
+      setDiffEnabled(true);
+    }
+  }, [fileLabel, headContent, source]);
+
   useEffect(() => {
     const container = editorContainerRef.current;
     if (!container) {
       return undefined;
     }
 
+    const langExt: Extension = isMarkdown
+      ? markdown()
+      : StreamLanguage.define(stex);
+
+    const extensions: Extension[] = [
+      lineNumbers(),
+      history(),
+      keymap.of([...defaultKeymap, ...historyKeymap]),
+      langExt,
+      oneDark,
+      EditorView.lineWrapping,
+      EditorState.readOnly.of(readOnly),
+      autocompletion({
+        override: [createCitationCompletionSource(() => papersRef.current, isMarkdown)],
+        activateOnTyping: true,
+      }),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          onChangeRef.current(update.state.doc.toString());
+        }
+      }),
+    ];
+
+    if (diffEnabled && headContent) {
+      extensions.push(
+        unifiedMergeView({
+          original: headContent,
+          highlightChanges: true,
+          gutter: true,
+          syntaxHighlightDeletions: true,
+          mergeControls: !readOnly,
+        }),
+      );
+    }
+
     const state = EditorState.create({
       doc: source,
-      extensions: [
-        lineNumbers(),
-        history(),
-        keymap.of([...defaultKeymap, ...historyKeymap]),
-        StreamLanguage.define(stex),
-        oneDark,
-        EditorView.lineWrapping,
-        EditorState.readOnly.of(readOnly),
-        autocompletion({
-          override: [createCitationCompletionSource(() => papersRef.current)],
-          activateOnTyping: true,
-        }),
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            onChangeRef.current(update.state.doc.toString());
-          }
-        }),
-      ],
+      extensions,
     });
 
     const view = new EditorView({
@@ -91,8 +125,9 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       view.destroy();
       editorViewRef.current = null;
     };
+    // Recreate editor when switching file, readOnly, or diff view
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readOnly]);
+  }, [fileLabel, readOnly, diffEnabled, headContent, isMarkdown]);
 
   useEffect(() => {
     const view = editorViewRef.current;
@@ -112,21 +147,48 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       <div className="editor-toolbar">
         <div className="editor-file-badge">
           <code>{fileLabel}</code>
+          {isModifiedFromHead && (
+            <span className="git-badge git-badge-m" title="Modified since last Git commit (HEAD)">
+              M · Modified
+            </span>
+          )}
           <span className="muted-hint">
             {readOnly
-              ? 'Auto-generated from PDF Library'
-              : 'Type @ or \\cite{ for BibTeX autocomplete'}
+              ? 'Generated by dupe'
+              : isMarkdown
+                ? 'Type @ or [[paper: for citation links'
+                : 'Type @ or \\cite{ for BibTeX autocomplete'}
           </span>
         </div>
         <div className="editor-actions">
+          {headContent && (
+            <button
+              type="button"
+              className={`btn-tiny ${diffEnabled ? 'active-btn' : ''}`}
+              onClick={() => setDiffEnabled((v) => !v)}
+              title="Toggle inline @codemirror/merge diff view against Git HEAD"
+            >
+              {diffEnabled ? '✓ Inline Diff vs HEAD' : 'Diff vs HEAD'}
+            </button>
+          )}
+          {isModifiedFromHead && onRevertToHead && !readOnly && (
+            <button
+              type="button"
+              className="btn-tiny danger"
+              onClick={() => void onRevertToHead()}
+              title="Discard uncommitted edits and restore Git HEAD version"
+            >
+              Revert File to HEAD
+            </button>
+          )}
           {onOpenPreviewSplit && (
             <button
               type="button"
               className="btn-tiny"
               onClick={onOpenPreviewSplit}
-              title="Open Compiled LaTeX Preview in Right Split"
+              title="Open Compiled Preview in Right Split"
             >
-              ◫ Open Compiled Preview
+              ◫ Open Preview
             </button>
           )}
           {!readOnly && (
@@ -136,7 +198,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
               disabled={saving}
               onClick={() => void onSaveSource()}
             >
-              {saving ? 'Saving...' : 'Save (Ctrl+S)'}
+              {saving ? 'Saving...' : 'Save'}
             </button>
           )}
         </div>

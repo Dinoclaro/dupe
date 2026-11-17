@@ -9,7 +9,12 @@ import {
   exportDiagramToSvg,
 } from '../components/Diagram/svgExport';
 import { normalizeRect } from '../components/Reader/PdfReaderPane';
-import { Paper } from '../api/client';
+import {
+  Paper,
+  clearOutboxQueue,
+  enqueueOutboxEntry,
+  getOutboxQueue,
+} from '../api/client';
 
 const SAMPLE_PAPERS: Paper[] = [
   {
@@ -58,6 +63,13 @@ describe('Phase 2 Writing Studio & Diagram Tool', () => {
       from: 39,
       query: 'he20',
       mode: 'cite',
+    });
+
+    const wikiTrigger = matchCitationTrigger('Notes on [[paper:vasw', 21);
+    expect(wikiTrigger).toEqual({
+      from: 9,
+      query: 'vasw',
+      mode: 'wikilink',
     });
   });
 
@@ -117,5 +129,29 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     const rawSvg = '<svg xmlns="http://www.w3.org/2000/svg"><text>$$f(x)$$</text></svg>';
     const dataUri = `data:image/svg+xml;base64,${btoa(rawSvg)}`;
     expect(decodeDrawioSvgDataUri(dataUri)).toBe(rawSvg);
+  });
+
+  it('queues and deduplicates offline outbox entries', () => {
+    clearOutboxQueue();
+    enqueueOutboxEntry({
+      id: 'file:proj1:paper/main.tex',
+      kind: 'project_file',
+      projectId: 'proj1',
+      path: 'paper/main.tex',
+      content: 'v1',
+      updatedAt: '2026-11-17T00:00:00Z',
+    });
+    enqueueOutboxEntry({
+      id: 'file:proj1:paper/main.tex',
+      kind: 'project_file',
+      projectId: 'proj1',
+      path: 'paper/main.tex',
+      content: 'v2',
+      updatedAt: '2026-11-17T00:01:00Z',
+    });
+    const queue = getOutboxQueue();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].content).toBe('v2');
+    clearOutboxQueue();
   });
 });

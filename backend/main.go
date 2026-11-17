@@ -32,6 +32,8 @@ type Server struct {
 	db            pgxQuerier
 	jwtSecret     []byte
 	storageDir    string
+	projectsDir   string
+	mode          string
 	pythonBin     string
 	extractScript string
 	webDistDir    string
@@ -78,7 +80,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "database unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	mode := s.mode
+	if mode == "" {
+		mode = "hosted"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+		"mode":   mode,
+	})
 }
 
 func (s *Server) routes() http.Handler {
@@ -111,6 +120,19 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/docs/{id}", s.requireAuth(s.handleUpdateDoc))
 	mux.HandleFunc("PUT /api/docs/{id}", s.requireAuth(s.handleUpdateDoc))
 	mux.HandleFunc("DELETE /api/docs/{id}", s.requireAuth(s.handleDeleteDoc))
+
+	mux.HandleFunc("GET /api/projects", s.requireAuth(s.handleListProjects))
+	mux.HandleFunc("POST /api/projects", s.requireAuth(s.handleCreateProject))
+	mux.HandleFunc("PATCH /api/projects/{id}", s.requireAuth(s.handleUpdateProject))
+	mux.HandleFunc("GET /api/projects/{id}/tree", s.requireAuth(s.handleGetProjectTree))
+	mux.HandleFunc("GET /api/projects/{id}/file", s.requireAuth(s.handleReadProjectFile))
+	mux.HandleFunc("PUT /api/projects/{id}/file", s.requireAuth(s.handleWriteProjectFile))
+	mux.HandleFunc("POST /api/projects/{id}/revert", s.requireAuth(s.handleRevertProjectFile))
+	mux.HandleFunc("POST /api/projects/{id}/sync", s.requireAuth(s.handleSyncProject))
+
+	mux.HandleFunc("GET /api/library/changes", s.requireAuth(s.handleLibraryChanges))
+	mux.HandleFunc("POST /api/library/sync", s.requireAuth(s.handleLibrarySync))
+	mux.HandleFunc("PUT /api/papers/blob/{sha256}", s.requireAuth(s.handleUploadPaperBlob))
 
 	if s.webDistDir != "" {
 		if info, err := os.Stat(s.webDistDir); err == nil && info.IsDir() {
@@ -146,7 +168,23 @@ func main() {
 	password := flag.String("password", "", "Password for --create-user")
 	colorHex := flag.String("color", "#FFEB3B", "Highlight color hex for --create-user")
 	addrFlag := flag.String("addr", "", "HTTP listen address (default 0.0.0.0:8080)")
-	flag.Parse()
+	modeFlag := flag.String("mode", "", "Runtime mode: local or hosted (default hosted)")
+	projectsFlag := flag.String("projects", "", "Projects root directory for local mode")
+	mcpFlag := flag.Bool("mcp", false, "Run Model Context Protocol (MCP) server over stdio")
+
+	args := os.Args[1:]
+	isMCPSubcmd := false
+	if len(args) > 0 && (args[0] == "mcp" || args[0] == "serve") {
+		if args[0] == "mcp" {
+			isMCPSubcmd = true
+		}
+		_ = flag.CommandLine.Parse(args[1:])
+	} else {
+		flag.Parse()
+	}
+	if *mcpFlag {
+		isMCPSubcmd = true
+	}
 
 	databaseURL := envOrDefault("DATABASE_URL", "postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable")
 
@@ -185,21 +223,57 @@ func main() {
 		os.Exit(1)
 	}
 
+	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
+	if mode == "" {
+		mode = strings.ToLower(envOrDefault("DUPE_MODE", "hosted"))
+	}
+	if mode != "local" && mode != "hosted" {
+		slog.Error("invalid mode; expected local or hosted", "mode", mode)
+		os.Exit(1)
+	}
+
+	projectsDir := strings.TrimSpace(*projectsFlag)
+	if projectsDir == "" {
+		projectsDir = envOrDefault("PROJECTS_DIR", filepath.Join(storageDir, "projects"))
+	}
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		slog.Error("failed to initialize projects directory", "error", err)
+		os.Exit(1)
+	}
+
+	if mode == "local" {
+		_ = createOrUpdateUser(ctx, pool, "local", "local-mode-implicit-user", "#FFEB3B")
+	}
+
 	pythonBin := envOrDefault("PYTHON_BIN", resolveDefaultPath("../.venv/bin/python3", "./.venv/bin/python3", "python3"))
 	extractScript := envOrDefault("EXTRACT_SCRIPT", resolveDefaultPath("../scripts/extract_meta.py", "./scripts/extract_meta.py"))
 	webDistDir := envOrDefault("WEB_DIST_DIR", resolveDefaultPath("../web/dist", "./web/dist"))
 	listenAddr := *addrFlag
 	if listenAddr == "" {
-		listenAddr = envOrDefault("ADDR", "0.0.0.0:8080")
+		defaultAddr := "0.0.0.0:8080"
+		if mode == "local" {
+			defaultAddr = "127.0.0.1:8080"
+		}
+		listenAddr = envOrDefault("ADDR", defaultAddr)
 	}
 
 	srv := &Server{
 		db:            pool,
 		jwtSecret:     []byte(jwtSecret),
 		storageDir:    storageDir,
+		projectsDir:   projectsDir,
+		mode:          mode,
 		pythonBin:     pythonBin,
 		extractScript: extractScript,
 		webDistDir:    webDistDir,
+	}
+
+	if isMCPSubcmd {
+		if err := srv.runMCPServer(ctx, 1, "dino", os.Stdin, os.Stdout); err != nil {
+			slog.Error("mcp server error", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	httpServer := &http.Server{

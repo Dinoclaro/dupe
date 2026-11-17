@@ -282,14 +282,33 @@ def extract_metadata(
     )
 
 
+def extract_full_markdown_text(pdf_path: Path) -> str:
+    if fitz is None:
+        raise RuntimeError("PyMuPDF (fitz) is required to read PDF files.")
+    doc = fitz.open(pdf_path)
+    try:
+        sections: list[str] = []
+        for idx, page in enumerate(doc):
+            page_text = page.get_text("text").strip()
+            if page_text:
+                sections.append(f"## Page {idx + 1}\n\n{page_text}")
+        return "\n\n".join(sections)
+    finally:
+        doc.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Extract metadata and BibTeX from a PDF file.")
     parser.add_argument("pdf_path", type=Path, help="Path to the PDF file")
     parser.add_argument("--filename", default="", help="Original uploaded filename")
     parser.add_argument("--offline", action="store_true", help="Skip external API lookups")
+    parser.add_argument("--extract-text", action="store_true", help="Print extracted Markdown full text")
     args = parser.parse_args(argv)
 
     try:
+        if args.extract_text:
+            print(extract_full_markdown_text(args.pdf_path))
+            return 0
         meta = extract_metadata(
             pdf_path=args.pdf_path,
             fallback_filename=args.filename,

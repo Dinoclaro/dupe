@@ -1,17 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  DocumentItem,
-  GitRepo,
   Paper,
+  ProjectConfig,
+  ProjectTreeEntry,
   User,
   api,
+  enqueueOutboxEntry,
+  getOutboxQueue,
   getStoredToken,
   setStoredToken,
 } from './api/client';
-import {
-  ExplorerSidebar,
-  ProjectFileItem,
-} from './components/Sidebar/ExplorerSidebar';
+import { ExplorerSidebar } from './components/Sidebar/ExplorerSidebar';
 import { PdfReaderPane } from './components/Reader/PdfReaderPane';
 import { LatexEditorPane } from './components/Editor/LatexEditorPane';
 import { CompiledPreviewPane } from './components/Editor/CompiledPreviewPane';
@@ -36,7 +35,7 @@ const DEFAULT_LATEX_TEMPLATE = `\\documentclass{article}
 \\maketitle
 
 \\begin{abstract}
-We present an academic research workspace that extracts BibTeX entries automatically from PDFs and synchronizes figures and citations with Overleaf via GitHub.
+We present a VS Code-style academic research workspace that extracts BibTeX entries automatically from PDFs and synchronizes figures, notes, and citations with Overleaf via GitHub.
 \\end{abstract}
 
 \\section{Introduction}
@@ -46,7 +45,7 @@ $$\\mathcal{L}(\\theta) = \\frac{1}{N}\\sum_{i=1}^{N} \\|f_\\theta(x_i) - y_i\\|
 \\section{System Architecture}
 \\begin{figure}[h]
   \\includegraphics[width=0.8\\linewidth]{figures/architecture.svg}
-  \\caption{System pipeline exported from the Diagram Canvas.}
+  \\caption{System pipeline exported from the Draw.io Diagram Canvas.}
 \\end{figure}
 
 \\bibliographystyle{plain}
@@ -115,7 +114,7 @@ const INITIAL_DIAGRAM_ELEMENTS: DiagramElement[] = [
 export interface StudioTab {
   id: string;
   title: string;
-  kind: 'pdf' | 'tex' | 'bib' | 'preview' | 'diagram';
+  kind: 'pdf' | 'tex' | 'bib' | 'markdown' | 'preview' | 'diagram' | 'json' | 'other';
   paperId?: string;
   filePath?: string;
 }
@@ -126,19 +125,25 @@ export const App: React.FC = () => {
   const [username, setUsername] = useState('dino');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [runtimeMode, setRuntimeMode] = useState<string>('hosted');
+
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true,
+  );
+  const [outboxCount, setOutboxCount] = useState<number>(() => getOutboxQueue().length);
 
   const [showSidebar, setShowSidebar] = useState(true);
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [repos, setRepos] = useState<GitRepo[]>([]);
-  const [activeRepoId, setActiveRepoId] = useState<string | null>(null);
-  const [repoFilePaths, setRepoFilePaths] = useState<string[]>([]);
-  const [docs, setDocs] = useState<DocumentItem[]>([]);
+  const [projects, setProjects] = useState<ProjectConfig[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projectTree, setProjectTree] = useState<ProjectTreeEntry[]>([]);
 
-  // File buffers keyed by relative path (e.g. 'main.tex')
+  // File buffers & Git HEAD snapshots keyed by relative project path (e.g. 'paper/main.tex')
   const [fileBuffers, setFileBuffers] = useState<Record<string, string>>({
-    'main.tex': DEFAULT_LATEX_TEMPLATE,
+    'paper/main.tex': DEFAULT_LATEX_TEMPLATE,
   });
-  const [activeTexPath, setActiveTexPath] = useState<string>('main.tex');
+  const [headBuffers, setHeadBuffers] = useState<Record<string, string>>({});
+  const [activeEditorPath, setActiveEditorPath] = useState<string>('paper/main.tex');
   const [savingSource, setSavingSource] = useState(false);
 
   // Diagrams keyed by figure stem (e.g. 'architecture')
@@ -150,16 +155,25 @@ export const App: React.FC = () => {
     'architecture.svg': exportDiagramToSvg(INITIAL_DIAGRAM_ELEMENTS),
   }));
 
-  // Editor groups: left = 0, right = 1
+  // VS Code Editor Groups (Left = Group 0, Right = Group 1)
   const [leftTabs, setLeftTabs] = useState<StudioTab[]>([
-    { id: 'file:main.tex', title: 'main.tex', kind: 'tex', filePath: 'main.tex' },
+    {
+      id: 'file:paper/main.tex',
+      title: 'paper/main.tex',
+      kind: 'tex',
+      filePath: 'paper/main.tex',
+    },
   ]);
-  const [activeLeftTabId, setActiveLeftTabId] = useState<string | null>('file:main.tex');
+  const [activeLeftTabId, setActiveLeftTabId] = useState<string | null>(
+    'file:paper/main.tex',
+  );
 
   const [rightTabs, setRightTabs] = useState<StudioTab[]>([
     { id: 'preview:compiled', title: 'Compiled Paper.pdf', kind: 'preview' },
   ]);
-  const [activeRightTabId, setActiveRightTabId] = useState<string | null>('preview:compiled');
+  const [activeRightTabId, setActiveRightTabId] = useState<string | null>(
+    'preview:compiled',
+  );
   const [focusedGroup, setFocusedGroup] = useState<0 | 1>(0);
   const [splitRatio, setSplitRatio] = useState(0.5);
 
@@ -170,7 +184,7 @@ export const App: React.FC = () => {
 
   const [statusMessage, setStatusMessage] = useState('Ready.');
 
-  const activeLatexSource = fileBuffers[activeTexPath] ?? DEFAULT_LATEX_TEMPLATE;
+  const activeSourceText = fileBuffers[activeEditorPath] ?? DEFAULT_LATEX_TEMPLATE;
 
   const [compiled, setCompiled] = useState<CompileResponse>(() =>
     compileLatexPreview({
@@ -181,7 +195,36 @@ export const App: React.FC = () => {
     }),
   );
 
-  // Set up Web Worker for live LaTeX compilation
+  const activeProject = useMemo(
+    () => projects.find((p) => p.id === activeProjectId) || projects[0] || null,
+    [projects, activeProjectId],
+  );
+
+  // Online / Offline & Outbox Synchronization
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      api
+        .flushOutbox()
+        .then((flushed) => {
+          setOutboxCount(getOutboxQueue().length);
+          if (flushed > 0) {
+            setStatusMessage(`Flushed ${flushed} queued offline change(s).`);
+          }
+        })
+        .catch(() => {});
+    };
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Set up Web Worker for live LaTeX/Markdown compilation
   useEffect(() => {
     try {
       const worker = new Worker(
@@ -206,7 +249,7 @@ export const App: React.FC = () => {
     const reqId = ++requestIdRef.current;
     const payload: CompileRequest = {
       requestId: reqId,
-      source: activeLatexSource,
+      source: activeSourceText,
       papers: papers.map((p) => ({
         bibtex_key: p.bibtex_key,
         title: p.title,
@@ -226,122 +269,78 @@ export const App: React.FC = () => {
     }, 100);
 
     return () => window.clearTimeout(timer);
-  }, [activeLatexSource, papers, figuresMap]);
-
-  const aggregatedBibtex = useMemo(() => {
-    if (papers.length === 0) {
-      return '% Upload PDFs in the PDF Library above to auto-generate BibTeX entries.\n';
-    }
-    return (
-      '% Auto-generated by dupe from your PDF Library\n\n' +
-      papers
-        .map((p) => p.bibtex_raw.trim())
-        .filter(Boolean)
-        .join('\n\n') +
-      '\n'
-    );
-  }, [papers]);
-
-  const projectFiles = useMemo<ProjectFileItem[]>(() => {
-    const map = new Map<string, ProjectFileItem>();
-    map.set('main.tex', { path: 'main.tex', kind: 'tex' });
-    map.set('references.bib', { path: 'references.bib', kind: 'bib' });
-
-    Object.keys(fileBuffers).forEach((p) => {
-      if (p.endsWith('.tex')) {
-        map.set(p, { path: p, kind: 'tex' });
-      } else if (p.endsWith('.bib')) {
-        map.set(p, { path: p, kind: 'bib' });
-      }
-    });
-
-    Object.keys(diagramsXmlByStem).forEach((stem) => {
-      const figPath = `figures/${stem}.drawio.svg`;
-      map.set(figPath, { path: figPath, kind: 'diagram' });
-    });
-
-    repoFilePaths.forEach((f) => {
-      if (f.endsWith('.tex')) {
-        map.set(f, { path: f, kind: 'tex' });
-      } else if (f.endsWith('.bib')) {
-        map.set(f, { path: f, kind: 'bib' });
-      } else if (f.endsWith('.drawio') || f.endsWith('.excalidraw') || f.endsWith('.svg')) {
-        map.set(f, { path: f, kind: 'diagram' });
-      } else {
-        map.set(f, { path: f, kind: 'other' });
-      }
-    });
-
-    return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
-  }, [fileBuffers, diagramsXmlByStem, repoFilePaths]);
+  }, [activeSourceText, papers, figuresMap]);
 
   const loadPapers = useCallback(async () => {
     const list = await api.listPapers();
     setPapers(list);
   }, []);
 
-  const loadRepos = useCallback(async () => {
-    const list = await api.listRepos();
-    setRepos(list);
-    setActiveRepoId((prev) => {
-      if (prev && list.some((r) => r.id === prev)) {
-        return prev;
-      }
-      return list[0]?.id || null;
-    });
+  const refreshProjectTree = useCallback(async (projectId: string) => {
+    const res = await api.getProjectTree(projectId);
+    setProjectTree(res.files);
+    return res.files;
   }, []);
 
-  const loadInitialWorkspace = useCallback(async () => {
-    await Promise.all([loadPapers(), loadRepos()]);
-    const allDocs = await api.listDocs();
-    setDocs(allDocs);
-    const nextBuffers: Record<string, string> = { 'main.tex': DEFAULT_LATEX_TEMPLATE };
-    allDocs.forEach((d) => {
-      if (d.doc_type === 'latex') {
-        nextBuffers[d.title] = d.content || DEFAULT_LATEX_TEMPLATE;
-      } else if (d.doc_type === 'diagram') {
-        const stem = d.title.replace(/\.(drawio|excalidraw|svg)$/i, '');
-        if (d.content.trim().startsWith('<svg') || d.content.trim().startsWith('<?xml') || d.content.trim().startsWith('<mxfile')) {
-          setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: d.content }));
-          if (d.content.includes('<svg')) {
-            setFiguresMap((prev) => ({
-              ...prev,
-              [`figures/${stem}.svg`]: d.content,
-              [`${stem}.svg`]: d.content,
-            }));
-          }
+  const loadProjects = useCallback(async () => {
+    const list = await api.listProjects();
+    setProjects(list);
+    if (list.length > 0) {
+      const chosenId =
+        activeProjectId && list.some((p) => p.id === activeProjectId)
+          ? activeProjectId
+          : list[0].id;
+      setActiveProjectId(chosenId);
+      const files = await refreshProjectTree(chosenId);
+      const mainTexEntry = files.find((f) => f.path === 'paper/main.tex');
+      if (mainTexEntry) {
+        try {
+          const payload = await api.readProjectFile(chosenId, 'paper/main.tex');
+          setFileBuffers((prev) => ({ ...prev, [payload.path]: payload.content }));
+          setHeadBuffers((prev) => ({ ...prev, [payload.path]: payload.head_content }));
+        } catch {
+          // keep fallback buffer
         }
       }
-    });
-    setFileBuffers(nextBuffers);
-  }, [loadPapers, loadRepos]);
+    }
+  }, [activeProjectId, refreshProjectTree]);
+
+  const loadInitialWorkspace = useCallback(async () => {
+    await Promise.all([loadPapers(), loadProjects()]);
+  }, [loadPapers, loadProjects]);
 
   useEffect(() => {
-    const token = getStoredToken();
-    if (!token) {
-      setAuthChecking(false);
-      return;
-    }
+    api
+      .health()
+      .then((h) => {
+        if (h.mode) {
+          setRuntimeMode(h.mode);
+        }
+      })
+      .catch(() => {});
+
     api
       .me()
       .then(async (u) => {
         setUser(u);
         await loadInitialWorkspace();
       })
-      .catch(() => setStoredToken(null))
+      .catch(() => {
+        if (getStoredToken()) {
+          setStoredToken(null);
+        }
+      })
       .finally(() => setAuthChecking(false));
   }, [loadInitialWorkspace]);
 
-  useEffect(() => {
-    if (!activeRepoId) {
-      setRepoFilePaths([]);
-      return;
+  const handleSelectProject = async (projectId: string) => {
+    setActiveProjectId(projectId);
+    const files = await refreshProjectTree(projectId);
+    const mainEntry = files.find((f) => f.path === 'paper/main.tex') || files[0];
+    if (mainEntry) {
+      await handleOpenProjectFile(mainEntry, false, projectId);
     }
-    api
-      .listRepoFiles(activeRepoId)
-      .then(setRepoFilePaths)
-      .catch(() => setRepoFilePaths([]));
-  }, [activeRepoId]);
+  };
 
   const openTabInGroup = (tab: StudioTab, groupIdx: 0 | 1) => {
     if (groupIdx === 0) {
@@ -382,7 +381,6 @@ export const App: React.FC = () => {
     openTabInGroup(tab, targetGroup);
   };
 
-  // Clicking a PDF opens it in the main viewer (or right split if requested)
   const handleOpenPaper = (paper: Paper, inSplit: boolean) => {
     const tab: StudioTab = {
       id: `pdf:${paper.id}`,
@@ -393,23 +391,34 @@ export const App: React.FC = () => {
     openTabInGroup(tab, inSplit ? 1 : 0);
   };
 
-  // Clicking a LaTeX source file opens the LaTeX code in Group 0 AND the Compiled Paper Preview in Group 1!
-  const handleOpenProjectFile = async (file: ProjectFileItem, inSplit: boolean) => {
-    if (activeRepoId && repoFilePaths.includes(file.path) && !(file.path in fileBuffers)) {
+  const handleOpenProjectFile = async (
+    file: ProjectTreeEntry,
+    inSplit: boolean,
+    overrideProjId?: string,
+  ) => {
+    const projId = overrideProjId || activeProject?.id;
+    if (projId) {
       try {
-        const res = await api.readRepoFile(activeRepoId, file.path);
-        setFileBuffers((prev) => ({ ...prev, [file.path]: res.content }));
+        const res = await api.readProjectFile(projId, file.path);
+        setFileBuffers((prev) => ({ ...prev, [res.path]: res.content }));
+        setHeadBuffers((prev) => ({ ...prev, [res.path]: res.head_content }));
+        if (file.kind === 'diagram' && res.content.trim().startsWith('<')) {
+          const stem = file.path
+            .replace(/^(diagrams|paper\/figures)\//, '')
+            .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
+          setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: res.content }));
+        }
       } catch {
-        // use local buffer if available
+        // use local buffer
       }
     }
 
-    if (file.kind === 'tex') {
-      setActiveTexPath(file.path);
-      const texTab: StudioTab = {
+    if (file.kind === 'tex' || file.kind === 'markdown') {
+      setActiveEditorPath(file.path);
+      const docTab: StudioTab = {
         id: `file:${file.path}`,
         title: file.path,
-        kind: 'tex',
+        kind: file.kind,
         filePath: file.path,
       };
       const previewTab: StudioTab = {
@@ -418,40 +427,38 @@ export const App: React.FC = () => {
         kind: 'preview',
       };
       if (inSplit) {
-        openTabInGroup(texTab, 1);
+        openTabInGroup(docTab, 1);
       } else {
-        openTabInGroup(texTab, 0);
+        openTabInGroup(docTab, 0);
         openTabInGroup(previewTab, 1);
       }
       return;
     }
 
-    if (file.kind === 'bib') {
-      const bibTab: StudioTab = {
-        id: `file:${file.path}`,
-        title: file.path,
-        kind: 'bib',
-        filePath: file.path,
-      };
-      openTabInGroup(bibTab, inSplit ? 1 : 0);
-      return;
-    }
-
     if (file.kind === 'diagram') {
       const stem = file.path
-        .replace(/^figures\//, '')
+        .replace(/^(diagrams|paper\/figures)\//, '')
         .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
       if (!diagramsXmlByStem[stem]) {
         setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: DEFAULT_DRAWIO_XML }));
       }
       const diagTab: StudioTab = {
         id: `file:${file.path}`,
-        title: `figures/${stem}.svg`,
+        title: `diagrams/${stem}.svg`,
         kind: 'diagram',
         filePath: stem,
       };
       openTabInGroup(diagTab, inSplit ? 1 : 0);
+      return;
     }
+
+    const genericTab: StudioTab = {
+      id: `file:${file.path}`,
+      title: file.path,
+      kind: file.kind,
+      filePath: file.path,
+    };
+    openTabInGroup(genericTab, inSplit ? 1 : 0);
   };
 
   const handleOpenCompiledPreview = (inSplit: boolean) => {
@@ -463,69 +470,134 @@ export const App: React.FC = () => {
     openTabInGroup(previewTab, inSplit ? 1 : 0);
   };
 
-  const handleCreateTexFile = (filename: string) => {
-    setFileBuffers((prev) => ({
-      ...prev,
-      [filename]: prev[filename] ?? `% ${filename}\n\\section{${filename.replace(/\.tex$/, '')}}\n`,
-    }));
-    void handleOpenProjectFile({ path: filename, kind: 'tex' }, false);
-  };
+  const handleCreateProjectFile = async (
+    kind: 'tex' | 'markdown' | 'diagram',
+    rawName: string,
+  ) => {
+    if (!activeProject) {
+      return;
+    }
+    if (kind === 'diagram') {
+      const stem = rawName
+        .replace(/^(diagrams|paper\/figures)\//, '')
+        .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
+      const diagPath = `diagrams/${stem}.drawio.svg`;
+      await api.writeProjectFile(activeProject.id, diagPath, DEFAULT_DRAWIO_XML, false);
+      await refreshProjectTree(activeProject.id);
+      await handleOpenProjectFile({ path: diagPath, kind: 'diagram' }, false);
+      return;
+    }
 
-  const handleCreateDiagramFile = (figureStem: string) => {
-    setDiagramsXmlByStem((prev) => ({
-      ...prev,
-      [figureStem]: prev[figureStem] ?? DEFAULT_DRAWIO_XML,
-    }));
-    void handleOpenProjectFile(
-      { path: `figures/${figureStem}.drawio.svg`, kind: 'diagram' },
-      false,
-    );
+    let relPath = rawName;
+    if (kind === 'tex') {
+      if (!relPath.startsWith('paper/')) {
+        relPath = `paper/${relPath}`;
+      }
+      if (!relPath.endsWith('.tex')) {
+        relPath += '.tex';
+      }
+    } else if (kind === 'markdown') {
+      if (!relPath.startsWith('notes/')) {
+        relPath = `notes/${relPath}`;
+      }
+      if (!relPath.endsWith('.md')) {
+        relPath += '.md';
+      }
+    }
+
+    const initialContent =
+      kind === 'tex'
+        ? `% ${relPath}\n\\section{${relPath.replace(/^paper\//, '').replace(/\.tex$/, '')}}\n`
+        : `# ${relPath.replace(/^notes\//, '').replace(/\.md$/, '')}\n\n`;
+
+    await api.writeProjectFile(activeProject.id, relPath, initialContent, false);
+    await refreshProjectTree(activeProject.id);
+    await handleOpenProjectFile({ path: relPath, kind }, false);
   };
 
   const handleInsertCitation = (bibtexKey: string) => {
-    const citeCmd = `\\cite{${bibtexKey}}`;
+    const isMd = activeEditorPath.endsWith('.md');
+    const citeCmd = isMd ? `[[paper:${bibtexKey}]]` : `\\cite{${bibtexKey}}`;
     if (insertSnippetRef.current) {
       insertSnippetRef.current(citeCmd);
-      setStatusMessage(`Inserted ${citeCmd} into ${activeTexPath}`);
+      setStatusMessage(`Inserted ${citeCmd} into ${activeEditorPath}`);
     } else {
       setFileBuffers((prev) => ({
         ...prev,
-        [activeTexPath]: `${prev[activeTexPath] || ''}\n${citeCmd}`,
+        [activeEditorPath]: `${prev[activeEditorPath] || ''}\n${citeCmd}`,
       }));
-      setStatusMessage(`Appended ${citeCmd} to ${activeTexPath}`);
+      setStatusMessage(`Appended ${citeCmd} to ${activeEditorPath}`);
     }
   };
 
-  const handleSaveTexFile = async (filePath: string) => {
+  const handleSaveProjectFile = async (filePath: string) => {
+    if (!activeProject) {
+      return;
+    }
     const content = fileBuffers[filePath] ?? '';
     setSavingSource(true);
     try {
-      if (activeRepoId) {
-        await api.writeRepoFile(activeRepoId, filePath, content, false);
-        const files = await api.listRepoFiles(activeRepoId);
-        setRepoFilePaths(files);
-      }
-      const existingDoc = docs.find((d) => d.doc_type === 'latex' && d.title === filePath);
-      if (existingDoc) {
-        const updated = await api.updateDoc(existingDoc.id, { content });
-        setDocs((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
-      } else {
-        const created = await api.createDoc({
-          doc_type: 'latex',
-          title: filePath,
-          content,
-        });
-        setDocs((prev) => [...prev, created]);
-      }
-      setStatusMessage(
-        activeRepoId
-          ? `Saved ${filePath} (and updated linked Git repo working tree).`
-          : `Saved ${filePath}.`,
-      );
-    } catch (err) {
-      setStatusMessage(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
+      const res = await api.writeProjectFile(activeProject.id, filePath, content, false);
+      setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
+      await refreshProjectTree(activeProject.id);
+      setStatusMessage(`Saved ${filePath}.`);
+    } catch {
+      const q = enqueueOutboxEntry({
+        id: `file:${activeProject.id}:${filePath}`,
+        kind: 'project_file',
+        projectId: activeProject.id,
+        path: filePath,
+        content,
+        updatedAt: new Date().toISOString(),
+      });
+      setOutboxCount(q.length);
+      setStatusMessage(`Offline: queued ${filePath} in outbox (${q.length} pending).`);
     } finally {
       setSavingSource(false);
+    }
+  };
+
+  const handleRevertProjectFile = async (filePath: string) => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      const res = await api.revertProjectFile(activeProject.id, filePath);
+      setFileBuffers((prev) => ({ ...prev, [filePath]: res.content }));
+      setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
+      await refreshProjectTree(activeProject.id);
+      setStatusMessage(`Reverted ${filePath} to Git HEAD.`);
+    } catch (err) {
+      setStatusMessage(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleSyncActiveProject = async () => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      const res = await api.syncProject(activeProject.id);
+      await loadProjects();
+      const files = await refreshProjectTree(activeProject.id);
+      for (const f of files) {
+        if (f.path in fileBuffers) {
+          setHeadBuffers((prev) => ({ ...prev, [f.path]: fileBuffers[f.path] }));
+        }
+      }
+      if (res.pushed) {
+        setStatusMessage(`Committed & pushed paper/ (${res.paper_sha.slice(0, 7)}) to Overleaf GitHub.`);
+      } else if (res.pending_push) {
+        setStatusMessage(`Committed locally; push queued (${res.push_warning}).`);
+      } else {
+        setStatusMessage(
+          res.committed
+            ? `Committed project changes (${res.paper_sha.slice(0, 7)}).`
+            : 'Regenerated AGENTS.md & references.bib (working tree clean).',
+        );
+      }
+    } catch (err) {
+      setStatusMessage(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -536,7 +608,7 @@ export const App: React.FC = () => {
     insertIntoLatex: boolean,
   ) => {
     const relSvgPath = `figures/${cleanName}.svg`;
-    const relDrawioPath = `figures/${cleanName}.drawio`;
+    const diagPath = `diagrams/${cleanName}.drawio.svg`;
 
     setDiagramsXmlByStem((prev) => ({ ...prev, [cleanName]: svgContent || xmlContent }));
     setFiguresMap((prev) => ({
@@ -545,25 +617,9 @@ export const App: React.FC = () => {
       [`${cleanName}.svg`]: svgContent,
     }));
 
-    const existingDiag = docs.find(
-      (d) => d.doc_type === 'diagram' && d.title.startsWith(cleanName),
-    );
-    if (existingDiag) {
-      await api.updateDoc(existingDiag.id, { content: svgContent || xmlContent });
-    } else {
-      const created = await api.createDoc({
-        doc_type: 'diagram',
-        title: `${cleanName}.svg`,
-        content: svgContent || xmlContent,
-      });
-      setDocs((prev) => [...prev, created]);
-    }
-
-    if (activeRepoId) {
-      await api.writeRepoFile(activeRepoId, relSvgPath, svgContent, false);
-      await api.writeRepoFile(activeRepoId, relDrawioPath, xmlContent, false);
-      const files = await api.listRepoFiles(activeRepoId);
-      setRepoFilePaths(files);
+    if (activeProject) {
+      await api.writeProjectFile(activeProject.id, diagPath, svgContent || xmlContent, false);
+      await refreshProjectTree(activeProject.id);
     }
 
     if (insertIntoLatex) {
@@ -573,15 +629,15 @@ export const App: React.FC = () => {
       } else {
         setFileBuffers((prev) => ({
           ...prev,
-          [activeTexPath]: `${prev[activeTexPath] || ''}\n${figSnippet}`,
+          [activeEditorPath]: `${prev[activeEditorPath] || ''}\n${figSnippet}`,
         }));
       }
     }
 
     setStatusMessage(
-      activeRepoId
-        ? `Exported ${relSvgPath} to linked Git repo${insertIntoLatex ? ' and inserted into LaTeX' : ''}.`
-        : `Saved ${relSvgPath} in project${insertIntoLatex ? ' and inserted into LaTeX' : ''}.`,
+      `Saved ${diagPath} and exported paper/${relSvgPath}${
+        insertIntoLatex ? ' (inserted into editor)' : ''
+      }.`,
     );
   };
 
@@ -612,7 +668,7 @@ export const App: React.FC = () => {
     if (!tab) {
       return (
         <div className="empty-hint">
-          Click a PDF or a LaTeX project file in the left Explorer to open it.
+          Click a PDF or a project file in the left Explorer to open it.
         </div>
       );
     }
@@ -623,22 +679,7 @@ export const App: React.FC = () => {
     }
 
     if (tab.kind === 'preview') {
-      return <CompiledPreviewPane compiled={compiled} sourceLabel={activeTexPath} />;
-    }
-
-    if (tab.kind === 'bib') {
-      return (
-        <LatexEditorPane
-          fileLabel={tab.filePath || 'references.bib'}
-          source={aggregatedBibtex}
-          papers={papers}
-          saving={false}
-          readOnly
-          onChangeSource={() => {}}
-          onSaveSource={async () => {}}
-          registerInsertSnippet={() => {}}
-        />
-      );
+      return <CompiledPreviewPane compiled={compiled} sourceLabel={activeEditorPath} />;
     }
 
     if (tab.kind === 'diagram') {
@@ -648,25 +689,34 @@ export const App: React.FC = () => {
         <DiagramPane
           figureName={stem}
           initialXmlOrSvg={initialXml}
-          hasActiveRepo={Boolean(activeRepoId)}
+          hasActiveRepo={Boolean(activeProject?.overleaf_remote)}
           onSaveDiagram={handleExportFigure}
         />
       );
     }
 
-    const filePath = tab.filePath || 'main.tex';
-    const source = fileBuffers[filePath] ?? DEFAULT_LATEX_TEMPLATE;
+    const filePath = tab.filePath || 'paper/main.tex';
+    const source = fileBuffers[filePath] ?? '';
+    const headContent = headBuffers[filePath] ?? '';
+    const isGeneratedReadOnly =
+      filePath === 'AGENTS.md' ||
+      filePath === 'paper/references.bib' ||
+      filePath.startsWith('refs/');
+
     return (
       <LatexEditorPane
         fileLabel={filePath}
         source={source}
+        headContent={headContent}
         papers={papers}
         saving={savingSource}
+        readOnly={isGeneratedReadOnly}
         onChangeSource={(next) => {
-          setActiveTexPath(filePath);
+          setActiveEditorPath(filePath);
           setFileBuffers((prev) => ({ ...prev, [filePath]: next }));
         }}
-        onSaveSource={() => handleSaveTexFile(filePath)}
+        onSaveSource={() => handleSaveProjectFile(filePath)}
+        onRevertToHead={() => handleRevertProjectFile(filePath)}
         onOpenPreviewSplit={() => handleOpenCompiledPreview(true)}
         registerInsertSnippet={(fn) => {
           insertSnippetRef.current = fn;
@@ -702,7 +752,7 @@ export const App: React.FC = () => {
         <form className="auth-card" onSubmit={handleLogin}>
           <h1>dupe</h1>
           <p className="muted-hint">
-            Dino&apos;s Ultimate Paper Editor — Academic Studio
+            Dino&apos;s Ultimate Paper Editor — VS Code Academic Studio
           </p>
           {authError && <div className="auth-error">{authError}</div>}
           <label>
@@ -739,9 +789,9 @@ export const App: React.FC = () => {
     focusedGroup === 0 ? activeLeftTab?.id || null : activeRightTab?.id || null;
 
   return (
-    <div className="studio-shell">
+    <div className="vscode-shell">
       {/* Top Titlebar */}
-      <header className="studio-titlebar">
+      <header className="vscode-titlebar">
         <div className="brand-group">
           <button
             type="button"
@@ -752,7 +802,9 @@ export const App: React.FC = () => {
             ☰ Explorer
           </button>
           <strong className="brand-logo">dupe</strong>
-          <span className="brand-sub">Academic Workbench</span>
+          <span className="brand-sub">
+            {activeProject ? activeProject.name : 'Academic Workbench'}
+          </span>
         </div>
 
         <div className="row-gap">
@@ -760,11 +812,17 @@ export const App: React.FC = () => {
             type="button"
             className="btn-tiny"
             onClick={() =>
-              void handleOpenProjectFile({ path: activeTexPath, kind: 'tex' }, false)
+              void handleOpenProjectFile(
+                {
+                  path: activeEditorPath,
+                  kind: activeEditorPath.endsWith('.md') ? 'markdown' : 'tex',
+                },
+                false,
+              )
             }
-            title="Open LaTeX Code + Compiled Paper side-by-side"
+            title="Open Editor + Compiled Preview side-by-side"
           >
-            LaTeX + Preview Split
+            Editor + Preview Split
           </button>
           <button
             type="button"
@@ -777,52 +835,61 @@ export const App: React.FC = () => {
         </div>
 
         <div className="user-group">
-          <span className="user-badge">{user.username}</span>
-          <button type="button" className="btn-tiny" onClick={handleLogout}>
-            Sign Out
-          </button>
+          <span className="user-badge">
+            {user.username} ({runtimeMode})
+          </span>
+          {runtimeMode !== 'local' && (
+            <button type="button" className="btn-tiny" onClick={handleLogout}>
+              Sign Out
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Explorer sidebar and split editor groups */}
-      <div className="studio-workbench">
+      {/* Main Workbench Area: Explorer Sidebar + Split Editor Groups */}
+      <div className="vscode-workbench">
         {showSidebar && (
           <ExplorerSidebar
             papers={papers}
-            projectFiles={projectFiles}
+            projects={projects}
+            activeProject={activeProject}
+            projectFiles={projectTree}
             activeTabId={currentHighlightedTabId}
-            repos={repos}
-            activeRepoId={activeRepoId}
+            onSelectProject={(id) => void handleSelectProject(id)}
+            onProjectsChanged={loadProjects}
             onOpenPaper={handleOpenPaper}
             onOpenProjectFile={(f, split) => void handleOpenProjectFile(f, split)}
             onOpenCompiledPreview={handleOpenCompiledPreview}
-            onCreateTexFile={handleCreateTexFile}
-            onCreateDiagramFile={handleCreateDiagramFile}
+            onCreateProjectFile={handleCreateProjectFile}
+            onSyncProject={handleSyncActiveProject}
             onInsertCitation={handleInsertCitation}
-            onPapersChanged={loadPapers}
-            onReposChanged={loadRepos}
-            onSelectRepo={setActiveRepoId}
+            onPapersChanged={async () => {
+              await loadPapers();
+              if (activeProject) {
+                await refreshProjectTree(activeProject.id);
+              }
+            }}
             onStatusMessage={setStatusMessage}
           />
         )}
 
-        <main className="studio-editor-stage" ref={editorStageRef}>
+        <main className="vscode-editor-stage" ref={editorStageRef}>
           {/* Left Editor Group */}
           <section
             className={`editor-group ${focusedGroup === 0 ? 'focused' : ''}`}
             style={{ flex: hasRightSplit ? `${splitRatio} 1 0%` : '1 1 0%' }}
             onPointerDown={() => setFocusedGroup(0)}
           >
-            <div className="studio-tabbar">
+            <div className="vscode-tabbar">
               {leftTabs.map((tab) => {
                 const isActive = activeLeftTab?.id === tab.id;
                 return (
                   <div
                     key={tab.id}
-                    className={`studio-tab ${isActive ? 'active' : ''}`}
+                    className={`vscode-tab ${isActive ? 'active' : ''}`}
                     onClick={() => setActiveLeftTabId(tab.id)}
                   >
-                    <span className="studio-tab-title">{tab.title}</span>
+                    <span className="vscode-tab-title">{tab.title}</span>
                     <button
                       type="button"
                       className="tab-icon-btn"
@@ -846,7 +913,7 @@ export const App: React.FC = () => {
             <div className="editor-group-body">{renderTabContent(activeLeftTab)}</div>
           </section>
 
-          {/* Right Split Editor Group (shown whenever rightTabs is non-empty) */}
+          {/* Right Split Editor Group */}
           {hasRightSplit && (
             <>
               <div
@@ -860,16 +927,16 @@ export const App: React.FC = () => {
                 style={{ flex: `${1 - splitRatio} 1 0%` }}
                 onPointerDown={() => setFocusedGroup(1)}
               >
-                <div className="studio-tabbar">
+                <div className="vscode-tabbar">
                   {rightTabs.map((tab) => {
                     const isActive = activeRightTab?.id === tab.id;
                     return (
                       <div
                         key={tab.id}
-                        className={`studio-tab ${isActive ? 'active' : ''}`}
+                        className={`vscode-tab ${isActive ? 'active' : ''}`}
                         onClick={() => setActiveRightTabId(tab.id)}
                       >
-                        <span className="studio-tab-title">{tab.title}</span>
+                        <span className="vscode-tab-title">{tab.title}</span>
                         <button
                           type="button"
                           className="tab-icon-btn"
@@ -897,12 +964,13 @@ export const App: React.FC = () => {
         </main>
       </div>
 
-      {/* Status bar */}
-      <footer className="studio-statusbar">
+      {/* VS Code Bottom Statusbar */}
+      <footer className="vscode-statusbar">
         <span>{statusMessage}</span>
         <span>
-          {papers.length} PDFs in Library · {compiled.citedKeys.length} Citations ·{' '}
-          {activeRepoId ? 'GitHub/Overleaf Linked' : 'Local Project'}
+          {isOnline ? '● Online' : '○ Offline'} · Outbox: {outboxCount} · {papers.length} PDFs ·{' '}
+          {compiled.citedKeys.length} Cited ·{' '}
+          {activeProject?.overleaf_remote ? 'Overleaf Linked' : 'Local Git'}
         </span>
       </footer>
     </div>

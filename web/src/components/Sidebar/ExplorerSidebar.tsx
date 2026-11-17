@@ -1,48 +1,48 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { GitRepo, Paper, api } from '../../api/client';
-
-export interface ProjectFileItem {
-  path: string;
-  kind: 'tex' | 'bib' | 'diagram' | 'other';
-}
+import {
+  Paper,
+  ProjectConfig,
+  ProjectTreeEntry,
+  api,
+} from '../../api/client';
 
 interface ExplorerSidebarProps {
   papers: Paper[];
-  projectFiles: ProjectFileItem[];
+  projects: ProjectConfig[];
+  activeProject: ProjectConfig | null;
+  projectFiles: ProjectTreeEntry[];
   activeTabId: string | null;
-  repos: GitRepo[];
-  activeRepoId: string | null;
+  onSelectProject: (projectId: string) => void;
+  onProjectsChanged: () => Promise<void>;
   onOpenPaper: (paper: Paper, inSplit: boolean) => void;
-  onOpenProjectFile: (file: ProjectFileItem, inSplit: boolean) => void;
+  onOpenProjectFile: (file: ProjectTreeEntry, inSplit: boolean) => void;
   onOpenCompiledPreview: (inSplit: boolean) => void;
-  onCreateTexFile: (filename: string) => void;
-  onCreateDiagramFile: (figureName: string) => void;
+  onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
+  onSyncProject: () => Promise<void>;
   onInsertCitation: (bibtexKey: string) => void;
   onPapersChanged: () => Promise<void>;
-  onReposChanged: () => Promise<void>;
-  onSelectRepo: (repoId: string) => void;
   onStatusMessage: (msg: string) => void;
 }
 
 export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   papers,
+  projects,
+  activeProject,
   projectFiles,
   activeTabId,
-  repos,
-  activeRepoId,
+  onSelectProject,
+  onProjectsChanged,
   onOpenPaper,
   onOpenProjectFile,
   onOpenCompiledPreview,
-  onCreateTexFile,
-  onCreateDiagramFile,
+  onCreateProjectFile,
+  onSyncProject,
   onInsertCitation,
   onPapersChanged,
-  onReposChanged,
-  onSelectRepo,
   onStatusMessage,
 }) => {
   const sidebarRef = useRef<HTMLDivElement | null>(null);
-  const [topRatio, setTopRatio] = useState(0.52);
+  const [topRatio, setTopRatio] = useState(0.46);
 
   const [pdfSearch, setPdfSearch] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -52,12 +52,15 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const [editBibKey, setEditBibKey] = useState('');
   const [editBibRaw, setEditBibRaw] = useState('');
 
-  const [showRepoModal, setShowRepoModal] = useState(false);
-  const [repoUrl, setRepoUrl] = useState('');
-  const [repoName, setRepoName] = useState('');
+  const [showNewProjectForm, setShowNewProjectForm] = useState(false);
+  const [newProjName, setNewProjName] = useState('');
+  const [newProjRemote, setNewProjRemote] = useState('');
+
+  const [showProjectSettings, setShowProjectSettings] = useState(false);
+  const [settingsRemote, setSettingsRemote] = useState('');
   const [syncingGit, setSyncingGit] = useState(false);
 
-  const [showNewFileInput, setShowNewFileInput] = useState<'tex' | 'diagram' | null>(null);
+  const [newFileKind, setNewFileKind] = useState<'tex' | 'markdown' | 'diagram' | null>(null);
   const [newFileName, setNewFileName] = useState('');
 
   const filteredPapers = useMemo(() => {
@@ -73,6 +76,11 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
         p.doi.toLowerCase().includes(q),
     );
   }, [papers, pdfSearch]);
+
+  const modifiedCount = useMemo(
+    () => projectFiles.filter((f) => f.git_status === 'M' || f.git_status === 'U').length,
+    [projectFiles],
+  );
 
   const handleVerticalSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -145,70 +153,73 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     }
   };
 
-  const handleLinkRepo = async (event: React.FormEvent) => {
+  const handleCreateProject = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!repoUrl.trim()) {
+    if (!newProjName.trim()) {
       return;
     }
     setSyncingGit(true);
     try {
-      const created = await api.createRepo({
-        name: repoName.trim(),
-        remote_url: repoUrl.trim(),
-        bib_file_path: 'references.bib',
+      const created = await api.createProject({
+        name: newProjName.trim(),
+        overleaf_remote: newProjRemote.trim(),
+        link_all_papers: true,
       });
-      setShowRepoModal(false);
-      setRepoUrl('');
-      setRepoName('');
-      await onReposChanged();
-      onSelectRepo(created.id);
-      onStatusMessage(`Linked GitHub/Overleaf repo "${created.name}".`);
+      setShowNewProjectForm(false);
+      setNewProjName('');
+      setNewProjRemote('');
+      await onProjectsChanged();
+      onSelectProject(created.id);
+      onStatusMessage(`Created project "${created.name}" (${created.folder_name}/).`);
     } catch (err) {
-      onStatusMessage(`Git clone failed: ${err instanceof Error ? err.message : String(err)}`);
+      onStatusMessage(`Create project failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSyncingGit(false);
     }
   };
 
-  const handleSyncGit = async () => {
-    if (!activeRepoId) {
+  const handleSaveProjectSettings = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!activeProject) {
       return;
     }
     setSyncingGit(true);
     try {
-      const res = await api.syncRepo(activeRepoId);
-      await onReposChanged();
-      onStatusMessage(
-        res.committed
-          ? `Pushed ${res.bib_entries} BibTeX entries & project files (${res.commit_sha?.slice(0, 7) || 'HEAD'}) to GitHub.`
-          : `Synced ${res.bib_entries} BibTeX entries (working tree clean).`,
-      );
+      await api.updateProject(activeProject.id, {
+        overleaf_remote: settingsRemote.trim(),
+      });
+      setShowProjectSettings(false);
+      await onProjectsChanged();
+      onStatusMessage('Updated Overleaf GitHub remote and regenerated AGENTS.md + references.bib.');
     } catch (err) {
-      onStatusMessage(`Git sync error: ${err instanceof Error ? err.message : String(err)}`);
+      onStatusMessage(`Project update failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setSyncingGit(false);
     }
   };
 
-  const submitNewFile = (event: React.FormEvent) => {
+  const handleTriggerSync = async () => {
+    setSyncingGit(true);
+    try {
+      await onSyncProject();
+    } finally {
+      setSyncingGit(false);
+    }
+  };
+
+  const submitNewFile = async (event: React.FormEvent) => {
     event.preventDefault();
     const cleaned = newFileName.trim();
-    if (!cleaned || !showNewFileInput) {
+    if (!cleaned || !newFileKind) {
       return;
     }
-    if (showNewFileInput === 'tex') {
-      onCreateTexFile(cleaned.endsWith('.tex') ? cleaned : `${cleaned}.tex`);
-    } else {
-      onCreateDiagramFile(cleaned.replace(/\.(svg|excalidraw)$/i, ''));
-    }
+    await onCreateProjectFile(newFileKind, cleaned);
     setNewFileName('');
-    setShowNewFileInput(null);
+    setNewFileKind(null);
   };
 
-  const activeRepo = repos.find((r) => r.id === activeRepoId) || null;
-
   return (
-    <aside className="studio-sidebar" ref={sidebarRef}>
+    <aside className="vscode-sidebar" ref={sidebarRef}>
       {/* TOP HALF: PDF LIBRARY EXPLORER */}
       <section className="explorer-section" style={{ flex: `${topRatio} 1 0%` }}>
         <div className="explorer-section-header">
@@ -258,7 +269,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                       }
                     }}
                     onClick={() => onOpenPaper(paper, false)}
-                    title={`${paper.title}\n${paper.authors}\n@${paper.bibtex_key}\n(Drag into LaTeX editor to cite)`}
+                    title={`${paper.title}\n${paper.authors}\n@${paper.bibtex_key}\n(Drag into editor to cite)`}
                   >
                     <span className="file-icon pdf-icon">PDF</span>
                     <div className="tree-label-col">
@@ -356,51 +367,149 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
         onPointerDown={handleVerticalSplitDrag}
       />
 
-      {/* BOTTOM HALF: LATEX PROJECT EXPLORER */}
+      {/* BOTTOM HALF: PROJECT FOLDER EXPLORER */}
       <section className="explorer-section" style={{ flex: `${1 - topRatio} 1 0%` }}>
         <div className="explorer-section-header">
           <span className="explorer-chevron">▾</span>
           <span className="explorer-section-title">
-            LATEX PROJECT {activeRepo ? `(${activeRepo.name})` : ''}
+            PROJECT {modifiedCount > 0 ? `(${modifiedCount} changed)` : ''}
           </span>
           <div className="explorer-header-actions">
             <button
               type="button"
               className="icon-btn"
-              title="New .tex file"
-              onClick={() =>
-                setShowNewFileInput((v) => (v === 'tex' ? null : 'tex'))
-              }
+              title="New Project Folder"
+              onClick={() => setShowNewProjectForm((v) => !v)}
+            >
+              + Proj
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              title="New LaTeX file in paper/"
+              onClick={() => setNewFileKind((v) => (v === 'tex' ? null : 'tex'))}
             >
               + .tex
             </button>
             <button
               type="button"
               className="icon-btn"
-              title="New Excalidraw diagram"
-              onClick={() =>
-                setShowNewFileInput((v) => (v === 'diagram' ? null : 'diagram'))
-              }
+              title="New Markdown note in notes/"
+              onClick={() => setNewFileKind((v) => (v === 'markdown' ? null : 'markdown'))}
             >
-              + Fig
+              + Note
             </button>
             <button
               type="button"
               className="icon-btn"
-              title="Link Overleaf/GitHub repository"
-              onClick={() => setShowRepoModal((v) => !v)}
+              title="New Draw.io diagram in diagrams/"
+              onClick={() => setNewFileKind((v) => (v === 'diagram' ? null : 'diagram'))}
             >
-              Git
+              + Fig
             </button>
           </div>
         </div>
 
-        {showNewFileInput && (
-          <form className="inline-new-file-form" onSubmit={submitNewFile}>
+        {/* Project selector & Sync bar */}
+        <div className="git-sync-bar">
+          <select
+            value={activeProject?.id || ''}
+            onChange={(e) => onSelectProject(e.target.value)}
+            style={{ flex: 1 }}
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.folder_name}/)
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn-tiny"
+            title="Configure Overleaf GitHub remote"
+            onClick={() => {
+              setSettingsRemote(activeProject?.overleaf_remote || '');
+              setShowProjectSettings((v) => !v);
+            }}
+          >
+            ⚙
+          </button>
+          <button
+            type="button"
+            className="btn-primary btn-tiny"
+            disabled={syncingGit || !activeProject}
+            onClick={() => void handleTriggerSync()}
+            title="Regenerate AGENTS.md & references.bib, commit, and push paper/ to Overleaf GitHub"
+          >
+            {syncingGit ? 'Syncing…' : 'Sync'}
+          </button>
+        </div>
+
+        {showNewProjectForm && (
+          <form className="inline-bib-drawer" onSubmit={handleCreateProject}>
+            <strong>Create Project Folder</strong>
+            <input
+              type="text"
+              placeholder="Project Name (e.g. ICRA 2027 Paper)"
+              value={newProjName}
+              onChange={(e) => setNewProjName(e.target.value)}
+              required
+            />
+            <input
+              type="text"
+              placeholder="Overleaf GitHub Remote URL (optional)"
+              value={newProjRemote}
+              onChange={(e) => setNewProjRemote(e.target.value)}
+            />
+            <div className="row-gap">
+              <button type="submit" className="btn-primary btn-tiny" disabled={syncingGit}>
+                Create Folder
+              </button>
+              <button
+                type="button"
+                className="btn-tiny"
+                onClick={() => setShowNewProjectForm(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+
+        {showProjectSettings && activeProject && (
+          <form className="inline-bib-drawer" onSubmit={handleSaveProjectSettings}>
+            <strong>Overleaf GitHub Remote (paper/)</strong>
+            <input
+              type="text"
+              placeholder="git@github.com:user/overleaf-paper.git"
+              value={settingsRemote}
+              onChange={(e) => setSettingsRemote(e.target.value)}
+            />
+            <div className="row-gap">
+              <button type="submit" className="btn-primary btn-tiny" disabled={syncingGit}>
+                Save Remote
+              </button>
+              <button
+                type="button"
+                className="btn-tiny"
+                onClick={() => setShowProjectSettings(false)}
+              >
+                Close
+              </button>
+            </div>
+          </form>
+        )}
+
+        {newFileKind && (
+          <form className="inline-new-file-form" onSubmit={(e) => void submitNewFile(e)}>
             <input
               type="text"
               placeholder={
-                showNewFileInput === 'tex' ? 'section_intro.tex' : 'system_diagram'
+                newFileKind === 'tex'
+                  ? 'paper/methods.tex'
+                  : newFileKind === 'markdown'
+                    ? 'notes/ideas.md'
+                    : 'diagrams/system_arch'
               }
               value={newFileName}
               onChange={(e) => setNewFileName(e.target.value)}
@@ -412,43 +521,6 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
           </form>
         )}
 
-        {showRepoModal && (
-          <form className="inline-bib-drawer" onSubmit={handleLinkRepo}>
-            <input
-              type="text"
-              placeholder="git@github.com:user/overleaf-paper.git"
-              value={repoUrl}
-              onChange={(e) => setRepoUrl(e.target.value)}
-              required
-            />
-            <input
-              type="text"
-              placeholder="Project display name (optional)"
-              value={repoName}
-              onChange={(e) => setRepoName(e.target.value)}
-            />
-            <button type="submit" className="btn-primary btn-tiny" disabled={syncingGit}>
-              {syncingGit ? 'Cloning...' : 'Clone Overleaf GitHub Repo'}
-            </button>
-          </form>
-        )}
-
-        {activeRepo && (
-          <div className="git-sync-bar">
-            <span className="truncate-text" title={activeRepo.remote_url}>
-              ⎇ {activeRepo.name}
-            </span>
-            <button
-              type="button"
-              className="btn-primary btn-tiny"
-              disabled={syncingGit}
-              onClick={() => void handleSyncGit()}
-            >
-              {syncingGit ? 'Syncing…' : 'Sync & Push'}
-            </button>
-          </div>
-        )}
-
         <div className="explorer-tree-list">
           {/* Virtual Compiled PDF item at top of project */}
           <div
@@ -458,7 +530,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
             <span className="file-icon compiled-icon">OUT</span>
             <div className="tree-label-col">
               <span className="tree-primary-text">Compiled Paper Preview</span>
-              <span className="tree-sub-text">Live LaTeX output</span>
+              <span className="tree-sub-text">Live LaTeX / Markdown output</span>
             </div>
             <div className="tree-row-actions" onClick={(e) => e.stopPropagation()}>
               <button
@@ -480,12 +552,14 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 ? 'TEX'
                 : file.kind === 'bib'
                   ? 'BIB'
-                  : file.kind === 'diagram'
-                    ? 'FIG'
-                    : 'FILE';
+                  : file.kind === 'markdown'
+                    ? 'MD'
+                    : file.kind === 'diagram'
+                      ? 'FIG'
+                      : 'FILE';
             const cleanStem = file.path
-              .replace(/^figures\//, '')
-              .replace(/\.(drawio|excalidraw|svg)$/i, '');
+              .replace(/^(diagrams|paper\/figures)\//, '')
+              .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
             const svgRelPath = `figures/${cleanStem}.svg`;
             return (
               <div
@@ -502,11 +576,9 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 }}
                 onClick={() => onOpenProjectFile(file, false)}
                 title={
-                  file.kind === 'tex'
-                    ? `${file.path} (Click to open LaTeX source + Compiled Preview)`
-                    : file.kind === 'diagram'
-                      ? `${file.path} (Click to edit in Draw.io, or drag into .tex editor)`
-                      : file.path
+                  file.git_status
+                    ? `${file.path} (${file.git_status === 'M' ? 'Modified vs HEAD — click to review inline diff' : 'Untracked'})`
+                    : file.path
                 }
               >
                 <span className={`file-icon kind-${file.kind}`}>{badge}</span>
@@ -514,6 +586,18 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   <span className="tree-primary-text">{file.path}</span>
                 </div>
                 <div className="tree-row-actions" onClick={(e) => e.stopPropagation()}>
+                  {file.git_status && (
+                    <span
+                      className={`git-badge git-badge-${file.git_status.toLowerCase()}`}
+                      title={
+                        file.git_status === 'M'
+                          ? 'Modified against Git HEAD'
+                          : 'Untracked file'
+                      }
+                    >
+                      {file.git_status}
+                    </span>
+                  )}
                   <button
                     type="button"
                     className="tree-action-btn"

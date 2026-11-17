@@ -11,6 +11,7 @@ from scripts.extract_meta import (
     build_bibtex_entry,
     build_bibtex_key,
     clean_doi,
+    extract_full_markdown_text,
     extract_metadata,
     find_identifiers,
     main,
@@ -71,6 +72,10 @@ class ExtractMetaTests(unittest.TestCase):
 
             exit_code = main([str(pdf_path), "--offline"])
             self.assertEqual(exit_code, 0)
+
+            md_text = extract_full_markdown_text(pdf_path)
+            self.assertIn("## Page 1", md_text)
+            self.assertIn("Deep Residual Learning for Image Recognition", md_text)
 
 
 if __name__ == "__main__":

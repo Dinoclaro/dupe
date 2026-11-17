@@ -190,6 +190,8 @@ func TestEndToEndUploadAndGitSync(t *testing.T) {
 		db:            pool,
 		jwtSecret:     []byte("test-jwt-secret-key-at-least-32-bytes"),
 		storageDir:    storageDir,
+		projectsDir:   filepath.Join(storageDir, "projects"),
+		mode:          "hosted",
 		pythonBin:     pythonBin,
 		extractScript: "../scripts/extract_meta.py",
 		offlineMeta:   true,
@@ -307,6 +309,110 @@ doc.close()
 	}
 	if !syncRes.Committed || syncRes.BibEntries != 1 {
 		t.Fatalf("expected committed=true and bib_entries=1, got %+v", syncRes)
+	}
+
+	// 5. Phase 3: Create Project Folder, verify AGENTS.md + refs/text + Git diff status & revert
+	createProjReq, _ := http.NewRequest(
+		http.MethodPost,
+		ts.URL+"/api/projects",
+		strings.NewReader(`{"name":"Phase 3 Test Project","overleaf_remote":"`+bareRemote+`"}`),
+	)
+	createProjReq.Header.Set("Authorization", "Bearer "+loginRes.Token)
+	createProjReq.Header.Set("Content-Type", "application/json")
+	createProjResp, err := http.DefaultClient.Do(createProjReq)
+	if err != nil {
+		t.Fatalf("create project failed: %v", err)
+	}
+	defer func() { _ = createProjResp.Body.Close() }()
+	if createProjResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 on create project, got %d", createProjResp.StatusCode)
+	}
+	var projCfg ProjectConfig
+	if err := json.NewDecoder(createProjResp.Body).Decode(&projCfg); err != nil {
+		t.Fatalf("decode project config: %v", err)
+	}
+
+	// Modify paper/main.tex and verify Git Status badge 'M' and head_content diff
+	writeProjFileBody := `{"path":"paper/main.tex","content":"\\documentclass{article}\n\\begin{document}\nEdited line \\cite{vaswani2017attention}\n\\end{document}\n"}`
+	writeProjReq, _ := http.NewRequest(
+		http.MethodPut,
+		ts.URL+"/api/projects/"+projCfg.ID+"/file",
+		strings.NewReader(writeProjFileBody),
+	)
+	writeProjReq.Header.Set("Authorization", "Bearer "+loginRes.Token)
+	writeProjReq.Header.Set("Content-Type", "application/json")
+	writeProjResp, err := http.DefaultClient.Do(writeProjReq)
+	if err != nil {
+		t.Fatalf("write project file failed: %v", err)
+	}
+	_ = writeProjResp.Body.Close()
+
+	treeReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/projects/"+projCfg.ID+"/tree", nil)
+	treeReq.Header.Set("Authorization", "Bearer "+loginRes.Token)
+	treeResp, err := http.DefaultClient.Do(treeReq)
+	if err != nil {
+		t.Fatalf("get project tree failed: %v", err)
+	}
+	defer func() { _ = treeResp.Body.Close() }()
+	var treeData struct {
+		Files []ProjectTreeEntry `json:"files"`
+	}
+	if err := json.NewDecoder(treeResp.Body).Decode(&treeData); err != nil {
+		t.Fatalf("decode tree: %v", err)
+	}
+	foundModifiedMainTex := false
+	foundExtractedRefMd := false
+	for _, f := range treeData.Files {
+		if f.Path == "paper/main.tex" && f.GitStatus == "M" {
+			foundModifiedMainTex = true
+		}
+		if f.Path == "refs/text/vaswani2017attention.md" {
+			foundExtractedRefMd = true
+		}
+	}
+	if !foundModifiedMainTex {
+		t.Fatalf("expected paper/main.tex to have GitStatus 'M' in tree: %+v", treeData.Files)
+	}
+	if !foundExtractedRefMd {
+		t.Fatalf("expected refs/text/vaswani2017attention.md in tree: %+v", treeData.Files)
+	}
+
+	// 6. Phase 4: Library Changes API
+	changesReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/library/changes?since=2020-01-01T00:00:00Z", nil)
+	changesReq.Header.Set("Authorization", "Bearer "+loginRes.Token)
+	changesResp, err := http.DefaultClient.Do(changesReq)
+	if err != nil {
+		t.Fatalf("library changes request failed: %v", err)
+	}
+	defer func() { _ = changesResp.Body.Close() }()
+	var changesData LibraryChangesResponse
+	if err := json.NewDecoder(changesResp.Body).Decode(&changesData); err != nil {
+		t.Fatalf("decode library changes: %v", err)
+	}
+	if len(changesData.Papers) == 0 {
+		t.Fatal("expected at least 1 paper in library changes response")
+	}
+
+	// 7. Phase 5: MCP Server stdio protocol (initialize, tools/list, search_papers, get_bibtex, read_paper)
+	mcpInput := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_bibtex","arguments":{"key":"vaswani2017attention"}}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_paper","arguments":{"key":"vaswani2017attention"}}}`,
+	}, "\n") + "\n"
+	var mcpOutput bytes.Buffer
+	if err := srv.runMCPServer(ctx, loginRes.User.ID, loginRes.User.Username, strings.NewReader(mcpInput), &mcpOutput); err != nil {
+		t.Fatalf("runMCPServer failed: %v", err)
+	}
+	mcpLines := strings.Split(strings.TrimSpace(mcpOutput.String()), "\n")
+	if len(mcpLines) != 4 {
+		t.Fatalf("expected 4 MCP responses, got %d: %s", len(mcpLines), mcpOutput.String())
+	}
+	if !strings.Contains(mcpLines[2], "@article{vaswani2017attention") {
+		t.Fatalf("expected get_bibtex MCP response to contain BibTeX, got %s", mcpLines[2])
+	}
+	if !strings.Contains(mcpLines[3], "Attention Is All You Need") {
+		t.Fatalf("expected read_paper MCP response to contain paper text, got %s", mcpLines[3])
 	}
 }
 

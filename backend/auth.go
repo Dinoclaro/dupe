@@ -108,12 +108,27 @@ func createOrUpdateUser(ctx context.Context, db pgxQuerier, username, password, 
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rawToken := extractBearerToken(r)
+		if rawToken == "" && s.mode == "local" {
+			claims := &AuthClaims{
+				UserID:   1,
+				Username: "local",
+			}
+			ctx := context.WithValue(r.Context(), userContextKey, claims)
+			next(w, r.WithContext(ctx))
+			return
+		}
 		if rawToken == "" {
 			writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
 		claims, err := parseToken(s.jwtSecret, rawToken)
 		if err != nil {
+			if s.mode == "local" {
+				localClaims := &AuthClaims{UserID: 1, Username: "local"}
+				ctx := context.WithValue(r.Context(), userContextKey, localClaims)
+				next(w, r.WithContext(ctx))
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "invalid or expired token")
 			return
 		}
@@ -217,6 +232,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		&user.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if s.mode == "local" {
+			writeJSON(w, http.StatusOK, User{
+				ID:        1,
+				Username:  "local",
+				ColorHex:  "#FFEB3B",
+				CreatedAt: time.Now().UTC(),
+			})
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "user not found")
 		return
 	}

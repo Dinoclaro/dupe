@@ -51,18 +51,112 @@ export interface DocumentItem {
   updated_at: string;
 }
 
+export interface ProjectConfig {
+  id: string;
+  name: string;
+  folder_name: string;
+  overleaf_remote: string;
+  linked_paper_ids: string[];
+  link_all_papers: boolean;
+  pending_push: boolean;
+  last_synced_at?: string;
+  updated_at: string;
+}
+
+export interface ProjectTreeEntry {
+  path: string;
+  kind: 'tex' | 'bib' | 'markdown' | 'diagram' | 'json' | 'other';
+  git_status?: 'M' | 'U' | '';
+}
+
+export interface ProjectFilePayload {
+  path: string;
+  content: string;
+  head_content: string;
+}
+
+export interface ProjectSyncResponse {
+  project: ProjectConfig;
+  committed: boolean;
+  root_sha: string;
+  paper_sha: string;
+  pushed: boolean;
+  pending_push: boolean;
+  push_warning: string;
+  last_synced_at: string;
+}
+
+export interface OutboxEntry {
+  id: string;
+  kind: 'paper_patch' | 'project_file';
+  projectId?: string;
+  path?: string;
+  content?: string;
+  paperPatch?: Partial<Paper> & { id: string; file_hash: string };
+  updatedAt: string;
+}
+
 const TOKEN_STORAGE_KEY = 'dupe_jwt_token';
+const OUTBOX_STORAGE_KEY = 'dupe_sync_outbox_v1';
+const memoryStorageFallback = new Map<string, string>();
+
+function storageGet(key: string): string | null {
+  if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+    return localStorage.getItem(key);
+  }
+  return memoryStorageFallback.get(key) ?? null;
+}
+
+function storageSet(key: string, value: string): void {
+  if (typeof localStorage !== 'undefined' && typeof localStorage.setItem === 'function') {
+    localStorage.setItem(key, value);
+    return;
+  }
+  memoryStorageFallback.set(key, value);
+}
+
+function storageRemove(key: string): void {
+  if (typeof localStorage !== 'undefined' && typeof localStorage.removeItem === 'function') {
+    localStorage.removeItem(key);
+    return;
+  }
+  memoryStorageFallback.delete(key);
+}
 
 export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
+  return storageGet(TOKEN_STORAGE_KEY);
 }
 
 export function setStoredToken(token: string | null): void {
   if (token) {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    storageSet(TOKEN_STORAGE_KEY, token);
   } else {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    storageRemove(TOKEN_STORAGE_KEY);
   }
+}
+
+export function getOutboxQueue(): OutboxEntry[] {
+  try {
+    const raw = storageGet(OUTBOX_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as OutboxEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function enqueueOutboxEntry(entry: OutboxEntry): OutboxEntry[] {
+  const current = getOutboxQueue().filter((item) => item.id !== entry.id);
+  const next = [...current, entry];
+  storageSet(OUTBOX_STORAGE_KEY, JSON.stringify(next));
+  return next;
+}
+
+export function clearOutboxQueue(): void {
+  storageRemove(OUTBOX_STORAGE_KEY);
 }
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -99,6 +193,10 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  async health(): Promise<{ status: string; mode?: string }> {
+    return apiFetch<{ status: string; mode?: string }>('/api/health');
+  },
+
   async login(username: string, password: string): Promise<{ token: string; user: User }> {
     const res = await apiFetch<{ token: string; user: User }>('/api/auth/login', {
       method: 'POST',
@@ -157,54 +255,95 @@ export const api = {
     return token ? `/api/papers/${id}/file?token=${encodeURIComponent(token)}` : `/api/papers/${id}/file`;
   },
 
-  async listRepos(): Promise<GitRepo[]> {
-    return apiFetch<GitRepo[]>('/api/repos');
+  async listProjects(): Promise<ProjectConfig[]> {
+    return apiFetch<ProjectConfig[]>('/api/projects');
   },
 
-  async createRepo(input: {
+  async createProject(input: {
     name: string;
-    remote_url: string;
-    bib_file_path?: string;
-    figures_dir?: string;
-  }): Promise<GitRepo> {
-    return apiFetch<GitRepo>('/api/repos', {
+    overleaf_remote?: string;
+    link_all_papers?: boolean;
+  }): Promise<ProjectConfig> {
+    return apiFetch<ProjectConfig>('/api/projects', {
       method: 'POST',
       body: JSON.stringify(input),
     });
   },
 
-  async syncRepo(id: string, commitMessage?: string): Promise<SyncRepoResult> {
-    return apiFetch<SyncRepoResult>(`/api/repos/${id}/sync`, {
+  async updateProject(
+    id: string,
+    patch: {
+      name?: string;
+      overleaf_remote?: string;
+      linked_paper_ids?: string[];
+      link_all_papers?: boolean;
+    },
+  ): Promise<ProjectConfig> {
+    return apiFetch<ProjectConfig>(`/api/projects/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  },
+
+  async getProjectTree(id: string): Promise<{ project: ProjectConfig; files: ProjectTreeEntry[] }> {
+    return apiFetch<{ project: ProjectConfig; files: ProjectTreeEntry[] }>(`/api/projects/${id}/tree`);
+  },
+
+  async readProjectFile(id: string, filePath: string): Promise<ProjectFilePayload> {
+    return apiFetch<ProjectFilePayload>(
+      `/api/projects/${id}/file?path=${encodeURIComponent(filePath)}`,
+    );
+  },
+
+  async writeProjectFile(
+    id: string,
+    filePath: string,
+    content: string,
+    isBase64 = false,
+  ): Promise<{ path: string; bytes: number; head_content: string }> {
+    return apiFetch<{ path: string; bytes: number; head_content: string }>(
+      `/api/projects/${id}/file`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ path: filePath, content, is_base64: isBase64 }),
+      },
+    );
+  },
+
+  async revertProjectFile(id: string, filePath: string): Promise<ProjectFilePayload> {
+    return apiFetch<ProjectFilePayload>(`/api/projects/${id}/revert`, {
+      method: 'POST',
+      body: JSON.stringify({ path: filePath }),
+    });
+  },
+
+  async syncProject(id: string, commitMessage?: string): Promise<ProjectSyncResponse> {
+    return apiFetch<ProjectSyncResponse>(`/api/projects/${id}/sync`, {
       method: 'POST',
       body: JSON.stringify({ commit_message: commitMessage || '' }),
     });
   },
 
-  async listRepoFiles(id: string): Promise<string[]> {
-    const res = await apiFetch<{ files: string[] }>(`/api/repos/${id}/files`);
-    return res.files;
-  },
-
-  async readRepoFile(id: string, filePath: string): Promise<{ path: string; content: string }> {
-    return apiFetch<{ path: string; content: string }>(
-      `/api/repos/${id}/file?path=${encodeURIComponent(filePath)}`,
-    );
-  },
-
-  async writeRepoFile(
-    id: string,
-    filePath: string,
-    content: string,
-    isBase64 = false,
-  ): Promise<{ path: string; bytes: number }> {
-    return apiFetch<{ path: string; bytes: number }>(`/api/repos/${id}/file`, {
-      method: 'PUT',
-      body: JSON.stringify({ path: filePath, content, is_base64: isBase64 }),
-    });
-  },
-
-  async deleteRepo(id: string): Promise<void> {
-    return apiFetch<void>(`/api/repos/${id}`, { method: 'DELETE' });
+  async flushOutbox(): Promise<number> {
+    const queue = getOutboxQueue();
+    if (queue.length === 0) {
+      return 0;
+    }
+    let flushed = 0;
+    for (const item of queue) {
+      if (item.kind === 'project_file' && item.projectId && item.path && item.content !== undefined) {
+        await this.writeProjectFile(item.projectId, item.path, item.content, false);
+        flushed++;
+      } else if (item.kind === 'paper_patch' && item.paperPatch) {
+        await apiFetch('/api/library/sync', {
+          method: 'POST',
+          body: JSON.stringify({ papers: [item.paperPatch], highlights: [] }),
+        });
+        flushed++;
+      }
+    }
+    clearOutboxQueue();
+    return flushed;
   },
 
   async listDocs(docType?: DocumentItem['doc_type']): Promise<DocumentItem[]> {

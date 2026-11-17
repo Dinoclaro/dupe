@@ -180,13 +180,19 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
   body = escapeHtml(body);
 
   body = body
+    .replace(/^###\s+(.+)$/gm, '<h4>$1</h4>')
+    .replace(/^##\s+(.+)$/gm, '<h3>$1</h3>')
+    .replace(/^#\s+(.+)$/gm, '<h2>$1</h2>')
     .replace(/\\section\*?\{([^}]*)\}/g, '<h2>$1</h2>')
     .replace(/\\subsection\*?\{([^}]*)\}/g, '<h3>$1</h3>')
     .replace(/\\subsubsection\*?\{([^}]*)\}/g, '<h4>$1</h4>')
     .replace(/\\textbf\{([^}]*)\}/g, '<strong>$1</strong>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\\textit\{([^}]*)\}/g, '<em>$1</em>')
     .replace(/\\emph\{([^}]*)\}/g, '<em>$1</em>')
     .replace(/\\texttt\{([^}]*)\}/g, '<code>$1</code>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[\[paper:([a-zA-Z0-9_:-]+)\]\]/g, (_m, key: string) => recordCitation(key))
     .replace(/\\cite[a-zA-Z*]*\{([^}]+)\}/g, (_m, keys: string) => recordCitation(keys))
     .replace(/(^|\s)@([a-zA-Z0-9_:-]{3,})/g, (_m, prefix: string, key: string) => {
       if (paperMap.has(key)) {
