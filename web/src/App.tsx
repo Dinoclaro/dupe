@@ -127,7 +127,7 @@ export interface StudioTab {
 export const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [authChecking, setAuthChecking] = useState(true);
-  const [username, setUsername] = useState('dino');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [runtimeMode, setRuntimeMode] = useState<string>('hosted');
@@ -1035,6 +1035,8 @@ export const App: React.FC = () => {
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              placeholder="Username"
+              autoComplete="username"
               required
             />
           </label>
@@ -1044,7 +1046,8 @@ export const App: React.FC = () => {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="dino-dev-password"
+              placeholder="Password"
+              autoComplete="current-password"
               required
             />
           </label>
