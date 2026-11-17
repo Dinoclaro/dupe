@@ -11,6 +11,7 @@ export interface BibEntrySummary {
 export interface CompileRequest {
   requestId: number;
   source: string;
+  isMarkdown?: boolean;
   papers: BibEntrySummary[];
   figures: Record<string, string>;
 }
@@ -75,7 +76,191 @@ function renderMathSegments(input: string, diagnostics: string[]): string {
   return output;
 }
 
+export function renderMarkdownPreview(req: CompileRequest): CompileResponse {
+  const startedAt = performance.now();
+  const diagnostics: string[] = [];
+  const paperMap = new Map<string, BibEntrySummary>();
+  for (const p of req.papers) {
+    if (p.bibtex_key) {
+      paperMap.set(p.bibtex_key, p);
+    }
+  }
+
+  const citedOrder: string[] = [];
+  const missingSet = new Set<string>();
+
+  // 1. Extract fenced code blocks first so their contents are never parsed as citations or math
+  const codeTokens: string[] = [];
+  let text = req.source.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, _lang: string, code: string) => {
+    const token = `@@CODE_BLOCK_${codeTokens.length}@@`;
+    codeTokens.push(`<pre class="md-pre"><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+    return token;
+  });
+
+  // 2. Extract inline backtick code spans (`...`) before math or citation parsing
+  const inlineCodeTokens: string[] = [];
+  text = text.replace(/`([^`\n]+)`/g, (_m, code: string) => {
+    const token = `@@INLINE_CODE_${inlineCodeTokens.length}@@`;
+    inlineCodeTokens.push(`<code class="md-code">${escapeHtml(code)}</code>`);
+    return token;
+  });
+
+  // 3. Extract math segments
+  const mathTokens: string[] = [];
+  text = text.replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, (match) => {
+    const rendered = renderMathSegments(match, diagnostics);
+    const token = `@@MATH_TOKEN_${mathTokens.length}@@`;
+    mathTokens.push(rendered);
+    return token;
+  });
+
+  const formatInline = (rawLine: string): string => {
+    let escaped = escapeHtml(rawLine);
+    escaped = escaped
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/\[\[paper:([a-zA-Z0-9_:-]+)\]\]/g, (_m, key: string) => {
+        if (key.includes('bibtex_key')) {
+          return `<code>[[paper:${escapeHtml(key)}]]</code>`;
+        }
+        let idx = citedOrder.indexOf(key);
+        if (idx === -1) {
+          citedOrder.push(key);
+          idx = citedOrder.length - 1;
+        }
+        const p = paperMap.get(key);
+        if (!p) {
+          missingSet.add(key);
+          return `<span class="cite-missing">[?${escapeHtml(key)}]</span>`;
+        }
+        return `<a href="#ref-${escapeHtml(key)}" class="cite-badge" title="${escapeHtml(
+          p.title,
+        )}">[@${escapeHtml(key)}]</a>`;
+      });
+
+    inlineCodeTokens.forEach((html, idx) => {
+      escaped = escaped.replace(`@@INLINE_CODE_${idx}@@`, html);
+    });
+    mathTokens.forEach((html, idx) => {
+      escaped = escaped.replace(`@@MATH_TOKEN_${idx}@@`, html);
+    });
+    return escaped;
+  };
+
+  const lines = text.split('\n');
+  const htmlBlocks: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('@@CODE_BLOCK_')) {
+      const matchIdx = trimmed.match(/^@@CODE_BLOCK_(\d+)@@$/);
+      if (matchIdx) {
+        htmlBlocks.push(codeTokens[Number(matchIdx[1])] || '');
+        i++;
+        continue;
+      }
+    }
+
+    // Headings
+    const hMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (hMatch) {
+      const level = hMatch[1].length;
+      htmlBlocks.push(`<h${level} class="md-heading">${formatInline(hMatch[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // Markdown Table (| col1 | col2 |)
+    if (trimmed.startsWith('|') && trimmed.endsWith('|') && i + 1 < lines.length && lines[i + 1].trim().startsWith('|')) {
+      const parseRow = (rowLine: string) =>
+        rowLine
+          .trim()
+          .replace(/^\|/, '')
+          .replace(/\|$/, '')
+          .split('|')
+          .map((c) => c.trim());
+
+      const headers = parseRow(trimmed);
+      const nextTrimmed = lines[i + 1].trim();
+      const isDivider = /^\|[\s:-]+\|/.test(nextTrimmed);
+      if (isDivider) {
+        i += 2;
+        const bodyRows: string[][] = [];
+        while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
+          bodyRows.push(parseRow(lines[i]));
+          i++;
+        }
+        const thead = `<thead><tr>${headers.map((h) => `<th>${formatInline(h)}</th>`).join('')}</tr></thead>`;
+        const tbody = `<tbody>${bodyRows
+          .map((r) => `<tr>${r.map((c) => `<td>${formatInline(c)}</td>`).join('')}</tr>`)
+          .join('')}</tbody>`;
+        htmlBlocks.push(`<div class="md-table-wrap"><table class="md-table">${thead}${tbody}</table></div>`);
+        continue;
+      }
+    }
+
+    // Unordered list (- or *)
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
+        items.push(`<li>${formatInline(lines[i].trim().replace(/^[-*]\s+/, ''))}</li>`);
+        i++;
+      }
+      htmlBlocks.push(`<ul class="md-list">${items.join('')}</ul>`);
+      continue;
+    }
+
+    // Ordered list (1. )
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+        items.push(`<li>${formatInline(lines[i].trim().replace(/^\d+\.\s+/, ''))}</li>`);
+        i++;
+      }
+      htmlBlocks.push(`<ol class="md-list">${items.join('')}</ol>`);
+      continue;
+    }
+
+    // Regular paragraph
+    const paraLines: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== '' &&
+      !lines[i].trim().startsWith('#') &&
+      !lines[i].trim().startsWith('@@CODE_BLOCK_') &&
+      !lines[i].trim().startsWith('|') &&
+      !/^[-*]\s+/.test(lines[i].trim()) &&
+      !/^\d+\.\s+/.test(lines[i].trim())
+    ) {
+      paraLines.push(lines[i].trim());
+      i++;
+    }
+    htmlBlocks.push(`<p>${formatInline(paraLines.join(' '))}</p>`);
+  }
+
+  return {
+    requestId: req.requestId,
+    html: `<article class="compiled-paper markdown-document">${htmlBlocks.join('\n')}</article>`,
+    citedKeys: citedOrder,
+    missingKeys: Array.from(missingSet),
+    diagnostics,
+    durationMs: Math.round(performance.now() - startedAt),
+  };
+}
+
 export function compileLatexPreview(req: CompileRequest): CompileResponse {
+  if (req.isMarkdown || (!req.source.includes('\\begin{document}') && req.source.trimStart().startsWith('#'))) {
+    return renderMarkdownPreview(req);
+  }
+
   const startedAt = performance.now();
   const diagnostics: string[] = [];
   const paperMap = new Map<string, BibEntrySummary>();
@@ -110,7 +295,10 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
     const keys = rawKeys
       .split(',')
       .map((k) => k.trim())
-      .filter(Boolean);
+      .filter((k) => Boolean(k) && !k.includes('<') && !k.includes('>') && !k.includes('&lt;'));
+    if (keys.length === 0) {
+      return '';
+    }
     const badges = keys.map((key) => {
       let idx = citedOrder.indexOf(key);
       if (idx === -1) {
@@ -180,19 +368,13 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
   body = escapeHtml(body);
 
   body = body
-    .replace(/^###\s+(.+)$/gm, '<h4>$1</h4>')
-    .replace(/^##\s+(.+)$/gm, '<h3>$1</h3>')
-    .replace(/^#\s+(.+)$/gm, '<h2>$1</h2>')
     .replace(/\\section\*?\{([^}]*)\}/g, '<h2>$1</h2>')
     .replace(/\\subsection\*?\{([^}]*)\}/g, '<h3>$1</h3>')
     .replace(/\\subsubsection\*?\{([^}]*)\}/g, '<h4>$1</h4>')
     .replace(/\\textbf\{([^}]*)\}/g, '<strong>$1</strong>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\\textit\{([^}]*)\}/g, '<em>$1</em>')
     .replace(/\\emph\{([^}]*)\}/g, '<em>$1</em>')
     .replace(/\\texttt\{([^}]*)\}/g, '<code>$1</code>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\[\[paper:([a-zA-Z0-9_:-]+)\]\]/g, (_m, key: string) => recordCitation(key))
     .replace(/\\cite[a-zA-Z*]*\{([^}]+)\}/g, (_m, keys: string) => recordCitation(keys))
     .replace(/(^|\s)@([a-zA-Z0-9_:-]{3,})/g, (_m, prefix: string, key: string) => {
       if (paperMap.has(key)) {

@@ -3,7 +3,10 @@ import {
   filterPapersForCitation,
   matchCitationTrigger,
 } from '../components/Editor/citationCompletion';
-import { compileLatexPreview } from '../workers/latexCompiler';
+import {
+  compileLatexPreview,
+  renderMarkdownPreview,
+} from '../workers/latexCompiler';
 import {
   decodeDrawioSvgDataUri,
   exportDiagramToSvg,
@@ -153,5 +156,27 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     expect(queue).toHaveLength(1);
     expect(queue[0].content).toBe('v2');
     clearOutboxQueue();
+  });
+
+  it('renders AGENTS.md tables and backtick \\cite{<bibtex_key>} without false citation errors', () => {
+    const md = `# AGENTS.md — Default Paper Project
+
+- Cite linked papers in LaTeX with \`\\cite{<bibtex_key>}\` and in Markdown notes with \`[[paper:<bibtex_key>]]\`.
+
+| BibTeX Key | Year | Title | Authors |
+|---|---|---|---|
+| \`vaswani2017attention\` | 2017 | Attention Is All You Need | Ashish Vaswani |
+`;
+    const res = renderMarkdownPreview({
+      requestId: 2,
+      source: md,
+      isMarkdown: true,
+      papers: SAMPLE_PAPERS,
+      figures: {},
+    });
+    expect(res.diagnostics).toHaveLength(0);
+    expect(res.missingKeys).toHaveLength(0);
+    expect(res.html).toContain('<table class="md-table">');
+    expect(res.html).toContain('vaswani2017attention');
   });
 });

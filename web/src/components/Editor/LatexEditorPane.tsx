@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
@@ -9,6 +9,7 @@ import { markdown } from '@codemirror/lang-markdown';
 import { unifiedMergeView } from '@codemirror/merge';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { Paper } from '../../api/client';
+import { renderMarkdownPreview } from '../../workers/latexCompiler';
 import { createCitationCompletionSource } from './citationCompletion';
 
 interface LatexEditorPaneProps {
@@ -50,11 +51,33 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   const onChangeRef = useRef(onChangeSource);
   onChangeRef.current = onChangeSource;
 
-  const [diffEnabled, setDiffEnabled] = useState<boolean>(false);
   const isMarkdown = fileLabel.endsWith('.md');
+  const [diffEnabled, setDiffEnabled] = useState<boolean>(false);
+  const [mdViewMode, setMdViewMode] = useState<'preview' | 'split' | 'raw'>(
+    isMarkdown ? (readOnly ? 'preview' : 'split') : 'raw',
+  );
+
   const hasHeadDiff = Boolean(headContent && headContent !== source);
 
-  // Only auto-open diff mode when switching to a file that was modified externally by an agent
+  const markdownCompiled = useMemo(() => {
+    if (!isMarkdown || mdViewMode === 'raw') {
+      return null;
+    }
+    return renderMarkdownPreview({
+      requestId: 0,
+      source,
+      isMarkdown: true,
+      papers: papers.map((p) => ({
+        bibtex_key: p.bibtex_key,
+        title: p.title,
+        authors: p.authors,
+        publication_year: p.publication_year,
+        doi: p.doi,
+      })),
+      figures: {},
+    });
+  }, [isMarkdown, mdViewMode, source, papers]);
+
   useEffect(() => {
     setDiffEnabled(Boolean(hasExternalAgentEdit && headContent && headContent !== source));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -62,7 +85,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
 
   useEffect(() => {
     const container = editorContainerRef.current;
-    if (!container) {
+    if (!container || (isMarkdown && mdViewMode === 'preview')) {
       return undefined;
     }
 
@@ -129,9 +152,8 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       view.destroy();
       editorViewRef.current = null;
     };
-    // Only recreate editor when fileLabel, readOnly, or diff toggle changes (never on user typing)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileLabel, readOnly, diffEnabled, isMarkdown]);
+  }, [fileLabel, readOnly, diffEnabled, isMarkdown, mdViewMode]);
 
   useEffect(() => {
     const view = editorViewRef.current;
@@ -168,7 +190,35 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
           </span>
         </div>
         <div className="editor-actions">
-          {headContent && (
+          {isMarkdown && (
+            <div className="row-gap">
+              <button
+                type="button"
+                className={`btn-tiny ${mdViewMode === 'preview' ? 'active-btn' : ''}`}
+                onClick={() => setMdViewMode('preview')}
+              >
+                Rendered
+              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  className={`btn-tiny ${mdViewMode === 'split' ? 'active-btn' : ''}`}
+                  onClick={() => setMdViewMode('split')}
+                >
+                  Split
+                </button>
+              )}
+              <button
+                type="button"
+                className={`btn-tiny ${mdViewMode === 'raw' ? 'active-btn' : ''}`}
+                onClick={() => setMdViewMode('raw')}
+              >
+                Raw Source
+              </button>
+            </div>
+          )}
+
+          {headContent && (!isMarkdown || mdViewMode !== 'preview') && (
             <button
               type="button"
               className={`btn-tiny ${diffEnabled ? 'active-btn' : ''}`}
@@ -204,12 +254,12 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
               Revert to HEAD
             </button>
           )}
-          {onOpenPreviewSplit && (
+          {!isMarkdown && onOpenPreviewSplit && (
             <button
               type="button"
               className="btn-tiny"
               onClick={onOpenPreviewSplit}
-              title="Open Compiled Preview in Right Split"
+              title="Open Compiled Paper Preview in Right Split"
             >
               ◫ Open Preview
             </button>
@@ -228,7 +278,15 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       </div>
 
       <div className="editor-split">
-        <div className="codemirror-host" ref={editorContainerRef} />
+        {(!isMarkdown || mdViewMode !== 'preview') && (
+          <div className="codemirror-host" ref={editorContainerRef} />
+        )}
+        {isMarkdown && mdViewMode !== 'raw' && markdownCompiled && (
+          <div
+            className="markdown-preview-pane"
+            dangerouslySetInnerHTML={{ __html: markdownCompiled.html }}
+          />
+        )}
       </div>
     </div>
   );

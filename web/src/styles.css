@@ -672,6 +672,82 @@ body,
   height: 100%;
 }
 
+.markdown-preview-pane {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  padding: 20px 28px;
+  background: var(--bg-0);
+  color: var(--text);
+  border-left: 1px solid var(--border);
+  line-height: 1.6;
+}
+
+.markdown-document h1,
+.markdown-document h2,
+.markdown-document h3,
+.markdown-document h4 {
+  color: #f0f6fc;
+  margin-top: 18px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.md-list {
+  margin: 8px 0 12px 20px;
+  padding: 0;
+}
+
+.md-list li {
+  margin-bottom: 4px;
+}
+
+.md-code {
+  background: rgba(110, 118, 129, 0.25);
+  color: #79c0ff;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.md-pre {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.md-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.md-table th {
+  background: var(--bg-1);
+  color: #58a6ff;
+  font-weight: 600;
+}
+
+.md-table tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
 .diagram-canvas-wrap,
 .drawio-iframe-wrap {
   flex: 1;

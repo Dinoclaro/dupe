@@ -471,7 +471,7 @@ export const App: React.FC = () => {
       }
     }
 
-    if (file.kind === 'tex' || file.kind === 'markdown') {
+    if (file.kind === 'tex') {
       setActiveEditorPath(file.path);
       const docTab: StudioTab = {
         id: `file:${file.path}`,
@@ -490,6 +490,17 @@ export const App: React.FC = () => {
         openTabInGroup(docTab, 0);
         openTabInGroup(previewTab, 1);
       }
+      return;
+    }
+
+    if (file.kind === 'markdown') {
+      const mdTab: StudioTab = {
+        id: `file:${file.path}`,
+        title: file.path,
+        kind: 'markdown',
+        filePath: file.path,
+      };
+      openTabInGroup(mdTab, inSplit ? 1 : 0);
       return;
     }
 
@@ -786,7 +797,9 @@ export const App: React.FC = () => {
         saving={savingSource}
         readOnly={isGeneratedReadOnly}
         onChangeSource={(next) => {
-          setActiveEditorPath(filePath);
+          if (filePath.endsWith('.tex')) {
+            setActiveEditorPath(filePath);
+          }
           setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
           setFileBuffers((prev) => ({ ...prev, [filePath]: next }));
         }}
