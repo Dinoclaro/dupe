@@ -17,6 +17,18 @@ export interface FolderTreeNode {
   totalFileCount: number;
 }
 
+export function formatCompactParentDir(fullPath: string): string {
+  const parts = fullPath.split('/').filter(Boolean);
+  if (parts.length <= 1) {
+    return '';
+  }
+  const dirParts = parts.slice(0, -1);
+  if (dirParts.length <= 3) {
+    return dirParts.join('/');
+  }
+  return `${dirParts[0]}/${dirParts[1]}/…/${dirParts[dirParts.length - 1]}`;
+}
+
 export function buildFolderTree(entries: ProjectTreeEntry[]): FolderTreeNode {
   const root: FolderTreeNode = {
     name: '',
@@ -751,11 +763,18 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                     : hit.category === 'code'
                       ? 'CODE'
                       : 'NOTE';
+              const shortFile =
+                hit.category === 'pdf'
+                  ? hit.title
+                  : hit.path.split('/').pop() || hit.title || hit.path;
+              const parentDir =
+                hit.category === 'pdf' ? '' : formatCompactParentDir(hit.path);
               return (
                 <div
                   key={`${hit.path}-${hit.line || 0}-${idx}`}
                   className="tree-row search-hit-row"
                   onClick={() => handleOpenSearchResult(hit, false)}
+                  title={hit.category === 'pdf' ? hit.title : `${hit.path}${hit.line ? `:${hit.line}` : ''}`}
                 >
                   <span
                     className={`file-icon ${
@@ -771,11 +790,15 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                     {catBadge}
                   </span>
                   <div className="tree-label-col">
-                    <span className="tree-primary-text">
-                      {hit.category === 'pdf'
-                        ? hit.title
-                        : `${hit.path}${hit.line ? `:${hit.line}` : ''}`}
-                    </span>
+                    <div className="search-hit-header">
+                      <span className="tree-primary-text">
+                        {shortFile}
+                        {hit.line ? <span className="search-hit-line">:{hit.line}</span> : null}
+                      </span>
+                      {parentDir && (
+                        <span className="search-hit-dir">{parentDir}</span>
+                      )}
+                    </div>
                     <span className="tree-sub-text">{hit.snippet}</span>
                   </div>
                   <div className="tree-row-actions" onClick={(e) => e.stopPropagation()}>

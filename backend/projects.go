@@ -1141,6 +1141,58 @@ type compileProjectRequest struct {
 	Target string `json:"target"`
 }
 
+func writeTectonicFontBridges(paperDir string) func() {
+	bridges := map[string]string{
+		"TUptm.fd": `\ProvidesFile{TUptm.fd}[2020/01/01 TU Times Roman font definitions for IEEEtran]
+\DeclareFontFamily{TU}{ptm}{}
+\DeclareFontShape{TU}{ptm}{m}{n}{<-> "[texgyretermes-regular.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{m}{it}{<-> "[texgyretermes-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{m}{sl}{<-> "[texgyretermes-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{m}{sc}{<-> "[texgyretermes-regular.otf]:mapping=tex-text;+smcp"}{}
+\DeclareFontShape{TU}{ptm}{bx}{n}{<-> "[texgyretermes-bold.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{bx}{it}{<-> "[texgyretermes-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{bx}{sl}{<-> "[texgyretermes-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{b}{n}{<-> ssub * ptm/bx/n}{}
+\DeclareFontShape{TU}{ptm}{b}{it}{<-> ssub * ptm/bx/it}{}
+\DeclareFontShape{TU}{ptm}{b}{sl}{<-> ssub * ptm/bx/sl}{}
+`,
+		"TUphv.fd": `\ProvidesFile{TUphv.fd}[2020/01/01 TU Helvetica font definitions for IEEEtran]
+\DeclareFontFamily{TU}{phv}{}
+\DeclareFontShape{TU}{phv}{m}{n}{<-> "[texgyreheros-regular.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{m}{it}{<-> "[texgyreheros-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{m}{sl}{<-> "[texgyreheros-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{bx}{n}{<-> "[texgyreheros-bold.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{bx}{it}{<-> "[texgyreheros-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{b}{n}{<-> "[texgyreheros-bold.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{b}{it}{<-> "[texgyreheros-bolditalic.otf]:mapping=tex-text;"}{}
+`,
+		"TUpcr.fd": `\ProvidesFile{TUpcr.fd}[2020/01/01 TU Courier font definitions for IEEEtran]
+\DeclareFontFamily{TU}{pcr}{}
+\DeclareFontShape{TU}{pcr}{m}{n}{<-> "[texgyrecursor-regular.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{m}{it}{<-> "[texgyrecursor-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{m}{sl}{<-> "[texgyrecursor-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{bx}{n}{<-> "[texgyrecursor-bold.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{bx}{it}{<-> "[texgyrecursor-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{b}{n}{<-> "[texgyrecursor-bold.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{b}{it}{<-> "[texgyrecursor-bolditalic.otf]:mapping=tex-text;"}{}
+`,
+	}
+	var created []string
+	for name, body := range bridges {
+		p := filepath.Join(paperDir, name)
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			if writeErr := os.WriteFile(p, []byte(body), 0o644); writeErr == nil {
+				created = append(created, p)
+			}
+		}
+	}
+	return func() {
+		for _, p := range created {
+			_ = os.Remove(p)
+		}
+	}
+}
+
 func (s *Server) handleCompileProject(w http.ResponseWriter, r *http.Request) {
 	claims, ok := currentUser(r)
 	if !ok {
@@ -1172,6 +1224,9 @@ func (s *Server) handleCompileProject(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	ctxTimeout, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
+
+	cleanupBridges := writeTectonicFontBridges(paperDir)
+	defer cleanupBridges()
 
 	tectonicBin := resolveTectonicBinary()
 	cmd := exec.CommandContext(ctxTimeout, tectonicBin, "-X", "compile", rootTexName)

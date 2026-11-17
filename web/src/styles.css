@@ -1230,3 +1230,28 @@ textarea:focus {
   background: rgba(59, 130, 246, 0.08);
 }
 
+.search-hit-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.search-hit-line {
+  color: #60a5fa;
+  font-weight: 700;
+  margin-left: 1px;
+}
+
+.search-hit-dir {
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 55%;
+  flex-shrink: 1;
+}
+
+
