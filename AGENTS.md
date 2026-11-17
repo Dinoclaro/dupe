@@ -21,7 +21,7 @@ The Go binary runs in two modes. Local mode runs on a laptop and works offline. 
 
 The library, BibTeX pipeline, Overleaf bridge, LaTeX editor, and diagram tool exist. Build the next features in this order. [ARCHITECTURE.md](ARCHITECTURE.md) section 11 has the details.
 
-1. **Project folders and local mode (`backend/`, `web/`):** Add the `--mode` flag and the project folder format. A "New project" action creates the folder layout. Users link Overleaf repositories in the project settings. The explorer shows the project tree. Notes go to `notes/` and diagrams go to `diagrams/`. Generate `AGENTS.md`, `references.bib`, and `refs/text/` in each project.
+1. **Project folders, local mode, and diff review (`backend/`, `web/`):** Add the `--mode` flag and the project folder format. A "New project" action creates the folder layout. Users link Overleaf repositories in the project settings. The explorer shows the project tree with Git status badges (`M`, `U`). Modified `.tex` and `.md` files open with `@codemirror/merge` inline diffs against `HEAD` for hunk-level accept and revert. Notes go to `notes/` and diagrams go to `diagrams/`. Generate `AGENTS.md`, `references.bib`, and `refs/text/` in each project.
 2. **Library sync (`backend/`, `web/`):** Add the sync API, the local outbox, the PDF cache, and the TeX package cache for offline use.
 3. **Agent integration (`backend/`):** Add the `dupe mcp` server with library tools.
 4. **Hosted mode for friends (`backend/`, `deploy/`):** Disable the terminal in hosted mode and restrict WebSocket origins. Add per-user project folders, `cloudflared` with Cloudflare Access, and backup jobs.

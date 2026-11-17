@@ -112,8 +112,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /api/docs/{id}", s.requireAuth(s.handleUpdateDoc))
 	mux.HandleFunc("DELETE /api/docs/{id}", s.requireAuth(s.handleDeleteDoc))
 
-	mux.HandleFunc("GET /api/terminal/ws", s.requireAuth(s.handleTerminalWS))
-
 	if s.webDistDir != "" {
 		if info, err := os.Stat(s.webDistDir); err == nil && info.IsDir() {
 			fileServer := http.FileServer(http.Dir(s.webDistDir))

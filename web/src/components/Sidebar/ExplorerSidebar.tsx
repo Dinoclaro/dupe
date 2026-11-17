@@ -15,7 +15,6 @@ interface ExplorerSidebarProps {
   onOpenPaper: (paper: Paper, inSplit: boolean) => void;
   onOpenProjectFile: (file: ProjectFileItem, inSplit: boolean) => void;
   onOpenCompiledPreview: (inSplit: boolean) => void;
-  onOpenTerminal: (inSplit: boolean) => void;
   onCreateTexFile: (filename: string) => void;
   onCreateDiagramFile: (figureName: string) => void;
   onInsertCitation: (bibtexKey: string) => void;
@@ -34,7 +33,6 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   onOpenPaper,
   onOpenProjectFile,
   onOpenCompiledPreview,
-  onOpenTerminal,
   onCreateTexFile,
   onCreateDiagramFile,
   onInsertCitation,
@@ -452,28 +450,6 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
         )}
 
         <div className="explorer-tree-list">
-          {/* Interactive Terminal item in project */}
-          <div
-            className={`tree-row ${activeTabId === 'terminal:main' ? 'active' : ''}`}
-            onClick={() => onOpenTerminal(false)}
-          >
-            <span className="file-icon term-icon">CLI</span>
-            <div className="tree-label-col">
-              <span className="tree-primary-text">Interactive Terminal</span>
-              <span className="tree-sub-text">Antigravity / Claude / Shell</span>
-            </div>
-            <div className="tree-row-actions" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                className="tree-action-btn"
-                title="Open Terminal in Right Split"
-                onClick={() => onOpenTerminal(true)}
-              >
-                ◫
-              </button>
-            </div>
-          </div>
-
           {/* Virtual Compiled PDF item at top of project */}
           <div
             className={`tree-row ${activeTabId === 'preview:compiled' ? 'active' : ''}`}

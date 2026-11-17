@@ -262,11 +262,13 @@ The `documents`, `backlinks`, and `git_repos` tables are removed. Notes, diagram
 
 * **Phase 1 (done):** Go server, JWT auth, PDF upload with SHA-256 deduplication, BibTeX extraction, Overleaf git bridge.
 * **Phase 2 (done):** Split-pane studio, PDF reader, LaTeX editor, diagram tool.
-* **Phase 3 (project folders and local mode):**
+* **Phase 3 (project folders, local mode, and diff review):**
   * `--mode` flag and SQLite library cache.
   * A "New project" action in the frontend creates a folder with the complete section 2 layout.
   * The project settings let the user link an Overleaf GitHub repository as `paper/`.
   * The explorer sidebar shows the project folder tree: `paper/`, `code/`, `notes/`, `diagrams/`, and `refs/`.
+  * The explorer marks modified and untracked files in `paper/` and the project root with Git status badges (`M`, `U`).
+  * Clicking a modified `.tex` or `.md` file opens an inline `@codemirror/merge` diff view against `HEAD` with per-hunk Accept and Revert controls.
   * New notes go to `notes/`. New diagrams go to `diagrams/`. Diagram exports go to `paper/figures/`.
   * dupe generates `AGENTS.md`, `references.bib`, and `refs/text/` in each project.
 * **Phase 4 (library sync):** sync API, local outbox, PDF cache, offline indicator, TeX package cache.

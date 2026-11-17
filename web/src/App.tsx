@@ -16,7 +16,6 @@ import { PdfReaderPane } from './components/Reader/PdfReaderPane';
 import { LatexEditorPane } from './components/Editor/LatexEditorPane';
 import { CompiledPreviewPane } from './components/Editor/CompiledPreviewPane';
 import { DiagramPane } from './components/Diagram/DiagramPane';
-import { TerminalPane } from './components/Terminal/TerminalPane';
 import {
   DEFAULT_DRAWIO_XML,
   DiagramElement,
@@ -116,7 +115,7 @@ const INITIAL_DIAGRAM_ELEMENTS: DiagramElement[] = [
 export interface StudioTab {
   id: string;
   title: string;
-  kind: 'pdf' | 'tex' | 'bib' | 'preview' | 'diagram' | 'terminal';
+  kind: 'pdf' | 'tex' | 'bib' | 'preview' | 'diagram';
   paperId?: string;
   filePath?: string;
 }
@@ -464,15 +463,6 @@ export const App: React.FC = () => {
     openTabInGroup(previewTab, inSplit ? 1 : 0);
   };
 
-  const handleOpenTerminal = (inSplit: boolean) => {
-    const termTab: StudioTab = {
-      id: 'terminal:main',
-      title: '>_ Terminal',
-      kind: 'terminal',
-    };
-    openTabInGroup(termTab, inSplit ? 1 : 0);
-  };
-
   const handleCreateTexFile = (filename: string) => {
     setFileBuffers((prev) => ({
       ...prev,
@@ -636,10 +626,6 @@ export const App: React.FC = () => {
       return <CompiledPreviewPane compiled={compiled} sourceLabel={activeTexPath} />;
     }
 
-    if (tab.kind === 'terminal') {
-      return <TerminalPane activeRepoId={activeRepoId} />;
-    }
-
     if (tab.kind === 'bib') {
       return (
         <LatexEditorPane
@@ -773,22 +759,6 @@ export const App: React.FC = () => {
           <button
             type="button"
             className="btn-tiny"
-            onClick={() => handleOpenTerminal(false)}
-            title="Open full-page Terminal tab (for Antigravity / Claude Code)"
-          >
-            &gt;_ Terminal
-          </button>
-          <button
-            type="button"
-            className="btn-tiny"
-            onClick={() => handleOpenTerminal(true)}
-            title="Open Terminal in Right Split"
-          >
-            ◫ Split Terminal
-          </button>
-          <button
-            type="button"
-            className="btn-tiny"
             onClick={() =>
               void handleOpenProjectFile({ path: activeTexPath, kind: 'tex' }, false)
             }
@@ -826,7 +796,6 @@ export const App: React.FC = () => {
             onOpenPaper={handleOpenPaper}
             onOpenProjectFile={(f, split) => void handleOpenProjectFile(f, split)}
             onOpenCompiledPreview={handleOpenCompiledPreview}
-            onOpenTerminal={handleOpenTerminal}
             onCreateTexFile={handleCreateTexFile}
             onCreateDiagramFile={handleCreateDiagramFile}
             onInsertCitation={handleInsertCitation}

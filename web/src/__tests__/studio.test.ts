@@ -9,7 +9,6 @@ import {
   exportDiagramToSvg,
 } from '../components/Diagram/svgExport';
 import { normalizeRect } from '../components/Reader/PdfReaderPane';
-import { buildTerminalWsUrl } from '../components/Terminal/TerminalPane';
 import { Paper } from '../api/client';
 
 const SAMPLE_PAPERS: Paper[] = [
@@ -118,18 +117,5 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     const rawSvg = '<svg xmlns="http://www.w3.org/2000/svg"><text>$$f(x)$$</text></svg>';
     const dataUri = `data:image/svg+xml;base64,${btoa(rawSvg)}`;
     expect(decodeDrawioSvgDataUri(dataUri)).toBe(rawSvg);
-  });
-
-  it('builds relative WebSocket URLs for the server PTY terminal', () => {
-    const url = buildTerminalWsUrl(
-      { protocol: 'https:', host: 'dupe.tailnet.ts.net' },
-      'jwt-token-123',
-      '11111111-1111-1111-1111-111111111111',
-      120,
-      40,
-    );
-    expect(url).toBe(
-      'wss://dupe.tailnet.ts.net/api/terminal/ws?token=jwt-token-123&repo_id=11111111-1111-1111-1111-111111111111&cols=120&rows=40',
-    );
   });
 });
