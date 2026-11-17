@@ -37,7 +37,7 @@ const DEFAULT_LATEX_TEMPLATE = `\\documentclass{article}
 \\maketitle
 
 \\begin{abstract}
-We present a VS Code-style academic research workspace that extracts BibTeX entries automatically from PDFs and synchronizes figures and citations with Overleaf via GitHub.
+We present an academic research workspace that extracts BibTeX entries automatically from PDFs and synchronizes figures and citations with Overleaf via GitHub.
 \\end{abstract}
 
 \\section{Introduction}
@@ -113,7 +113,7 @@ const INITIAL_DIAGRAM_ELEMENTS: DiagramElement[] = [
   },
 ];
 
-export interface WorkbenchTab {
+export interface StudioTab {
   id: string;
   title: string;
   kind: 'pdf' | 'tex' | 'bib' | 'preview' | 'diagram' | 'terminal';
@@ -151,13 +151,13 @@ export const App: React.FC = () => {
     'architecture.svg': exportDiagramToSvg(INITIAL_DIAGRAM_ELEMENTS),
   }));
 
-  // VS Code Editor Groups (Left = Group 0, Right = Group 1)
-  const [leftTabs, setLeftTabs] = useState<WorkbenchTab[]>([
+  // Editor groups: left = 0, right = 1
+  const [leftTabs, setLeftTabs] = useState<StudioTab[]>([
     { id: 'file:main.tex', title: 'main.tex', kind: 'tex', filePath: 'main.tex' },
   ]);
   const [activeLeftTabId, setActiveLeftTabId] = useState<string | null>('file:main.tex');
 
-  const [rightTabs, setRightTabs] = useState<WorkbenchTab[]>([
+  const [rightTabs, setRightTabs] = useState<StudioTab[]>([
     { id: 'preview:compiled', title: 'Compiled Paper.pdf', kind: 'preview' },
   ]);
   const [activeRightTabId, setActiveRightTabId] = useState<string | null>('preview:compiled');
@@ -344,7 +344,7 @@ export const App: React.FC = () => {
       .catch(() => setRepoFilePaths([]));
   }, [activeRepoId]);
 
-  const openTabInGroup = (tab: WorkbenchTab, groupIdx: 0 | 1) => {
+  const openTabInGroup = (tab: StudioTab, groupIdx: 0 | 1) => {
     if (groupIdx === 0) {
       setLeftTabs((prev) => (prev.some((t) => t.id === tab.id) ? prev : [...prev, tab]));
       setActiveLeftTabId(tab.id);
@@ -377,7 +377,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const moveTabToOtherGroup = (tab: WorkbenchTab, fromGroup: 0 | 1, event: React.MouseEvent) => {
+  const moveTabToOtherGroup = (tab: StudioTab, fromGroup: 0 | 1, event: React.MouseEvent) => {
     event.stopPropagation();
     const targetGroup: 0 | 1 = fromGroup === 0 ? 1 : 0;
     openTabInGroup(tab, targetGroup);
@@ -385,7 +385,7 @@ export const App: React.FC = () => {
 
   // Clicking a PDF opens it in the main viewer (or right split if requested)
   const handleOpenPaper = (paper: Paper, inSplit: boolean) => {
-    const tab: WorkbenchTab = {
+    const tab: StudioTab = {
       id: `pdf:${paper.id}`,
       title: paper.title.length > 26 ? `${paper.title.slice(0, 26)}…` : paper.title,
       kind: 'pdf',
@@ -407,13 +407,13 @@ export const App: React.FC = () => {
 
     if (file.kind === 'tex') {
       setActiveTexPath(file.path);
-      const texTab: WorkbenchTab = {
+      const texTab: StudioTab = {
         id: `file:${file.path}`,
         title: file.path,
         kind: 'tex',
         filePath: file.path,
       };
-      const previewTab: WorkbenchTab = {
+      const previewTab: StudioTab = {
         id: 'preview:compiled',
         title: 'Compiled Paper.pdf',
         kind: 'preview',
@@ -428,7 +428,7 @@ export const App: React.FC = () => {
     }
 
     if (file.kind === 'bib') {
-      const bibTab: WorkbenchTab = {
+      const bibTab: StudioTab = {
         id: `file:${file.path}`,
         title: file.path,
         kind: 'bib',
@@ -445,7 +445,7 @@ export const App: React.FC = () => {
       if (!diagramsXmlByStem[stem]) {
         setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: DEFAULT_DRAWIO_XML }));
       }
-      const diagTab: WorkbenchTab = {
+      const diagTab: StudioTab = {
         id: `file:${file.path}`,
         title: `figures/${stem}.svg`,
         kind: 'diagram',
@@ -456,7 +456,7 @@ export const App: React.FC = () => {
   };
 
   const handleOpenCompiledPreview = (inSplit: boolean) => {
-    const previewTab: WorkbenchTab = {
+    const previewTab: StudioTab = {
       id: 'preview:compiled',
       title: 'Compiled Paper.pdf',
       kind: 'preview',
@@ -465,7 +465,7 @@ export const App: React.FC = () => {
   };
 
   const handleOpenTerminal = (inSplit: boolean) => {
-    const termTab: WorkbenchTab = {
+    const termTab: StudioTab = {
       id: 'terminal:main',
       title: '>_ Terminal',
       kind: 'terminal',
@@ -618,7 +618,7 @@ export const App: React.FC = () => {
     window.addEventListener('pointerup', onUp);
   };
 
-  const renderTabContent = (tab: WorkbenchTab | null) => {
+  const renderTabContent = (tab: StudioTab | null) => {
     if (!tab) {
       return (
         <div className="empty-hint">
@@ -716,7 +716,7 @@ export const App: React.FC = () => {
         <form className="auth-card" onSubmit={handleLogin}>
           <h1>dupe</h1>
           <p className="muted-hint">
-            Dino&apos;s Ultimate Paper Editor — VS Code Academic Studio
+            Dino&apos;s Ultimate Paper Editor — Academic Studio
           </p>
           {authError && <div className="auth-error">{authError}</div>}
           <label>
@@ -753,9 +753,9 @@ export const App: React.FC = () => {
     focusedGroup === 0 ? activeLeftTab?.id || null : activeRightTab?.id || null;
 
   return (
-    <div className="vscode-shell">
+    <div className="studio-shell">
       {/* Top Titlebar */}
-      <header className="vscode-titlebar">
+      <header className="studio-titlebar">
         <div className="brand-group">
           <button
             type="button"
@@ -814,8 +814,8 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Workbench Area: Explorer Sidebar + Split Editor Groups */}
-      <div className="vscode-workbench">
+      {/* Explorer sidebar and split editor groups */}
+      <div className="studio-workbench">
         {showSidebar && (
           <ExplorerSidebar
             papers={papers}
@@ -837,23 +837,23 @@ export const App: React.FC = () => {
           />
         )}
 
-        <main className="vscode-editor-stage" ref={editorStageRef}>
+        <main className="studio-editor-stage" ref={editorStageRef}>
           {/* Left Editor Group */}
           <section
             className={`editor-group ${focusedGroup === 0 ? 'focused' : ''}`}
             style={{ flex: hasRightSplit ? `${splitRatio} 1 0%` : '1 1 0%' }}
             onPointerDown={() => setFocusedGroup(0)}
           >
-            <div className="vscode-tabbar">
+            <div className="studio-tabbar">
               {leftTabs.map((tab) => {
                 const isActive = activeLeftTab?.id === tab.id;
                 return (
                   <div
                     key={tab.id}
-                    className={`vscode-tab ${isActive ? 'active' : ''}`}
+                    className={`studio-tab ${isActive ? 'active' : ''}`}
                     onClick={() => setActiveLeftTabId(tab.id)}
                   >
-                    <span className="vscode-tab-title">{tab.title}</span>
+                    <span className="studio-tab-title">{tab.title}</span>
                     <button
                       type="button"
                       className="tab-icon-btn"
@@ -891,16 +891,16 @@ export const App: React.FC = () => {
                 style={{ flex: `${1 - splitRatio} 1 0%` }}
                 onPointerDown={() => setFocusedGroup(1)}
               >
-                <div className="vscode-tabbar">
+                <div className="studio-tabbar">
                   {rightTabs.map((tab) => {
                     const isActive = activeRightTab?.id === tab.id;
                     return (
                       <div
                         key={tab.id}
-                        className={`vscode-tab ${isActive ? 'active' : ''}`}
+                        className={`studio-tab ${isActive ? 'active' : ''}`}
                         onClick={() => setActiveRightTabId(tab.id)}
                       >
-                        <span className="vscode-tab-title">{tab.title}</span>
+                        <span className="studio-tab-title">{tab.title}</span>
                         <button
                           type="button"
                           className="tab-icon-btn"
@@ -928,8 +928,8 @@ export const App: React.FC = () => {
         </main>
       </div>
 
-      {/* VS Code Bottom Statusbar */}
-      <footer className="vscode-statusbar">
+      {/* Status bar */}
+      <footer className="studio-statusbar">
         <span>{statusMessage}</span>
         <span>
           {papers.length} PDFs in Library · {compiled.citedKeys.length} Citations ·{' '}

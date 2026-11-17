@@ -210,7 +210,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const activeRepo = repos.find((r) => r.id === activeRepoId) || null;
 
   return (
-    <aside className="vscode-sidebar" ref={sidebarRef}>
+    <aside className="studio-sidebar" ref={sidebarRef}>
       {/* TOP HALF: PDF LIBRARY EXPLORER */}
       <section className="explorer-section" style={{ flex: `${topRatio} 1 0%` }}>
         <div className="explorer-section-header">

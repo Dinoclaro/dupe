@@ -28,8 +28,8 @@ body,
   font-size: 13px;
 }
 
-/* VS Code Workbench Shell */
-.vscode-shell {
+/* Studio shell */
+.studio-shell {
   display: flex;
   flex-direction: column;
   width: 100vw;
@@ -37,7 +37,7 @@ body,
   overflow: hidden;
 }
 
-.vscode-titlebar {
+.studio-titlebar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -67,7 +67,7 @@ body,
   font-size: 12px;
 }
 
-.vscode-workbench {
+.studio-workbench {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -75,7 +75,7 @@ body,
 }
 
 /* Left Explorer Sidebar (Vertically Split) */
-.vscode-sidebar {
+.studio-sidebar {
   width: 290px;
   min-width: 240px;
   max-width: 380px;
@@ -290,7 +290,7 @@ body,
 }
 
 /* Main Split Editor Groups */
-.vscode-editor-stage {
+.studio-editor-stage {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -307,7 +307,7 @@ body,
   overflow: hidden;
 }
 
-.vscode-tabbar {
+.studio-tabbar {
   display: flex;
   align-items: center;
   height: 34px;
@@ -316,7 +316,7 @@ body,
   overflow-x: auto;
 }
 
-.vscode-tab {
+.studio-tab {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -330,7 +330,7 @@ body,
   font-size: 12px;
 }
 
-.vscode-tab.active {
+.studio-tab.active {
   background: var(--bg-0);
   color: var(--text);
   border-top: 2px solid var(--accent);
@@ -634,7 +634,7 @@ textarea {
   font-weight: 600;
 }
 
-.vscode-statusbar {
+.studio-statusbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
