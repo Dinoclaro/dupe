@@ -4,9 +4,11 @@ Entry point for coding agents in `dupe` (Dino's Ultimate Paper Editor). Read thi
 
 ## What this repository is
 
-`dupe` is a self-hosted academic research and paper-writing workspace that runs on a home Linux server (2015 Intel Core i7, 300 GB storage). It combines a PDF library, automatic BibTeX generator, client-side WASM LaTeX/Typst compiler, Excalidraw diagram tool, and Markdown note-taker in a split-pane desktop web application.
+`dupe` is an academic research and paper-writing workspace. It combines a PDF library, a BibTeX generator, a WASM LaTeX/Typst compiler, a diagram tool, and Markdown notes in a split-pane web application.
 
-Heavy computation runs in the user's browser (`PDF.js`, `CodeMirror 6`, `Excalidraw`, and WASM LaTeX/Typst inside Web Workers). The Go backend handles authentication, PostgreSQL CRUD, SHA-256 deduplicated PDF storage, and bounded Python metadata extraction.
+Each project is a folder on disk with `paper/`, `code/`, `notes/`, `diagrams/`, and `refs/`. VS Code edits the code. dupe handles reading, writing, citations, and diagrams. Coding agents read the same folder.
+
+The Go binary runs in two modes. Local mode runs on a laptop and works offline. Hosted mode runs on a home Linux server (2015 Intel Core i7, 300 GB storage). It owns the paper library and serves friends. Heavy computation runs in the browser.
 
 ## Where to read next
 
@@ -17,12 +19,14 @@ Heavy computation runs in the user's browser (`PDF.js`, `CodeMirror 6`, `Excalid
 
 ## Minimal Viable Product (MVP) priority
 
-Prioritize features in the order required to write an academic paper end-to-end with Overleaf and GitHub:
+The library, BibTeX pipeline, Overleaf bridge, LaTeX editor, and diagram tool exist. Build the next features in this order. [ARCHITECTURE.md](ARCHITECTURE.md) section 11 has the details.
 
-1. **Paper Library and BibTeX Pipeline (`backend/`, `scripts/`):** Store all uploaded PDFs with SHA-256 deduplication, extract DOIs and metadata via Python (`PyMuPDF` + Crossref/arXiv), and generate clean BibTeX entries for every paper.
-2. **Overleaf-GitHub Repository Bridge (`backend/`):** Clone an Overleaf-linked GitHub repository into `storage/repos/`, write the generated `references.bib` and exported figures into the repository, and commit/push changes back to GitHub.
-3. **Diagram Tool, LaTeX Editor, and Preview (`web/`):** Embed an `Excalidraw` canvas to export diagrams into the linked GitHub repo (`figures/`), edit `.tex` files in `CodeMirror 6` with `@citation` autocomplete backed by the `.bib` library, and preview with `PDF.js` and the Web Worker WASM LaTeX engine.
-4. **Post-MVP (`web/`, `extension/`):** Add the Markdown note-taker, PDF highlight overlays with bidirectional backlinks, Chrome Web Clipper, and Phase 5 iPad offline sync.
+1. **Project folders and local mode (`backend/`, `web/`):** Add the `--mode` flag and the project folder format. A "New project" action creates the folder layout. Users link Overleaf repositories in the project settings. The explorer shows the project tree. Notes go to `notes/` and diagrams go to `diagrams/`. Generate `AGENTS.md`, `references.bib`, and `refs/text/` in each project.
+2. **Library sync (`backend/`, `web/`):** Add the sync API, the local outbox, the PDF cache, and the TeX package cache for offline use.
+3. **Agent integration (`backend/`):** Add the `dupe mcp` server with library tools.
+4. **Hosted mode for friends (`backend/`, `deploy/`):** Disable the terminal in hosted mode and restrict WebSocket origins. Add per-user project folders, `cloudflared` with Cloudflare Access, and backup jobs.
+5. **Hosted agent panel (`backend/`, `web/`):** Run read-only agents in containers with user-supplied API keys. Show their edits as diffs.
+6. **Post-MVP (`web/`, `extension/`):** Add highlights and backlinks, the Chrome Web Clipper, and the iPad offline PWA.
 
 ## Checks
 

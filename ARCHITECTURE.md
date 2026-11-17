@@ -1,78 +1,198 @@
-# ARCHITECTURE.md — Dino's Ultimate Paper Editor
+# ARCHITECTURE.md
 
-## 1. Project Overview & Philosophy
-This project is a self-hosted, multi-user academic research and writing workspace (combining Zotero + Obsidian + Overleaf + Excalidraw), designed for ~10–50 users running on a home Linux server (2015 Intel Core i7, 300 GB storage).
+## 1. Overview
 
-### Core Architectural Tenets (STRICT RULES FOR AI AGENTS)
-1. **Laptop-First Academic Studio:** Phases 1–4 focus strictly on the **Desktop/Laptop Split-Pane Web Application** and **Chrome Web Clipper**. Mobile/iPad offline PWA support is deferred to Phase 5 (though database schemas must remain offline-ready from Day 1).
-2. **Client-Side Compute Offloading:** The Linux server has an older CPU (2015 Core i7). Offload all heavy computation—PDF rendering (`PDF.js`), Markdown/KaTeX parsing, diagram rendering (`Excalidraw`), and academic typesetting (**WASM Typst / SwiftLaTeX** inside Web Workers)—directly to the user's laptop browser. The Linux server strictly handles auth, PostgreSQL CRUD, file storage, and lightweight Python DOI/metadata scraping.
-3. **Network Agnostic (`localhost:8080`):** The Go backend listens on `127.0.0.1:8080`. External HTTPS is handled transparently via `tailscale serve` (initial dev) or `cloudflared` (Cloudflare Tunnel for friends). Frontend API calls MUST use relative paths (`/api/...`).
-4. **Future-Proof Data Model:** Even though Laptop mode reads/writes directly to the REST API, all database tables MUST use client-generated `UUID` primary keys, `updated_at` timestamps, and `deleted_at` soft-deletes so the Phase 5 iPad offline sync engine requires zero schema changes.
+`dupe` (Dino's Ultimate Paper Editor) is a research and writing workspace. It combines a PDF library, a BibTeX generator, a LaTeX/Typst editor with preview, a diagram tool, and Markdown notes.
+
+The user works in two applications:
+
+- **VS Code** edits code.
+- **dupe** handles reading, writing, citations, diagrams, and notes.
+
+Both applications open the same **project folder**. Coding agents read the same folder and get the full context of a paper: code, LaTeX, notes, diagrams, and reference texts.
+
+### Core tenets (strict rules for agents)
+
+1. **A project is a folder.** dupe stores project content as plain files on disk. A database holds only the paper library and user accounts.
+2. **One binary, two modes.** The same Go binary runs in **local mode** on a laptop and in **hosted mode** on the home server. Section 3 defines both modes.
+3. **Local-first.** Local mode works without an internet connection. Network features queue their work and run when the connection returns.
+4. **Client-side compute.** The browser runs PDF rendering (`PDF.js`), Markdown and KaTeX, diagrams, and WASM LaTeX/Typst compilation in Web Workers. The server CPU is a 2015 Core i7.
+5. **Relative API paths.** Frontend requests use `/api/...` paths. The app works behind `localhost`, `tailscale serve`, and `cloudflared` without changes.
+6. **Sync-ready data.** Library tables use client-generated `UUID` keys, `updated_at` timestamps, and `deleted_at` soft-deletes.
 
 ---
 
-## 2. Monorepo Directory Structure
+## 2. Project folder format
+
+dupe creates and manages this layout. VS Code and agents open the project root.
+
+```text
+<project>/
+├── AGENTS.md            # dupe generates this: layout, citation keys, rules for agents
+├── .dupe/
+│   └── project.json     # Project settings: name, Overleaf remote, linked paper UUIDs
+├── paper/               # Overleaf-linked GitHub repository (separate git repo)
+│   ├── main.tex
+│   ├── references.bib   # dupe generates this from the linked papers
+│   └── figures/         # dupe exports diagrams here
+├── code/                # Code repository (separate git repo, local mode only)
+├── notes/               # Markdown notes with [[paper:<bibtex_key>]] links
+├── diagrams/            # Excalidraw and draw.io source files
+└── refs/
+    ├── index.json       # Linked papers: bibtex_key, title, DOI, tags, paper UUID
+    └── text/<key>.md    # Extracted full text of each linked PDF for agents
+```
+
+Rules:
+
+- `paper/` is its own git repository. Overleaf syncs a complete repository, and code must stay out of it.
+- `code/` is its own git repository. The project root ignores it, or it is a git submodule.
+- The project root is a git repository. It versions `notes/`, `diagrams/`, `refs/`, and `.dupe/`.
+- PDFs stay out of every project repository. The library stores them. `refs/text/` gives agents searchable text.
+- dupe regenerates `AGENTS.md`, `references.bib`, `refs/index.json`, and `refs/text/` from the library and the project settings.
+
+---
+
+## 3. Runtime modes
+
+### Local mode (laptop)
+
+```text
+dupe serve --mode local --projects ~/research
+```
+
+- The server listens on `127.0.0.1:8080` and serves the web UI.
+- The server reads and writes project folders under the `--projects` directory.
+- The server keeps a **library cache** in `~/.dupe/library/`: `pdfs/<sha256>.pdf` and a SQLite index of paper metadata.
+- The server syncs the library cache with a hosted server if the user configures one. Section 5 defines sync.
+- The server runs `scripts/extract_meta.py` locally. This needs Python 3 and PyMuPDF on the laptop.
+- The server has one implicit user. It requires no login.
+
+### Hosted mode (home server)
+
+```text
+dupe serve --mode hosted --addr 127.0.0.1:8080
+```
+
+- The server is the source of truth for the paper library. PostgreSQL stores metadata. `storage/pdfs/` stores PDFs.
+- The server serves the library sync API to local-mode clients.
+- Friends use the web UI in the browser. Each friend owns project folders under `storage/projects/<user_id>/<project>/`.
+- Hosted projects contain `paper/`, `notes/`, `diagrams/`, and `refs/`. They contain no `code/` folder.
+- The server never exposes a shell. The PTY terminal endpoint exists only in local mode.
+- `cloudflared` with Cloudflare Access exposes the server to the internet. Tailscale is an option for personal access.
+
+---
+
+## 4. Offline behavior (local mode)
+
+| Feature | Offline | Notes |
+|---|---|---|
+| Edit LaTeX, notes, diagrams | Works | Plain files on disk |
+| LaTeX/Typst preview | Works | The WASM engine caches TeX packages after first use |
+| Read cached PDFs | Works | Papers linked to a project are always cached |
+| Read uncached PDFs | Fails | The cache downloads them after reconnect |
+| Upload a new PDF | Partial | Text extraction works. Crossref and arXiv lookups queue |
+| Library sync | Queues | The outbox sends changes after reconnect |
+| Commit to `paper/` | Works | Push to GitHub and Overleaf queues |
+| Agent assistance | Fails | Agents need the model API |
+
+The web UI shows the online state and the size of the outbox.
+
+---
+
+## 5. Library sync
+
+The hosted server owns the library. Local mode keeps a cache.
+
+- `GET /api/library/changes?since=<timestamp>` returns papers, tags, and highlights with `updated_at` after the timestamp.
+- `POST /api/library/sync` accepts an outbox batch of created, updated, and deleted records.
+- `GET /api/papers/{id}/file` streams a PDF. The client verifies the SHA-256 hash.
+- `PUT /api/papers/blob/{sha256}` uploads a PDF. The server skips the upload if the hash exists.
+- PDF files are immutable. Conflicts occur only on metadata. The record with the later `updated_at` wins.
+- Local mode always caches the PDFs of papers that a local project links.
+
+---
+
+## 6. Agents
+
+### Local mode
+
+The user runs any agent (Claude Code, Gemini, Copilot) in VS Code or a terminal on the project folder. dupe adds two things:
+
+- **Generated `AGENTS.md`** describes the project layout and the citation keys.
+- **MCP server** (`dupe mcp`, stdio transport) gives agents library tools:
+  - `search_papers(query)`
+  - `get_bibtex(key)`
+  - `read_paper(key, section?)`
+  - `link_paper(key)` adds a paper to the project and regenerates `references.bib`.
+
+### Hosted mode
+
+The web UI has an **agent panel**. Each friend supplies their own model API key.
+
+- The server runs the agent in a container per session.
+- The container mounts only the current project, read-only.
+- The agent has read tools only: read, grep, and glob. Shell and file-write tools are disabled.
+- Container network access is limited to the model API host.
+- The agent returns edits as diffs. The user accepts or rejects each diff in the editor.
+- The server encrypts stored API keys at rest. The UI never displays a stored key.
+
+---
+
+## 7. Storage and backup (hosted mode)
+
+- `storage/pdfs/<sha256>.pdf` stores each PDF once.
+- A nightly job runs `pg_dump` and `restic backup` of `storage/` and the dump.
+- `restic` encrypts the backup and writes it to Google Drive through an `rclone` remote.
+- A weekly job runs `restic check` and re-hashes a sample of PDFs.
+- A restore test runs after setup and then every three months.
+- Local library caches are an additional copy of every cached PDF.
+
+---
+
+## 8. Repository layout
+
 ```text
 /
-├── ARCHITECTURE.md          # Master architecture & AI agent rules
-├── CONTRIBUTION.md          # Code quality, execution tiers, and review rules
-├── GEMINI.md                # Agent entrypoint and writing standards
-├── AGENTS.md                # Agent entrypoint (synchronized with GEMINI.md)
-├── docker-compose.yml       # PostgreSQL 16 service
-├── .air.toml                # Hot-reload config for Go development
-├── backend/                 # Go 1.22+ HTTP Server
-│   ├── go.mod
-│   ├── main.go              # Entrypoint, CLI flags (--create-user), router
-│   ├── db.go                # pgxpool connection & schema initialization
-│   ├── auth.go              # JWT middleware & bcrypt password hashing
-│   ├── handlers_papers.go   # PDF upload, streaming, metadata endpoints
-│   ├── handlers_git.go      # GitHub/Overleaf repo clone, .bib/figure write, commit & push
-│   ├── handlers_docs.go     # CRUD for Markdown notes, diagrams, and LaTeX/Typst files
-│   ├── handlers_sync.go     # (Deferred to Phase 5) Batch sync for offline devices
-│   └── schema.sql           # Declarative PostgreSQL schema
-├── scripts/                 # Python 3 helper scripts (invoked by Go via os/exec)
-│   ├── requirements.txt     # PyMuPDF (fitz), requests, bibtexparser
-│   └── extract_meta.py      # Extracts DOI, title, authors, and BibTeX from PDFs/URLs
-├── storage/                 # Local disk mount for PDFs and Git repos (gitignored)
-│   ├── pdfs/                # Stored as <paper_uuid>.pdf (deduplicated via SHA256)
-│   └── repos/               # Cloned Overleaf-linked GitHub repos (<repo_uuid>/)
-├── web/                     # Vite + React + TypeScript Frontend
-│   └── src/
-│       ├── api/             # REST client with JWT header injection
-│       ├── workers/         # Web Workers for client-side WASM LaTeX/Typst compilation
-│       ├── components/
-│       │   ├── Workspace/   # Resizable split-pane layout manager (VS Code / Obsidian style)
-│       │   ├── Library/     # Paper list, tag filters, BibTeX export
-│       │   ├── Reader/      # PDF.js canvas + normalized bounding-box highlight overlay
-│       │   ├── Editor/      # CodeMirror 6 (Markdown + KaTeX + LaTeX/Typst syntax)
-│       │   └── Diagram/     # Embedded Excalidraw / Draw.io canvas
-│       └── App.tsx
+├── ARCHITECTURE.md
+├── CONTRIBUTION.md
+├── AGENTS.md / GEMINI.md
+├── docker-compose.yml       # PostgreSQL 16 for hosted mode
+├── backend/                 # Go 1.22+ server, both modes
+│   ├── main.go              # Entrypoint, mode flags, router, --create-user
+│   ├── auth.go              # JWT and bcrypt (hosted mode)
+│   ├── db.go                # pgx pool (hosted) and SQLite cache (local)
+│   ├── projects.go          # Project folder create, read, write, regenerate
+│   ├── handlers_papers.go   # Upload, stream, metadata
+│   ├── handlers_sync.go     # Library sync API
+│   ├── handlers_git.go      # Commit and push for paper/ and the project root
+│   ├── handlers_terminal.go # PTY terminal (local mode only)
+│   ├── mcp.go               # MCP server for agents
+│   └── schema.sql
+├── scripts/
+│   └── extract_meta.py      # DOI, metadata, BibTeX, and full-text extraction
+├── deploy/                  # cloudflared config, systemd units, backup scripts
+├── web/                     # Vite, React, TypeScript
 └── extension/               # Manifest V3 Chrome Web Clipper
-    ├── manifest.json
-    ├── popup.html
-    └── popup.js             # Scrapes active tab PDF/DOI & POSTs to configurable Server URL
 ```
 
 ---
 
-## 3. PostgreSQL Database Schema (`backend/schema.sql`)
-All entity tables use `UUID` keys, `updated_at`, and `deleted_at` soft-deletes.
+## 9. Database schema (library)
+
+The database holds users, papers, tags, and highlights. Project content lives in project folders. Hosted mode uses PostgreSQL. Local mode uses a SQLite cache with the same tables.
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-
--- 1. Users
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    color_hex VARCHAR(7) DEFAULT '#FFEB3B', -- Color-codes highlights on shared papers
+    color_hex VARCHAR(7) DEFAULT '#FFEB3B',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. Papers (PDFs & Metadata)
 CREATE TABLE papers (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     owner_id INT REFERENCES users(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     authors TEXT,
@@ -80,32 +200,31 @@ CREATE TABLE papers (
     doi TEXT,
     bibtex_key TEXT,
     bibtex_raw TEXT,
-    file_path TEXT NOT NULL,         -- Relative path inside /storage/pdfs/
-    file_hash CHAR(64),              -- SHA-256 hash to prevent duplicate PDF storage
-    is_shared BOOLEAN DEFAULT FALSE, -- True = visible to all authenticated users on server
+    file_hash CHAR(64) NOT NULL,     -- SHA-256, also the file name in storage/pdfs/
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
 
--- 3. Highlights & Annotations (PDF.js Overlay)
 CREATE TABLE highlights (
-    id UUID PRIMARY KEY,             -- Generated on client via crypto.randomUUID()
+    id UUID PRIMARY KEY,
     paper_id UUID REFERENCES papers(id) ON DELETE CASCADE,
     user_id INT REFERENCES users(id) ON DELETE CASCADE,
     page_number INT NOT NULL,
     selected_text TEXT,
     comment TEXT,
     color_hex VARCHAR(7),
-    coordinates JSONB NOT NULL,      -- Normalized bounding rects (0.0 to 1.0): [{x, y, w, h}]
+    coordinates JSONB NOT NULL,      -- Page-normalized rects (0.0 to 1.0)
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
 
--- 4. Tags & Paper-Tag Join Table
 CREATE TABLE tags (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT UNIQUE NOT NULL,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    id UUID PRIMARY KEY,
+    owner_id INT REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ,
+    UNIQUE (owner_id, name)
 );
 
 CREATE TABLE paper_tags (
@@ -116,76 +235,42 @@ CREATE TABLE paper_tags (
     PRIMARY KEY (paper_id, tag_id)
 );
 
--- 5. Documents (Markdown Notes, Excalidraw Diagrams, LaTeX/Typst Source)
-CREATE TABLE documents (
-    id UUID PRIMARY KEY,             -- Generated on client via crypto.randomUUID()
-    owner_id INT REFERENCES users(id) ON DELETE CASCADE,
-    doc_type VARCHAR(20) NOT NULL CHECK (doc_type IN ('markdown', 'diagram', 'latex', 'typst')),
-    title TEXT NOT NULL,
-    content TEXT DEFAULT '',         -- Raw Markdown, Excalidraw JSON/SVG, or LaTeX/Typst source
-    is_shared BOOLEAN DEFAULT FALSE,
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ
-);
-
--- 6. Bidirectional Backlinks (Links between Notes, Papers, and Highlights)
-CREATE TABLE backlinks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_doc_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-    target_paper_id UUID REFERENCES papers(id) ON DELETE CASCADE,
-    target_highlight_id UUID REFERENCES highlights(id) ON DELETE CASCADE,
-    target_doc_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ
-);
-
--- 7. Linked Git Repositories (Overleaf-GitHub Bridge)
-CREATE TABLE git_repos (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE projects (              -- Hosted mode only
+    id UUID PRIMARY KEY,
     owner_id INT REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    remote_url TEXT NOT NULL,        -- GitHub repo URL linked to Overleaf
-    bib_file_path TEXT DEFAULT 'references.bib',
-    figures_dir TEXT DEFAULT 'figures',
-    local_path TEXT NOT NULL,        -- Relative path inside /storage/repos/
-    last_synced_at TIMESTAMPTZ,
+    folder_path TEXT NOT NULL,       -- Relative path inside storage/projects/
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
-
-CREATE INDEX idx_papers_updated ON papers(updated_at);
-CREATE INDEX idx_highlights_updated ON highlights(updated_at);
-CREATE INDEX idx_documents_updated ON documents(updated_at);
-CREATE INDEX idx_git_repos_updated ON git_repos(updated_at);
 ```
 
----
-
-## 4. Backend Specification (Go + Python Hybrid)
-
-### Go HTTP Server (`backend/`)
-* **Routing & DB:** Go 1.22+ standard `net/http` `ServeMux` + `github.com/jackc/pgx/v5/pgxpool` with raw SQL.
-* **CLI User Management:** `./server --create-user <username> --password <pass>` hashes the password with `bcrypt` and inserts the user. No public sign-up endpoint.
-* **Authentication:** `POST /api/auth/login` returns a 90-day signed JWT.
-* **Python Integration (`scripts/extract_meta.py`):** On `POST /api/papers/upload`, Go saves the PDF to `/storage/pdfs/<uuid>.pdf` and runs `python3 scripts/extract_meta.py` via `os/exec` (15s timeout). The Python script extracts DOI/metadata via `PyMuPDF`, queries Crossref/arXiv, generates a `bibtex_key` and raw BibTeX entry, and prints JSON to `stdout` for Go to store in Postgres.
-* **Overleaf-GitHub Bridge (`backend/handlers_git.go`):** Users link an Overleaf project's GitHub repository URL. The Go backend clones the repository into `/storage/repos/<repo_uuid>/`, writes the aggregated `references.bib` from `papers.bibtex_raw`, writes exported Excalidraw figures (`.svg`/`.pdf`/`.png`) and edited `.tex` files into the working tree, and executes `git pull --rebase`, `git commit`, and `git push` so Overleaf pulls updates directly from GitHub.
+The `documents`, `backlinks`, and `git_repos` tables are removed. Notes, diagrams, and LaTeX are files. dupe derives backlinks from `[[...]]` links in the files. `.dupe/project.json` stores the Overleaf remote.
 
 ---
 
-## 5. Client-Side Compute & Laptop Studio Architecture (`web/`)
+## 10. Web UI
 
-1. **Split-Pane Workspace:** Users can open a Library view, PDF Reader (`PDF.js`), Markdown/LaTeX Editor (`CodeMirror 6`), and Diagram Canvas (`Excalidraw`) side-by-side in resizable panes.
-2. **Normalized PDF Highlights:** Never store pixel coordinates. Convert `DOMRect` selection coordinates into page-normalized percentages (`0.0` to `1.0`) so highlights scale across any monitor size.
-3. **Citations & Backlinks:** Typing `@` in the Markdown or LaTeX/Typst editor triggers an autocomplete dropdown fed by the user's `papers` list (inserting `@bibtex_key`). Clicking a highlight in `PDF.js` copies a `[[highlight:uuid]]` reference link.
-4. **Client-Side Typesetting (Web Worker + WASM):**
-   * Inline equations in Markdown render instantaneously on the client via **KaTeX**.
-   * Full paper compilation runs inside a dedicated browser **Web Worker** (`web/src/workers/`) using a WebAssembly compiler (**Typst.ts WASM** or **SwiftLaTeX WASM**), combining the document's source text, exported SVG diagrams, and a virtual `.bib` file assembled from the user's `papers.bibtex_raw` column.
+1. **Split-pane workspace:** library, PDF reader, editor, and diagram canvas in resizable panes. A file tree shows the project folder.
+2. **Normalized highlights:** the reader stores page-normalized coordinates (`0.0` to `1.0`).
+3. **Citations:** typing `@` in the editor opens autocomplete from the library. Selecting a paper links it to the project.
+4. **Typesetting:** a Web Worker compiles LaTeX or Typst with WASM. The worker reads files from `paper/` and caches TeX packages for offline use.
 
 ---
 
-## 6. Phased Execution Plan (MVP-First)
-* **Phase 1 (MVP Part 1 - Backend, PDF Library, BibTeX & GitHub/Overleaf Bridge):** `docker-compose.yml` (Postgres 16), `schema.sql`, Go server with JWT auth, `--create-user` CLI flag, `.air.toml`, PDF upload/storage with SHA-256 deduplication, `scripts/extract_meta.py` to generate BibTeX entries for all uploaded PDFs, and `handlers_git.go` to clone an Overleaf-linked GitHub repo, write `references.bib`, and commit/push changes.
-* **Phase 2 (MVP Part 2 - Split-Pane Studio, Diagram Tool & LaTeX Editor):** Split-pane React UI, Library dashboard with BibTeX management and `PDF.js` viewer, embedded `Excalidraw` diagram canvas that saves figures into the linked GitHub repo (`figures/`), `CodeMirror 6` LaTeX editor with `@citation` autocomplete backed by the generated `.bib` entries, and optional client-side WASM LaTeX preview (`SwiftLaTeX` / `Typst`).
-* **Phase 3 (Markdown Note-Taker, Highlights & Backlinks):** Normalized bounding-box PDF highlighting (`0.0` to `1.0`), Markdown notes with inline `KaTeX`, and bidirectional `[[highlight:uuid]]` backlinks.
-* **Phase 4 (Desktop Chrome Clipper):** Manifest V3 extension to clip PDFs and metadata from arXiv, IEEE, and PubMed to the Go backend.
-* **Phase 5 (Future iPad Offline PWA):** Add Safari `manifest.json`, Service Worker, `Dexie.js` (`IndexedDB`), offline PDF cache toggle, and `POST /api/sync` outbox synchronization.
+## 11. Phased plan
+
+* **Phase 1 (done):** Go server, JWT auth, PDF upload with SHA-256 deduplication, BibTeX extraction, Overleaf git bridge.
+* **Phase 2 (done):** Split-pane studio, PDF reader, LaTeX editor, diagram tool.
+* **Phase 3 (project folders and local mode):**
+  * `--mode` flag and SQLite library cache.
+  * A "New project" action in the frontend creates a folder with the complete section 2 layout.
+  * The project settings let the user link an Overleaf GitHub repository as `paper/`.
+  * The explorer sidebar shows the project folder tree: `paper/`, `code/`, `notes/`, `diagrams/`, and `refs/`.
+  * New notes go to `notes/`. New diagrams go to `diagrams/`. Diagram exports go to `paper/figures/`.
+  * dupe generates `AGENTS.md`, `references.bib`, and `refs/text/` in each project.
+* **Phase 4 (library sync):** sync API, local outbox, PDF cache, offline indicator, TeX package cache.
+* **Phase 5 (agent integration):** MCP server for local mode.
+* **Phase 6 (hosted mode for friends):** remove the terminal from hosted mode, restrict WebSocket origins, per-user project folders, `cloudflared` with Cloudflare Access, backup jobs.
+* **Phase 7 (hosted agent panel):** containerized read-only agents with user-supplied API keys and diff review.
+* **Phase 8 (post-MVP):** highlights and backlinks, Chrome Web Clipper, iPad offline PWA.

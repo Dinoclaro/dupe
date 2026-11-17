@@ -74,3 +74,11 @@ systemctl --user restart dupe.service
 # Ensure PostgreSQL container is running
 cd /home/dino/dupe && docker compose up -d
 ```
+
+## TODO
+
+- Decide the database for the local-mode library cache. SQLite is the current choice. It means the library schema runs on PostgreSQL and SQLite. Postgres in Docker on the laptop is the alternative.
+- Hide the terminal now. Any user who can log in gets a shell as the server user.
+- Add a "New project" action to the frontend. It creates a folder with the project layout from `ARCHITECTURE.md`: `paper/`, `code/`, `notes/`, `diagrams/`, and `refs/`.
+- Let the user link an Overleaf GitHub repository as `paper/` in the project settings.
+- Save new notes in `notes/` and new diagrams in `diagrams/`.
