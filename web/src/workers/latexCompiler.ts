@@ -317,9 +317,11 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
 
   // Replace figures before escaping remaining text
   const figureTokens: string[] = [];
+  let figureCounter = 0;
   body = body.replace(
     /\\begin\{figure\}(?:\[[^\]]*\])?([\s\S]*?)\\end\{figure\}/g,
     (_match, inner: string) => {
+      figureCounter++;
       const imgMatch = inner.match(/\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}/);
       const capMatch = inner.match(/\\caption\{([^}]*)\}/);
       const figPath = imgMatch ? imgMatch[1].trim() : '';
@@ -331,11 +333,21 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
 
       const figHtml = svgContent
         ? `<figure class="paper-figure"><div class="paper-figure-canvas">${svgContent}</div>${
-            caption ? `<figcaption><strong>Figure:</strong> ${escapeHtml(caption)}</figcaption>` : ''
+            caption
+              ? `<figcaption class="paper-figcaption"><strong>Figure ${figureCounter}:</strong> ${escapeHtml(
+                  caption,
+                )}</figcaption>`
+              : ''
           }</figure>`
         : `<figure class="paper-figure paper-figure-missing"><div>Missing figure: <code>${escapeHtml(
             figPath || 'unspecified',
-          )}</code></div>${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ''}</figure>`;
+          )}</code></div>${
+            caption
+              ? `<figcaption class="paper-figcaption"><strong>Figure ${figureCounter}:</strong> ${escapeHtml(
+                  caption,
+                )}</figcaption>`
+              : ''
+          }</figure>`;
       const token = `@@FIGURE_TOKEN_${figureTokens.length}@@`;
       figureTokens.push(figHtml);
       return token;
@@ -368,13 +380,17 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
   body = escapeHtml(body);
 
   body = body
-    .replace(/\\section\*?\{([^}]*)\}/g, '<h2>$1</h2>')
-    .replace(/\\subsection\*?\{([^}]*)\}/g, '<h3>$1</h3>')
-    .replace(/\\subsubsection\*?\{([^}]*)\}/g, '<h4>$1</h4>')
+    .replace(/\\centering/g, '')
+    .replace(/\\label\{[^}]*\}/g, '')
+    .replace(/\\section\*\{([^}]*)\}/g, '<h2 class="latex-section-star">$1</h2>')
+    .replace(/\\section\{([^}]*)\}/g, '<h2 class="latex-section">$1</h2>')
+    .replace(/\\subsection\*\{([^}]*)\}/g, '<h3 class="latex-subsection-star">$1</h3>')
+    .replace(/\\subsection\{([^}]*)\}/g, '<h3 class="latex-subsection">$1</h3>')
+    .replace(/\\subsubsection\*?\{([^}]*)\}/g, '<h4 class="latex-subsubsection">$1</h4>')
     .replace(/\\textbf\{([^}]*)\}/g, '<strong>$1</strong>')
     .replace(/\\textit\{([^}]*)\}/g, '<em>$1</em>')
     .replace(/\\emph\{([^}]*)\}/g, '<em>$1</em>')
-    .replace(/\\texttt\{([^}]*)\}/g, '<code>$1</code>')
+    .replace(/\\texttt\{([^}]*)\}/g, '<code class="latex-tt">$1</code>')
     .replace(/\\cite[a-zA-Z*]*\{([^}]+)\}/g, (_m, keys: string) => recordCitation(keys))
     .replace(/(^|\s)@([a-zA-Z0-9_:-]{3,})/g, (_m, prefix: string, key: string) => {
       if (paperMap.has(key)) {
@@ -417,32 +433,32 @@ export function compileLatexPreview(req: CompileRequest): CompileResponse {
     : '';
 
   const abstractHtml = abstractText
-    ? `<section class="paper-abstract"><strong>Abstract.</strong> ${renderMathSegments(
+    ? `<section class="paper-abstract"><div class="paper-abstract-title">Abstract</div><div class="paper-abstract-body">${renderMathSegments(
         escapeHtml(abstractText),
         diagnostics,
-      )}</section>`
+      )}</div></section>`
     : '';
 
   const refsHtml =
     citedOrder.length > 0
       ? `<section class="paper-references">
-          <h2>References</h2>
-          <ol>
+          <h2 class="latex-section-star">References</h2>
+          <ol class="latex-bib-list">
             ${citedOrder
-              .map((key) => {
+              .map((key, idx) => {
                 const entry = paperMap.get(key);
                 if (!entry) {
-                  return `<li id="ref-${escapeHtml(key)}" class="cite-missing"><strong>[${escapeHtml(
-                    key,
-                  )}]</strong> Missing from library</li>`;
+                  return `<li id="ref-${escapeHtml(key)}" class="cite-missing"><span class="bib-num">[${
+                    idx + 1
+                  }]</span> <strong>${escapeHtml(key)}</strong> — Missing from library</li>`;
                 }
-                const yearStr = entry.publication_year ? ` (${entry.publication_year})` : '';
-                const doiStr = entry.doi ? ` DOI: ${escapeHtml(entry.doi)}.` : '';
-                return `<li id="ref-${escapeHtml(key)}">${escapeHtml(
+                const yearStr = entry.publication_year ? `, ${entry.publication_year}` : '';
+                const doiStr = entry.doi ? ` doi:${escapeHtml(entry.doi)}.` : '';
+                return `<li id="ref-${escapeHtml(key)}"><span class="bib-num">[${
+                  idx + 1
+                }]</span> <span class="bib-text">${escapeHtml(
                   entry.authors,
-                )}${yearStr}. <em>${escapeHtml(entry.title)}</em>.${doiStr} <code>@${escapeHtml(
-                  entry.bibtex_key,
-                )}</code></li>`;
+                )}, &ldquo;${escapeHtml(entry.title)},&rdquo;${yearStr}.${doiStr}</span></li>`;
               })
               .join('\n')}
           </ol>
