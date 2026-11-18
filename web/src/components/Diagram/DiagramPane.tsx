@@ -34,6 +34,7 @@ export const DiagramPane: React.FC<DiagramPaneProps> = ({
   const pendingInsertRef = useRef<boolean>(false);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
 
   const postToDrawio = (payload: Record<string, unknown>) => {
     const win = iframeRef.current?.contentWindow;
@@ -120,6 +121,21 @@ export const DiagramPane: React.FC<DiagramPaneProps> = ({
     });
   };
 
+  const copySnippet = async (kind: 'latex' | 'markdown') => {
+    requestExport(false);
+    const snippet =
+      kind === 'latex'
+        ? `\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{figures/${figureName}.svg}\n  \\caption{${figureName.replace(/_/g, ' ')}}\n  \\label{fig:${figureName}}\n\\end{figure}`
+        : `![${figureName}](../paper/figures/${figureName}.svg)`;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setCopiedLabel(kind === 'latex' ? 'Copied LaTeX' : 'Copied MD');
+      window.setTimeout(() => setCopiedLabel(null), 2000);
+    } catch {
+      // Clipboard write may require HTTPS/user gesture
+    }
+  };
+
   return (
     <div className="diagram-pane">
       <div className="diagram-toolbar">
@@ -131,6 +147,24 @@ export const DiagramPane: React.FC<DiagramPaneProps> = ({
         </div>
 
         <div className="row-gap">
+          <button
+            type="button"
+            className="btn-tiny"
+            disabled={!ready || saving}
+            onClick={() => void copySnippet('latex')}
+            title="Save SVG and copy LaTeX \\includegraphics block to clipboard"
+          >
+            {copiedLabel === 'Copied LaTeX' ? 'Copied!' : 'Copy LaTeX'}
+          </button>
+          <button
+            type="button"
+            className="btn-tiny"
+            disabled={!ready || saving}
+            onClick={() => void copySnippet('markdown')}
+            title="Save SVG and copy Markdown image link to clipboard"
+          >
+            {copiedLabel === 'Copied MD' ? 'Copied!' : 'Copy MD'}
+          </button>
           <button
             type="button"
             className="btn-secondary btn-tiny"

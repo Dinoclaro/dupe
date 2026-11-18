@@ -149,9 +149,11 @@ export const App: React.FC = () => {
     'paper/main.tex': DEFAULT_LATEX_TEMPLATE,
   });
   const [headBuffers, setHeadBuffers] = useState<Record<string, string>>({});
+  const [savedBuffers, setSavedBuffers] = useState<Record<string, string>>({});
   const [externalAgentEdits, setExternalAgentEdits] = useState<Record<string, boolean>>({});
   const [activeEditorPath, setActiveEditorPath] = useState<string>('paper/main.tex');
   const [savingSource, setSavingSource] = useState(false);
+  const autoSaveTimersRef = useRef<Record<string, number>>({});
   const [compileResult, setCompileResult] = useState<CompileProjectResponse | null>(null);
   const [compilingPdf, setCompilingPdf] = useState(false);
   const [pdfVersion, setPdfVersion] = useState(1);
@@ -555,6 +557,7 @@ export const App: React.FC = () => {
           res.head_content && res.head_content !== res.content,
         );
         setFileBuffers((prev) => ({ ...prev, [res.path]: res.content }));
+        setSavedBuffers((prev) => ({ ...prev, [res.path]: res.content }));
         setHeadBuffers((prev) => ({ ...prev, [res.path]: res.head_content }));
         setExternalAgentEdits((prev) => ({
           ...prev,
@@ -684,6 +687,28 @@ export const App: React.FC = () => {
     await handleOpenProjectFile({ path: relPath, kind }, false);
   };
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!activeProject) {
+        return;
+      }
+      const isNewNoteShortcut =
+        (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'n') ||
+        ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'n');
+      if (!isNewNoteShortcut) {
+        return;
+      }
+      event.preventDefault();
+      const suggested = `note-${new Date().toISOString().slice(0, 10)}.md`;
+      const entered = window.prompt('New note path in notes/ (e.g. ideas/experiment.md):', suggested);
+      if (entered && entered.trim()) {
+        void handleCreateProjectFile('markdown', entered.trim());
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
+
   const handleInsertCitation = (bibtexKey: string) => {
     const isMd = activeEditorPath.endsWith('.md');
     const citeCmd = isMd ? `[[paper:${bibtexKey}]]` : `\\cite{${bibtexKey}}`;
@@ -699,14 +724,15 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSaveProjectFile = async (filePath: string) => {
+  const handleSaveProjectFile = useCallback(async (filePath: string, contentOverride?: string) => {
     if (!activeProject) {
       return;
     }
-    const content = fileBuffers[filePath] ?? '';
+    const content = contentOverride ?? fileBuffers[filePath] ?? '';
     setSavingSource(true);
     try {
       const res = await api.writeProjectFile(activeProject.id, filePath, content, false);
+      setSavedBuffers((prev) => ({ ...prev, [filePath]: content }));
       setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
       setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
       await refreshProjectTree(activeProject.id);
@@ -730,7 +756,7 @@ export const App: React.FC = () => {
     } finally {
       setSavingSource(false);
     }
-  };
+  }, [activeProject, fileBuffers, refreshProjectTree, triggerProjectCompile]);
 
   const handleRevertProjectFile = async (filePath: string) => {
     if (!activeProject) {
@@ -771,6 +797,37 @@ export const App: React.FC = () => {
     setStatusMessage('Downloaded main.tex and references.bib from browser cache.');
   }, [fileBuffers, activeSourceText, buildLocalReferencesBib]);
 
+  const handlePullActiveProject = async () => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      const res = await api.pullProject(activeProject.id);
+      setServerOnline(true);
+      await loadProjects();
+      const files = await refreshProjectTree(activeProject.id);
+      for (const f of files) {
+        if (f.path.startsWith('paper/') && f.path in fileBuffers) {
+          try {
+            const latest = await api.readProjectFile(activeProject.id, f.path);
+            setFileBuffers((prev) => ({ ...prev, [f.path]: latest.content }));
+            setSavedBuffers((prev) => ({ ...prev, [f.path]: latest.content }));
+            setHeadBuffers((prev) => ({ ...prev, [f.path]: latest.head_content ?? latest.content }));
+          } catch {
+            // keep existing buffer if a pulled file is unreadable
+          }
+        }
+      }
+      setStatusMessage(
+        res.updated
+          ? `Pulled latest Overleaf changes into paper/ (${res.paper_sha.slice(0, 7)}).`
+          : `Fetched Overleaf remote (${res.paper_sha.slice(0, 7)}, already up to date).`,
+      );
+    } catch (err) {
+      setStatusMessage(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const handleSyncActiveProject = async () => {
     if (!activeProject) {
       return;
@@ -793,7 +850,7 @@ export const App: React.FC = () => {
         setStatusMessage(
           res.committed
             ? `Committed project changes (${res.paper_sha.slice(0, 7)}).`
-            : 'Regenerated AGENTS.md & references.bib (working tree clean).',
+            : 'Regenerated AGENTS.md & dupe_references.bib (working tree clean).',
         );
       }
     } catch (err) {
@@ -807,7 +864,7 @@ export const App: React.FC = () => {
               content: fileBuffers['paper/main.tex'] || activeSourceText,
             },
             {
-              path: 'paper/references.bib',
+              path: 'paper/dupe_references.bib',
               content: buildLocalReferencesBib(),
             },
           ];
@@ -961,7 +1018,7 @@ export const App: React.FC = () => {
     const headContent = headBuffers[filePath] ?? '';
     const isGeneratedReadOnly =
       filePath === 'AGENTS.md' ||
-      filePath === 'paper/references.bib' ||
+      filePath === 'paper/dupe_references.bib' ||
       filePath.startsWith('refs/');
 
     return (
@@ -973,6 +1030,11 @@ export const App: React.FC = () => {
         hasExternalAgentEdit={Boolean(externalAgentEdits[filePath])}
         papers={papers}
         saving={savingSource}
+        dirty={
+          !isGeneratedReadOnly &&
+          savedBuffers[filePath] !== undefined &&
+          source !== savedBuffers[filePath]
+        }
         readOnly={isGeneratedReadOnly}
         onChangeSource={(next) => {
           if (filePath.endsWith('.tex')) {
@@ -984,8 +1046,25 @@ export const App: React.FC = () => {
             saveWorkspaceSnapshot({ fileBuffers: updated });
             return updated;
           });
+          if (!isGeneratedReadOnly && activeProject) {
+            const existingTimer = autoSaveTimersRef.current[filePath];
+            if (existingTimer) {
+              window.clearTimeout(existingTimer);
+            }
+            autoSaveTimersRef.current[filePath] = window.setTimeout(() => {
+              delete autoSaveTimersRef.current[filePath];
+              void handleSaveProjectFile(filePath, next);
+            }, 1200);
+          }
         }}
-        onSaveSource={() => handleSaveProjectFile(filePath)}
+        onSaveSource={() => {
+          const existingTimer = autoSaveTimersRef.current[filePath];
+          if (existingTimer) {
+            window.clearTimeout(existingTimer);
+            delete autoSaveTimersRef.current[filePath];
+          }
+          return handleSaveProjectFile(filePath);
+        }}
         onRevertToHead={() => handleRevertProjectFile(filePath)}
         onAcceptAgentEdits={() => {
           setHeadBuffers((prev) => ({ ...prev, [filePath]: source }));
@@ -1169,6 +1248,7 @@ export const App: React.FC = () => {
             onOpenProjectFile={(f, split) => void handleOpenProjectFile(f, split)}
             onOpenCompiledPreview={handleOpenCompiledPreview}
             onCreateProjectFile={handleCreateProjectFile}
+            onPullProject={handlePullActiveProject}
             onSyncProject={handleSyncActiveProject}
             onExportOverleafBundle={handleExportOverleafBundle}
             onInsertCitation={handleInsertCitation}

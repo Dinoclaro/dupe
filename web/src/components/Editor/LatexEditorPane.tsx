@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { openSearchPanel, search, searchKeymap } from '@codemirror/search';
 import { autocompletion } from '@codemirror/autocomplete';
 import { StreamLanguage } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
@@ -19,6 +20,7 @@ interface LatexEditorPaneProps {
   hasExternalAgentEdit?: boolean;
   papers: Paper[];
   saving: boolean;
+  dirty?: boolean;
   readOnly?: boolean;
   onChangeSource: (next: string) => void;
   onSaveSource: () => Promise<void>;
@@ -35,6 +37,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   hasExternalAgentEdit = false,
   papers,
   saving,
+  dirty = false,
   readOnly = false,
   onChangeSource,
   onSaveSource,
@@ -50,6 +53,9 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
 
   const onChangeRef = useRef(onChangeSource);
   onChangeRef.current = onChangeSource;
+
+  const onSaveRef = useRef(onSaveSource);
+  onSaveRef.current = onSaveSource;
 
   const isMarkdown = fileLabel.endsWith('.md');
   const [diffEnabled, setDiffEnabled] = useState<boolean>(false);
@@ -96,7 +102,21 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     const extensions: Extension[] = [
       lineNumbers(),
       history(),
-      keymap.of([...defaultKeymap, ...historyKeymap]),
+      search(),
+      keymap.of([
+        ...defaultKeymap,
+        ...historyKeymap,
+        ...searchKeymap,
+        {
+          key: 'Mod-s',
+          run: () => {
+            if (!readOnly) {
+              void onSaveRef.current();
+            }
+            return true;
+          },
+        },
+      ]),
       langExt,
       oneDark,
       EditorView.lineWrapping,
@@ -264,14 +284,30 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
               ◫ Open Preview
             </button>
           )}
+          {(!isMarkdown || mdViewMode !== 'preview') && (
+            <button
+              type="button"
+              className="btn-tiny"
+              onClick={() => {
+                if (editorViewRef.current) {
+                  openSearchPanel(editorViewRef.current);
+                  editorViewRef.current.focus();
+                }
+              }}
+              title="Find in file (Ctrl+F)"
+            >
+              Find
+            </button>
+          )}
           {!readOnly && (
             <button
               type="button"
               className="btn-primary btn-tiny"
               disabled={saving}
               onClick={() => void onSaveSource()}
+              title="Auto-saves after 1.2s, or press Ctrl+S"
             >
-              {saving ? 'Saving...' : 'Save'}
+              {saving ? 'Saving...' : dirty ? 'Save*' : 'Saved'}
             </button>
           )}
         </div>

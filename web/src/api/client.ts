@@ -75,6 +75,14 @@ export interface ProjectFilePayload {
   head_content: string;
 }
 
+export interface ProjectPullResponse {
+  project: ProjectConfig;
+  pulled: boolean;
+  updated: boolean;
+  paper_sha: string;
+  last_synced_at: string;
+}
+
 export interface ProjectSyncResponse {
   project: ProjectConfig;
   committed: boolean;
@@ -471,6 +479,12 @@ export const api = {
     return apiFetch<ProjectFilePayload>(`/api/projects/${id}/revert`, {
       method: 'POST',
       body: JSON.stringify({ path: filePath }),
+    });
+  },
+
+  async pullProject(id: string): Promise<ProjectPullResponse> {
+    return apiFetch<ProjectPullResponse>(`/api/projects/${id}/pull`, {
+      method: 'POST',
     });
   },
 

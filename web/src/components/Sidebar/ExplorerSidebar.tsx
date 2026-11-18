@@ -106,6 +106,7 @@ interface ExplorerSidebarProps {
   onOpenProjectFile: (file: ProjectTreeEntry, inSplit: boolean) => void;
   onOpenCompiledPreview: (inSplit: boolean) => void;
   onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
+  onPullProject: () => Promise<void>;
   onSyncProject: () => Promise<void>;
   onExportOverleafBundle: () => void;
   onInsertCitation: (bibtexKey: string) => void;
@@ -149,6 +150,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   onOpenProjectFile,
   onOpenCompiledPreview,
   onCreateProjectFile,
+  onPullProject,
   onSyncProject,
   onExportOverleafBundle,
   onInsertCitation,
@@ -425,9 +427,18 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
       setShowProjectSettings(false);
       setSettingsToken('');
       await onProjectsChanged();
-      onStatusMessage('Pulled Overleaf remote into paper/ and regenerated references.bib.');
+      onStatusMessage('Pulled Overleaf remote into paper/ and regenerated dupe_references.bib.');
     } catch (err) {
       onStatusMessage(`Overleaf sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSyncingGit(false);
+    }
+  };
+
+  const handleTriggerPull = async () => {
+    setSyncingGit(true);
+    try {
+      await onPullProject();
     } finally {
       setSyncingGit(false);
     }
@@ -1019,12 +1030,21 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
               </button>
               <button
                 type="button"
+                className="btn-tiny"
+                disabled={syncingGit || !activeProject?.overleaf_remote}
+                onClick={() => void handleTriggerPull()}
+                title="Fetch & pull latest changes from Overleaf into paper/"
+              >
+                {syncingGit ? '…' : '↓ Pull'}
+              </button>
+              <button
+                type="button"
                 className="btn-primary btn-tiny"
                 disabled={syncingGit || !activeProject}
                 onClick={() => void handleTriggerSync()}
-                title="Regenerate AGENTS.md & references.bib, commit, and push paper/ to Overleaf GitHub"
+                title="Regenerate AGENTS.md & dupe_references.bib, commit, pull, and push paper/ to Overleaf"
               >
-                {syncingGit ? 'Syncing…' : 'Sync'}
+                {syncingGit ? 'Syncing…' : '↑ Push'}
               </button>
             </div>
 
