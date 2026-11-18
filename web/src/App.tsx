@@ -10,8 +10,12 @@ import {
   getOutboxQueue,
   getStoredGitHubPat,
   getStoredToken,
+  loadLocalNotesVault,
   loadWorkspaceSnapshot,
+  markLocalNoteSynced,
   pushFilesToGitHubDirect,
+  resolveNoteWithLocalWins,
+  saveLocalNote,
   saveWorkspaceSnapshot,
   setStoredToken,
 } from './api/client';
@@ -144,9 +148,23 @@ export const App: React.FC = () => {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectTree, setProjectTree] = useState<ProjectTreeEntry[]>([]);
 
-  // File buffers & Git HEAD snapshots keyed by relative project path (e.g. 'paper/main.tex')
-  const [fileBuffers, setFileBuffers] = useState<Record<string, string>>({
-    'paper/main.tex': DEFAULT_LATEX_TEMPLATE,
+  // File buffers & Git HEAD snapshots keyed by relative project path (e.g. 'paper/main.tex').
+  // Initialize immediately from local notes vault + snapshot so local notes ALWAYS win before any network response.
+  const [fileBuffers, setFileBuffers] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {
+      'paper/main.tex': DEFAULT_LATEX_TEMPLATE,
+    };
+    const snap = loadWorkspaceSnapshot();
+    if (snap.fileBuffers) {
+      Object.assign(initial, snap.fileBuffers);
+    }
+    const notesVault = loadLocalNotesVault();
+    for (const [notePath, entry] of Object.entries(notesVault)) {
+      if (entry.content) {
+        initial[notePath] = entry.content;
+      }
+    }
+    return initial;
   });
   const [headBuffers, setHeadBuffers] = useState<Record<string, string>>({});
   const [savedBuffers, setSavedBuffers] = useState<Record<string, string>>({});
@@ -371,6 +389,23 @@ export const App: React.FC = () => {
           // keep fallback buffer
         }
       }
+
+      // Sync any dirty or richer local notes to the server automatically (Local Notes Always Win)
+      const localNotes = loadLocalNotesVault();
+      for (const noteEntry of Object.values(localNotes)) {
+        if (noteEntry.dirty && noteEntry.content.trim().length > 0) {
+          void api
+            .writeProjectFile(chosenId, noteEntry.path, noteEntry.content, false)
+            .then(() => {
+              markLocalNoteSynced(noteEntry.path, noteEntry.content);
+              setSavedBuffers((prev) => ({ ...prev, [noteEntry.path]: noteEntry.content }));
+            })
+            .catch(() => {
+              // stay dirty in local vault until server is reachable
+            });
+        }
+      }
+
       void triggerProjectCompile(chosenId, preferredTex?.path);
     }
   }, [activeProjectId, refreshProjectTree, triggerProjectCompile]);
@@ -554,24 +589,57 @@ export const App: React.FC = () => {
     jumpLine?: number,
   ) => {
     const projId = overrideProjId || activeProject?.id;
+    const isNoteFile = file.path.startsWith('notes/');
+    if (isNoteFile) {
+      const localVault = loadLocalNotesVault();
+      if (localVault[file.path]?.content) {
+        setFileBuffers((prev) => ({
+          ...prev,
+          [file.path]: localVault[file.path].content,
+        }));
+      }
+    }
     if (projId) {
       try {
         const res = await api.readProjectFile(projId, file.path);
-        const diskDiffersFromHead = Boolean(
-          res.head_content && res.head_content !== res.content,
-        );
-        setFileBuffers((prev) => ({ ...prev, [res.path]: res.content }));
-        setSavedBuffers((prev) => ({ ...prev, [res.path]: res.content }));
-        setHeadBuffers((prev) => ({ ...prev, [res.path]: res.head_content }));
-        setExternalAgentEdits((prev) => ({
-          ...prev,
-          [res.path]: diskDiffersFromHead && prev[res.path] !== false,
-        }));
-        if (file.kind === 'diagram' && res.content.trim().startsWith('<')) {
-          const stem = file.path
-            .replace(/^(diagrams|paper\/figures)\//, '')
-            .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
-          setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: res.content }));
+        if (isNoteFile) {
+          const resolved = resolveNoteWithLocalWins(res.path, res.content);
+          setFileBuffers((prev) => ({ ...prev, [res.path]: resolved.content }));
+          setSavedBuffers((prev) => ({ ...prev, [res.path]: resolved.content }));
+          setHeadBuffers((prev) => ({
+            ...prev,
+            [res.path]: resolved.serverBackupContent || res.head_content || resolved.content,
+          }));
+          if (resolved.shouldPushToServer) {
+            void api
+              .writeProjectFile(projId, res.path, resolved.content, false)
+              .then(() => {
+                markLocalNoteSynced(res.path, resolved.content);
+                setStatusMessage(
+                  `Kept local ${res.path} (Local Wins) and synced to server.`,
+                );
+              })
+              .catch(() => {
+                // Remains safely in local vault until online
+              });
+          }
+        } else {
+          const diskDiffersFromHead = Boolean(
+            res.head_content && res.head_content !== res.content,
+          );
+          setFileBuffers((prev) => ({ ...prev, [res.path]: res.content }));
+          setSavedBuffers((prev) => ({ ...prev, [res.path]: res.content }));
+          setHeadBuffers((prev) => ({ ...prev, [res.path]: res.head_content }));
+          setExternalAgentEdits((prev) => ({
+            ...prev,
+            [res.path]: diskDiffersFromHead && prev[res.path] !== false,
+          }));
+          if (file.kind === 'diagram' && res.content.trim().startsWith('<')) {
+            const stem = file.path
+              .replace(/^(diagrams|paper\/figures)\//, '')
+              .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
+            setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: res.content }));
+          }
         }
       } catch {
         // use local buffer
@@ -693,7 +761,25 @@ export const App: React.FC = () => {
         ? `% ${relPath}\n\\section{${relPath.replace(/^paper\//, '').replace(/\.tex$/, '')}}\n`
         : `# ${relPath.replace(/^notes\//, '').replace(/\.md$/, '')}\n\n`;
 
+    // NEVER overwrite an existing note or file when + Note / Create is triggered
+    const localNotes = loadLocalNotesVault();
+    const alreadyExists =
+      projectTree.some((f) => f.path === relPath) ||
+      Boolean(localNotes[relPath]?.content?.trim()) ||
+      Boolean(fileBuffers[relPath]?.trim());
+    if (alreadyExists) {
+      await handleOpenProjectFile({ path: relPath, kind }, false);
+      setStatusMessage(`Opened existing ${relPath} (protected against overwrite).`);
+      return;
+    }
+
+    if (relPath.startsWith('notes/')) {
+      saveLocalNote(relPath, initialContent, true);
+    }
     await api.writeProjectFile(activeProject.id, relPath, initialContent, false);
+    if (relPath.startsWith('notes/')) {
+      markLocalNoteSynced(relPath, initialContent);
+    }
     await refreshProjectTree(activeProject.id);
     await handleOpenProjectFile({ path: relPath, kind }, false);
   };
@@ -745,9 +831,15 @@ export const App: React.FC = () => {
         return;
       }
       const content = contentOverride ?? fileBuffers[filePath] ?? '';
+      if (filePath.startsWith('notes/')) {
+        saveLocalNote(filePath, content, true);
+      }
       setSavingSource(true);
       try {
         const res = await api.writeProjectFile(activeProject.id, filePath, content, false);
+        if (filePath.startsWith('notes/')) {
+          markLocalNoteSynced(filePath, content);
+        }
         setSavedBuffers((prev) => ({ ...prev, [filePath]: content }));
         setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
         setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
@@ -1109,6 +1201,10 @@ export const App: React.FC = () => {
         onChangeSource={(next) => {
           if (filePath.endsWith('.tex')) {
             setActiveEditorPath(filePath);
+          }
+          if (filePath.startsWith('notes/')) {
+            // Instant 0ms local persistence in dupe_local_notes_v1 so local note edits can NEVER be lost
+            saveLocalNote(filePath, next, true);
           }
           setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
           setFileBuffers((prev) => {

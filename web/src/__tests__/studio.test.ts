@@ -17,8 +17,11 @@ import {
   clearOutboxQueue,
   enqueueOutboxEntry,
   getOutboxQueue,
+  loadLocalNotesVault,
   loadWorkspaceSnapshot,
   parseGitHubOwnerRepo,
+  resolveNoteWithLocalWins,
+  saveLocalNote,
   saveWorkspaceSnapshot,
 } from '../api/client';
 import { buildFolderTree } from '../components/Sidebar/ExplorerSidebar';
@@ -240,5 +243,26 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
       'architecture',
     );
     expect(mdSnippet).toBe('![Encoder Block](../paper/figures/architecture.svg)');
+  });
+
+  it('guarantees local notes always win over server stubs and syncs local note vault', () => {
+    saveWorkspaceSnapshot({
+      fileBuffers: {
+        'notes/paperChanges.md': '# paperChanges\n\n- Detailed work laptop note bullet 1\n- Detailed bullet 2',
+      },
+    });
+    const vault = loadLocalNotesVault();
+    expect(vault['notes/paperChanges.md']?.content).toContain('Detailed work laptop note bullet 1');
+
+    // Even if the server only has the 16-byte heading stub '# paperChanges\n\n', local MUST win
+    const resolved = resolveNoteWithLocalWins('notes/paperChanges.md', '# paperChanges\n\n');
+    expect(resolved.content).toContain('Detailed work laptop note bullet 1');
+    expect(resolved.shouldPushToServer).toBe(true);
+
+    // Direct local edit via saveLocalNote also wins over older server content
+    saveLocalNote('notes/changes.md', '# changes\n\n- New local bullet', true, '# changes\n\n- Old');
+    const resolvedChanges = resolveNoteWithLocalWins('notes/changes.md', '# changes\n\n- Old');
+    expect(resolvedChanges.content).toContain('New local bullet');
+    expect(resolvedChanges.shouldPushToServer).toBe(true);
   });
 });

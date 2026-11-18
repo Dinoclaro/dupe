@@ -220,18 +220,196 @@ export function loadWorkspaceSnapshot(): CachedWorkspaceSnapshot {
 export function saveWorkspaceSnapshot(patch: Partial<CachedWorkspaceSnapshot>): void {
   try {
     const current = loadWorkspaceSnapshot();
+    const nextFileBuffers = { ...(current.fileBuffers || {}) };
+    if (patch.fileBuffers) {
+      for (const [k, v] of Object.entries(patch.fileBuffers)) {
+        // Never allow a shorter stub to overwrite a longer note in snapshot cache
+        const existing = nextFileBuffers[k];
+        if (
+          k.startsWith('notes/') &&
+          existing &&
+          existing.trim().length > 25 &&
+          v.trim().length <= 30 &&
+          !v.trim().includes('\n')
+        ) {
+          continue;
+        }
+        nextFileBuffers[k] = v;
+      }
+    }
     const merged: CachedWorkspaceSnapshot = {
       ...current,
       ...patch,
-      fileBuffers: {
-        ...(current.fileBuffers || {}),
-        ...(patch.fileBuffers || {}),
-      },
+      fileBuffers: nextFileBuffers,
     };
     storageSet(SNAPSHOT_STORAGE_KEY, JSON.stringify(merged));
   } catch {
     // ignore storage quota errors
   }
+}
+
+const LOCAL_NOTES_VAULT_KEY = 'dupe_local_notes_v1';
+const LOCAL_NOTES_BACKUP_KEY = 'dupe_local_notes_backups_v1';
+
+export interface LocalNoteEntry {
+  path: string;
+  content: string;
+  syncedContent: string | null;
+  dirty: boolean;
+  updatedAt: string;
+}
+
+export function loadLocalNotesVault(): Record<string, LocalNoteEntry> {
+  let vault: Record<string, LocalNoteEntry> = {};
+  try {
+    const raw = storageGet(LOCAL_NOTES_VAULT_KEY);
+    if (raw) {
+      vault = JSON.parse(raw) as Record<string, LocalNoteEntry>;
+    }
+  } catch {
+    vault = {};
+  }
+
+  // Rescue/migrate any notes/* from dupe_workspace_snapshot_v1.fileBuffers
+  const snap = loadWorkspaceSnapshot();
+  let migrated = false;
+  if (snap.fileBuffers) {
+    for (const [path, text] of Object.entries(snap.fileBuffers)) {
+      if (!path.startsWith('notes/') || typeof text !== 'string' || !text.trim()) {
+        continue;
+      }
+      const existing = vault[path];
+      if (!existing || text.trim().length > existing.content.trim().length) {
+        vault[path] = {
+          path,
+          content: text,
+          syncedContent: existing?.syncedContent ?? null,
+          dirty: true,
+          updatedAt: new Date().toISOString(),
+        };
+        migrated = true;
+      }
+    }
+  }
+  if (migrated) {
+    try {
+      storageSet(LOCAL_NOTES_VAULT_KEY, JSON.stringify(vault));
+    } catch {
+      // ignore
+    }
+  }
+  return vault;
+}
+
+function recordLocalNoteBackup(path: string, oldContent: string): void {
+  if (!oldContent || oldContent.trim().length <= 20) {
+    return;
+  }
+  try {
+    const raw = storageGet(LOCAL_NOTES_BACKUP_KEY);
+    const list: Array<{ path: string; content: string; savedAt: string }> = raw
+      ? JSON.parse(raw)
+      : [];
+    const lastForPath = [...list].reverse().find((b) => b.path === path);
+    if (lastForPath && lastForPath.content === oldContent) {
+      return;
+    }
+    const next = [
+      ...list.slice(-39),
+      { path, content: oldContent, savedAt: new Date().toISOString() },
+    ];
+    storageSet(LOCAL_NOTES_BACKUP_KEY, JSON.stringify(next));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export function saveLocalNote(
+  path: string,
+  content: string,
+  dirty = true,
+  syncedContent?: string | null,
+): LocalNoteEntry {
+  const vault = loadLocalNotesVault();
+  const prev = vault[path];
+  if (prev && prev.content !== content) {
+    recordLocalNoteBackup(path, prev.content);
+  }
+  const entry: LocalNoteEntry = {
+    path,
+    content,
+    syncedContent:
+      syncedContent !== undefined ? syncedContent : (prev?.syncedContent ?? null),
+    dirty,
+    updatedAt: new Date().toISOString(),
+  };
+  vault[path] = entry;
+  try {
+    storageSet(LOCAL_NOTES_VAULT_KEY, JSON.stringify(vault));
+  } catch {
+    // ignore
+  }
+  saveWorkspaceSnapshot({ fileBuffers: { [path]: content } });
+  return entry;
+}
+
+export function markLocalNoteSynced(path: string, syncedContent: string): void {
+  const vault = loadLocalNotesVault();
+  const prev = vault[path];
+  const currentContent = prev ? prev.content : syncedContent;
+  vault[path] = {
+    path,
+    content: currentContent,
+    syncedContent,
+    dirty: currentContent !== syncedContent,
+    updatedAt: prev?.updatedAt || new Date().toISOString(),
+  };
+  try {
+    storageSet(LOCAL_NOTES_VAULT_KEY, JSON.stringify(vault));
+  } catch {
+    // ignore
+  }
+}
+
+export function resolveNoteWithLocalWins(
+  path: string,
+  serverContent: string,
+): {
+  content: string;
+  shouldPushToServer: boolean;
+  serverBackupContent?: string;
+} {
+  const vault = loadLocalNotesVault();
+  const local = vault[path];
+
+  if (!local || !local.content.trim()) {
+    saveLocalNote(path, serverContent, false, serverContent);
+    return { content: serverContent, shouldPushToServer: false };
+  }
+
+  if (local.content === serverContent) {
+    markLocalNoteSynced(path, serverContent);
+    return { content: serverContent, shouldPushToServer: false };
+  }
+
+  const localLen = local.content.trim().length;
+  const serverLen = serverContent.trim().length;
+  const serverIsBareStub =
+    serverLen <= 30 && !serverContent.trim().includes('\n');
+
+  // Local ALWAYS wins if dirty, or if server is a bare stub, or if local has more content
+  if (local.dirty || serverIsBareStub || localLen >= serverLen) {
+    return {
+      content: local.content,
+      shouldPushToServer: true,
+      serverBackupContent: serverLen > 0 ? serverContent : undefined,
+    };
+  }
+
+  // Only accept serverContent if local was clean (dirty === false) AND server has longer newer content
+  recordLocalNoteBackup(path, local.content);
+  saveLocalNote(path, serverContent, false, serverContent);
+  return { content: serverContent, shouldPushToServer: false };
 }
 
 export function getStoredGitHubPat(): string {

@@ -886,12 +886,48 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "failed to create parent directory")
 		return
 	}
+
+	relSlash := filepath.ToSlash(filepath.Clean(relFile))
+	isNoteFile := strings.HasPrefix(relSlash, "notes/")
+	if isNoteFile {
+		if existingBytes, readErr := os.ReadFile(targetPath); readErr == nil {
+			existingTrim := bytes.TrimSpace(existingBytes)
+			incomingTrim := bytes.TrimSpace(data)
+			// Never allow a 1-line '# title' stub to overwrite an existing populated note
+			if len(existingTrim) > 25 && len(incomingTrim) <= 30 && !bytes.Contains(incomingTrim, []byte("\n")) {
+				headContent := readHeadContentForProjectFile(r.Context(), projDir, relSlash)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"path":         relSlash,
+					"bytes":        len(existingBytes),
+					"content":      string(existingBytes),
+					"head_content": headContent,
+					"protected":    true,
+				})
+				return
+			}
+			// Snapshot previous version into .dupe/notes_history/ before updating
+			if len(existingTrim) > 0 && !bytes.Equal(existingTrim, incomingTrim) {
+				histDir := filepath.Join(projDir, ".dupe", "notes_history")
+				_ = os.MkdirAll(histDir, 0o755)
+				stamp := time.Now().UTC().Format("20060102T150405Z")
+				safeBase := strings.ReplaceAll(strings.TrimPrefix(relSlash, "notes/"), "/", "__")
+				histPath := filepath.Join(histDir, fmt.Sprintf("%s.%s.bak.md", safeBase, stamp))
+				_ = os.WriteFile(histPath, existingBytes, 0o644)
+			}
+		}
+	}
+
 	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to write file")
 		return
 	}
 
-	relSlash := filepath.ToSlash(filepath.Clean(relFile))
+	if isNoteFile {
+		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
+		_, _ = runGitCommand(r.Context(), projDir, "add", "--", relSlash)
+		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): auto-save note "+relSlash)
+	}
+
 	if strings.HasPrefix(relSlash, "diagrams/") && strings.HasSuffix(relSlash, ".svg") {
 		baseName := strings.TrimSuffix(filepath.Base(relSlash), ".drawio.svg")
 		baseName = strings.TrimSuffix(baseName, ".svg")
