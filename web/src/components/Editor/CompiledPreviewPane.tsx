@@ -1,6 +1,98 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
 import { CompileProjectResponse, api } from '../../api/client';
 import { CompileResponse } from '../../workers/latexCompiler';
+
+if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+    'pdfjs-dist/build/pdf.worker.min.mjs',
+    import.meta.url,
+  ).toString();
+}
+
+interface CompiledPdfPageCanvasProps {
+  pdfDoc: pdfjsLib.PDFDocumentProxy;
+  pageNumber: number;
+  scale: number;
+  onDoubleClickPoint: (pageNumber: number, xRatio: number, yRatio: number) => void;
+}
+
+const CompiledPdfPageCanvas: React.FC<CompiledPdfPageCanvasProps> = ({
+  pdfDoc,
+  pageNumber,
+  scale,
+  onDoubleClickPoint,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let renderTask: pdfjsLib.RenderTask | null = null;
+
+    const renderPage = async () => {
+      try {
+        const page = await pdfDoc.getPage(pageNumber);
+        if (cancelled) {
+          return;
+        }
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const cssViewport = page.getViewport({ scale });
+        const hiViewport = page.getViewport({ scale: scale * dpr });
+        const canvas = canvasRef.current;
+        if (!canvas) {
+          return;
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return;
+        }
+        canvas.width = hiViewport.width;
+        canvas.height = hiViewport.height;
+        canvas.style.width = `${cssViewport.width}px`;
+        canvas.style.height = `${cssViewport.height}px`;
+        renderTask = page.render({ canvasContext: ctx, viewport: hiViewport });
+        await renderTask.promise;
+      } catch {
+        // Ignore cancelled render
+      }
+    };
+
+    void renderPage();
+    return () => {
+      cancelled = true;
+      if (renderTask) {
+        try {
+          renderTask.cancel();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [pdfDoc, pageNumber, scale]);
+
+  return (
+    <div
+      className="pdf-page-wrapper"
+      title="Double-click anywhere on the page to jump to the corresponding LaTeX source line"
+      onDoubleClick={(e) => {
+        const canvas = canvasRef.current;
+        if (!canvas) {
+          return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          return;
+        }
+        const xRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const yRatio = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+        onDoubleClickPoint(pageNumber, xRatio, yRatio);
+      }}
+    >
+      <div className="pdf-page-Badge">Page {pageNumber} · Double-click to jump to LaTeX</div>
+      <canvas ref={canvasRef} className="pdf-canvas" style={{ cursor: 'pointer' }} />
+    </div>
+  );
+};
 
 interface CompiledPreviewPaneProps {
   projectId: string | null;
@@ -10,7 +102,7 @@ interface CompiledPreviewPaneProps {
   compiled: CompileResponse;
   sourceLabel: string;
   onTriggerCompile: () => Promise<void>;
-  onJumpToFile?: (relPath: string) => void;
+  onJumpToFile?: (relPath: string, line?: number) => void;
 }
 
 export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
@@ -24,8 +116,12 @@ export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
   onJumpToFile,
 }) => {
   const [viewMode, setViewMode] = useState<'pdf' | 'logs' | 'draft'>('pdf');
-  const [zoom, setZoom] = useState(100);
+  const [pdfRenderMode, setPdfRenderMode] = useState<'interactive' | 'native'>('interactive');
+  const [zoom, setZoom] = useState(115);
   const [showRawLog, setShowRawLog] = useState(false);
+  const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
+  const [numPages, setNumPages] = useState<number>(0);
+  const [syncTexStatus, setSyncTexStatus] = useState<string | null>(null);
 
   const errorCount = compileResult?.errors?.length ?? 0;
   const warningCount = compileResult?.warnings?.length ?? 0;
@@ -46,6 +142,54 @@ export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
       ? api.compiledPdfUrl(projectId, compileResult.root_tex, pdfVersion)
       : '';
 
+  useEffect(() => {
+    if (!hasRealPdf || !pdfUrl || pdfRenderMode !== 'interactive') {
+      return undefined;
+    }
+    let cancelled = false;
+    const loadingTask = pdfjsLib.getDocument(pdfUrl);
+    loadingTask.promise
+      .then((doc) => {
+        if (!cancelled) {
+          setPdfDoc(doc);
+          setNumPages(doc.numPages);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPdfRenderMode('native');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasRealPdf, pdfUrl, pdfRenderMode]);
+
+  const handleSyncTexDoubleClick = async (
+    pageNumber: number,
+    xRatio: number,
+    yRatio: number,
+  ) => {
+    if (!projectId || !onJumpToFile) {
+      return;
+    }
+    try {
+      setSyncTexStatus(`Locating source on page ${pageNumber}…`);
+      const res = await api.resolveSyncTex(
+        projectId,
+        pageNumber,
+        xRatio,
+        yRatio,
+        compileResult?.root_tex,
+      );
+      setSyncTexStatus(`→ ${res.path}:${res.line}`);
+      onJumpToFile(res.path, res.line);
+      window.setTimeout(() => setSyncTexStatus(null), 2200);
+    } catch {
+      setSyncTexStatus(null);
+    }
+  };
+
   return (
     <div className="compiled-preview-shell">
       <div className="reader-toolbar">
@@ -65,7 +209,13 @@ export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
           {compileResult && (
             <span className="muted-hint">
               {(compileResult.duration_ms / 1000).toFixed(1)}s
+              {numPages > 0 ? ` · ${numPages}p` : ''}
             </span>
+          )}
+          {syncTexStatus && (
+            <code className="bibkey-badge" style={{ color: '#86efac' }}>
+              {syncTexStatus}
+            </code>
           )}
         </div>
 
@@ -185,9 +335,10 @@ export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
                     <button
                       type="button"
                       className="btn-tiny"
-                      onClick={() => onJumpToFile(relTarget)}
+                      onClick={() => onJumpToFile(relTarget, errItem.line)}
                     >
                       Open {errItem.file}
+                      {errItem.line ? `:${errItem.line}` : ''}
                     </button>
                   )}
                 </div>
@@ -214,9 +365,10 @@ export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
                       <button
                         type="button"
                         className="btn-tiny"
-                        onClick={() => onJumpToFile(relTarget)}
+                        onClick={() => onJumpToFile(relTarget, warnItem.line)}
                       >
                         Open {warnItem.file}
+                        {warnItem.line ? `:${warnItem.line}` : ''}
                       </button>
                     )}
                 </div>
@@ -235,17 +387,31 @@ export const CompiledPreviewPane: React.FC<CompiledPreviewPaneProps> = ({
         </div>
       )}
 
-      {/* VIEW 2: Real Compiled PDF Viewer */}
+      {/* VIEW 2: Real Compiled PDF Viewer (Interactive SyncTeX Double-Click or Native PDF) */}
       {viewMode === 'pdf' && (
         hasRealPdf ? (
-          <div className="reader-native-stage">
-            <iframe
-              key={`${pdfUrl}-${zoom}`}
-              title="Compiled Paper PDF"
-              src={`${pdfUrl}#zoom=${zoom}`}
-              className="reader-native-iframe"
-            />
-          </div>
+          pdfRenderMode === 'interactive' && pdfDoc ? (
+            <div className="reader-canvas-stage">
+              {Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
+                <CompiledPdfPageCanvas
+                  key={`${pdfVersion}-page-${pageNum}`}
+                  pdfDoc={pdfDoc}
+                  pageNumber={pageNum}
+                  scale={zoom / 100}
+                  onDoubleClickPoint={(p, x, y) => void handleSyncTexDoubleClick(p, x, y)}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="reader-native-stage">
+              <iframe
+                key={`${pdfUrl}-${zoom}`}
+                title="Compiled Paper PDF"
+                src={`${pdfUrl}#zoom=${zoom}`}
+                className="reader-native-iframe"
+              />
+            </div>
+          )
         ) : (
           <div className="compiled-page-stage">
             <div

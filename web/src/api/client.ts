@@ -509,6 +509,26 @@ export const api = {
     return res.results || [];
   },
 
+  async resolveSyncTex(
+    id: string,
+    page: number,
+    x: number,
+    y: number,
+    target?: string,
+  ): Promise<{ path: string; line: number; page: number }> {
+    const params = new URLSearchParams({
+      page: String(page),
+      x: x.toFixed(4),
+      y: y.toFixed(4),
+    });
+    if (target) {
+      params.set('target', target);
+    }
+    return apiFetch<{ path: string; line: number; page: number }>(
+      `/api/projects/${id}/synctex?${params.toString()}`,
+    );
+  },
+
   compiledPdfUrl(id: string, target?: string, version?: number): string {
     const params = new URLSearchParams();
     const token = getStoredToken();

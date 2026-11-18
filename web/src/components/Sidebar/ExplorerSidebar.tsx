@@ -39,7 +39,7 @@ export function buildFolderTree(entries: ProjectTreeEntry[]): FolderTreeNode {
   };
 
   // Ensure standard top-level project folders always appear
-  for (const stdDir of ['paper', 'code', 'notes', 'diagrams', 'refs']) {
+  for (const stdDir of ['paper', 'notes', 'diagrams', 'refs']) {
     root.childrenDirs.push({
       name: stdDir,
       fullPath: stdDir,
@@ -103,7 +103,7 @@ interface ExplorerSidebarProps {
   onSelectProject: (projectId: string) => void;
   onProjectsChanged: () => Promise<void>;
   onOpenPaper: (paper: Paper, inSplit: boolean) => void;
-  onOpenProjectFile: (file: ProjectTreeEntry, inSplit: boolean) => void;
+  onOpenProjectFile: (file: ProjectTreeEntry, inSplit: boolean, line?: number) => void;
   onOpenCompiledPreview: (inSplit: boolean) => void;
   onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
   onPullProject: () => Promise<void>;
@@ -694,8 +694,31 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
         kind: item.kind === 'pdf' ? 'other' : item.kind,
       },
       inSplit,
+      item.line,
     );
   };
+
+  useEffect(() => {
+    const onGlobalFind = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setSidebarMode('search');
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        const activeEl = document.activeElement as HTMLElement | null;
+        const inCodeMirror = Boolean(activeEl?.closest?.('.cm-editor'));
+        const inInput =
+          activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'TEXTAREA';
+        if (!inCodeMirror && !inInput) {
+          e.preventDefault();
+          setSidebarMode('search');
+        }
+      }
+    };
+    window.addEventListener('keydown', onGlobalFind);
+    return () => window.removeEventListener('keydown', onGlobalFind);
+  }, []);
 
   return (
     <aside className="vscode-sidebar" ref={sidebarRef}>
@@ -722,7 +745,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
           <div className="explorer-search-row">
             <input
               type="search"
-              placeholder="Search across PDFs, LaTeX, Notes & Code…"
+              placeholder="Search across PDFs, LaTeX & Notes…"
               value={globalQuery}
               onChange={(e) => setGlobalQuery(e.target.value)}
               autoFocus
@@ -734,7 +757,6 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   ['pdf', 'PDFs'],
                   ['latex', 'LaTeX'],
                   ['notes', 'Notes'],
-                  ['code', 'Code'],
                 ] as const
               ).map(([catKey, label]) => (
                 <button
@@ -754,7 +776,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
             {!searching && globalQuery.trim().length < 2 && (
               <div className="explorer-empty">
                 Type at least 2 characters to search across your <strong>{papers.length} PDFs</strong>,{' '}
-                <strong>paper/</strong> LaTeX files, <strong>notes/</strong>, and <strong>code/</strong> repositories.
+                <strong>paper/</strong> LaTeX files, and <strong>notes/</strong>.
               </div>
             )}
             {!searching &&

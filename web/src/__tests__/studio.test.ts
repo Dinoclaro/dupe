@@ -22,6 +22,7 @@ import {
   saveWorkspaceSnapshot,
 } from '../api/client';
 import { buildFolderTree } from '../components/Sidebar/ExplorerSidebar';
+import { convertDrawioClipboardToSnippet } from '../components/Editor/LatexEditorPane';
 
 const SAMPLE_PAPERS: Paper[] = [
   {
@@ -205,18 +206,39 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
 
   it('builds a recursive multi-level folder tree from project file entries', () => {
     const root = buildFolderTree([
-      { path: 'code/mbrl_soft/source/train.py', kind: 'other', git_status: '' },
-      { path: 'code/mbrl_soft/README.md', kind: 'markdown', git_status: '' },
-      { path: 'code/rsl_rl/rsl_rl/runners/on_policy_runner.py', kind: 'other', git_status: 'M' },
+      { path: 'notes/ideas/experiment.md', kind: 'markdown', git_status: '' },
+      { path: 'paper/sections/intro.tex', kind: 'tex', git_status: 'M' },
     ]);
 
-    const codeDir = root.childrenDirs.find((d) => d.name === 'code');
-    expect(codeDir).toBeDefined();
-    expect(codeDir!.childrenDirs.map((d) => d.name)).toEqual(['mbrl_soft', 'rsl_rl']);
+    const notesDir = root.childrenDirs.find((d) => d.name === 'notes');
+    expect(notesDir).toBeDefined();
+    const ideasDir = notesDir!.childrenDirs.find((d) => d.name === 'ideas')!;
+    expect(ideasDir.files.map((f) => f.path)).toEqual(['notes/ideas/experiment.md']);
 
-    const mbrlDir = codeDir!.childrenDirs.find((d) => d.name === 'mbrl_soft')!;
-    expect(mbrlDir.files.map((f) => f.path)).toEqual(['code/mbrl_soft/README.md']);
-    const sourceDir = mbrlDir.childrenDirs.find((d) => d.name === 'source')!;
-    expect(sourceDir.files.map((f) => f.path)).toEqual(['code/mbrl_soft/source/train.py']);
+    const paperDir = root.childrenDirs.find((d) => d.name === 'paper')!;
+    const sectionsDir = paperDir.childrenDirs.find((d) => d.name === 'sections')!;
+    expect(sectionsDir.files.map((f) => f.path)).toEqual(['paper/sections/intro.tex']);
+  });
+
+  it('converts copied Draw.io mxGraphModel clipboard XML into LaTeX figure and Markdown image snippets', () => {
+    const drawioClipboard =
+      '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="Encoder Block" vertex="1" parent="1"/></root></mxGraphModel>';
+
+    const latexSnippet = convertDrawioClipboardToSnippet(
+      drawioClipboard,
+      '',
+      false,
+      'architecture',
+    );
+    expect(latexSnippet).toContain('\\includegraphics[width=0.8\\linewidth]{figures/architecture.svg}');
+    expect(latexSnippet).toContain('\\caption{Encoder Block}');
+
+    const mdSnippet = convertDrawioClipboardToSnippet(
+      drawioClipboard,
+      '',
+      true,
+      'architecture',
+    );
+    expect(mdSnippet).toBe('![Encoder Block](../paper/figures/architecture.svg)');
   });
 });

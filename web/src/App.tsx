@@ -154,6 +154,9 @@ export const App: React.FC = () => {
   const [activeEditorPath, setActiveEditorPath] = useState<string>('paper/main.tex');
   const [savingSource, setSavingSource] = useState(false);
   const autoSaveTimersRef = useRef<Record<string, number>>({});
+  const [jumpTargets, setJumpTargets] = useState<
+    Record<string, { line: number; seq: number }>
+  >({});
   const [compileResult, setCompileResult] = useState<CompileProjectResponse | null>(null);
   const [compilingPdf, setCompilingPdf] = useState(false);
   const [pdfVersion, setPdfVersion] = useState(1);
@@ -548,6 +551,7 @@ export const App: React.FC = () => {
     file: ProjectTreeEntry,
     inSplit: boolean,
     overrideProjId?: string,
+    jumpLine?: number,
   ) => {
     const projId = overrideProjId || activeProject?.id;
     if (projId) {
@@ -572,6 +576,13 @@ export const App: React.FC = () => {
       } catch {
         // use local buffer
       }
+    }
+
+    if (jumpLine && jumpLine >= 1) {
+      setJumpTargets((prev) => ({
+        ...prev,
+        [file.path]: { line: jumpLine, seq: (prev[file.path]?.seq || 0) + 1 },
+      }));
     }
 
     if (file.kind === 'tex') {
@@ -724,39 +735,46 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSaveProjectFile = useCallback(async (filePath: string, contentOverride?: string) => {
-    if (!activeProject) {
-      return;
-    }
-    const content = contentOverride ?? fileBuffers[filePath] ?? '';
-    setSavingSource(true);
-    try {
-      const res = await api.writeProjectFile(activeProject.id, filePath, content, false);
-      setSavedBuffers((prev) => ({ ...prev, [filePath]: content }));
-      setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
-      setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
-      await refreshProjectTree(activeProject.id);
-      if (filePath.endsWith('.tex') || filePath.endsWith('.bib')) {
-        setStatusMessage(`Saved ${filePath} — recompiling PDF…`);
-        void triggerProjectCompile(activeProject.id, filePath);
-      } else {
-        setStatusMessage(`Saved ${filePath}.`);
+  const handleSaveProjectFile = useCallback(
+    async (
+      filePath: string,
+      contentOverride?: string,
+      shouldCompile = false,
+    ) => {
+      if (!activeProject) {
+        return;
       }
-    } catch {
-      const q = enqueueOutboxEntry({
-        id: `file:${activeProject.id}:${filePath}`,
-        kind: 'project_file',
-        projectId: activeProject.id,
-        path: filePath,
-        content,
-        updatedAt: new Date().toISOString(),
-      });
-      setOutboxCount(q.length);
-      setStatusMessage(`Offline: queued ${filePath} in outbox (${q.length} pending).`);
-    } finally {
-      setSavingSource(false);
-    }
-  }, [activeProject, fileBuffers, refreshProjectTree, triggerProjectCompile]);
+      const content = contentOverride ?? fileBuffers[filePath] ?? '';
+      setSavingSource(true);
+      try {
+        const res = await api.writeProjectFile(activeProject.id, filePath, content, false);
+        setSavedBuffers((prev) => ({ ...prev, [filePath]: content }));
+        setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
+        setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
+        await refreshProjectTree(activeProject.id);
+        if (shouldCompile && (filePath.endsWith('.tex') || filePath.endsWith('.bib'))) {
+          setStatusMessage(`Saved ${filePath} — recompiling PDF…`);
+          void triggerProjectCompile(activeProject.id, filePath);
+        } else {
+          setStatusMessage(`Auto-saved ${filePath}.`);
+        }
+      } catch {
+        const q = enqueueOutboxEntry({
+          id: `file:${activeProject.id}:${filePath}`,
+          kind: 'project_file',
+          projectId: activeProject.id,
+          path: filePath,
+          content,
+          updatedAt: new Date().toISOString(),
+        });
+        setOutboxCount(q.length);
+        setStatusMessage(`Offline: queued ${filePath} in outbox (${q.length} pending).`);
+      } finally {
+        setSavingSource(false);
+      }
+    },
+    [activeProject, fileBuffers, refreshProjectTree, triggerProjectCompile],
+  );
 
   const handleRevertProjectFile = async (filePath: string) => {
     if (!activeProject) {
@@ -797,36 +815,82 @@ export const App: React.FC = () => {
     setStatusMessage('Downloaded main.tex and references.bib from browser cache.');
   }, [fileBuffers, activeSourceText, buildLocalReferencesBib]);
 
-  const handlePullActiveProject = async () => {
-    if (!activeProject) {
-      return;
-    }
-    try {
-      const res = await api.pullProject(activeProject.id);
-      setServerOnline(true);
-      await loadProjects();
-      const files = await refreshProjectTree(activeProject.id);
-      for (const f of files) {
-        if (f.path.startsWith('paper/') && f.path in fileBuffers) {
-          try {
-            const latest = await api.readProjectFile(activeProject.id, f.path);
-            setFileBuffers((prev) => ({ ...prev, [f.path]: latest.content }));
-            setSavedBuffers((prev) => ({ ...prev, [f.path]: latest.content }));
-            setHeadBuffers((prev) => ({ ...prev, [f.path]: latest.head_content ?? latest.content }));
-          } catch {
-            // keep existing buffer if a pulled file is unreadable
+  const handlePullActiveProject = useCallback(
+    async (silent = false) => {
+      if (!activeProject || !activeProject.overleaf_remote) {
+        return;
+      }
+      if (Object.keys(autoSaveTimersRef.current).length > 0) {
+        return;
+      }
+      try {
+        const res = await api.pullProject(activeProject.id);
+        setServerOnline(true);
+        if (res.updated || !silent) {
+          await loadProjects();
+          const files = await refreshProjectTree(activeProject.id);
+          for (const f of files) {
+            if (f.path.startsWith('paper/') && f.path in fileBuffers) {
+              try {
+                const latest = await api.readProjectFile(activeProject.id, f.path);
+                setFileBuffers((prev) => ({ ...prev, [f.path]: latest.content }));
+                setSavedBuffers((prev) => ({ ...prev, [f.path]: latest.content }));
+                setHeadBuffers((prev) => ({
+                  ...prev,
+                  [f.path]: latest.head_content ?? latest.content,
+                }));
+              } catch {
+                // keep existing buffer if a pulled file is unreadable
+              }
+            }
           }
         }
+        if (res.updated) {
+          setStatusMessage(
+            `↓ Pulled new Overleaf changes into paper/ (${res.paper_sha.slice(0, 7)}) — recompiling PDF…`,
+          );
+          void triggerProjectCompile(activeProject.id, activeEditorPath);
+        } else if (!silent) {
+          setStatusMessage(
+            `Fetched Overleaf remote (${res.paper_sha.slice(0, 7)}, already up to date).`,
+          );
+        }
+      } catch (err) {
+        if (!silent) {
+          setStatusMessage(
+            `Pull failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
-      setStatusMessage(
-        res.updated
-          ? `Pulled latest Overleaf changes into paper/ (${res.paper_sha.slice(0, 7)}).`
-          : `Fetched Overleaf remote (${res.paper_sha.slice(0, 7)}, already up to date).`,
-      );
-    } catch (err) {
-      setStatusMessage(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+    },
+    [
+      activeProject,
+      activeEditorPath,
+      fileBuffers,
+      loadProjects,
+      refreshProjectTree,
+      triggerProjectCompile,
+    ],
+  );
+
+  // Automatic background Overleaf pull on project open, window focus, and 60s timer
+  useEffect(() => {
+    if (!activeProject?.id || !activeProject.overleaf_remote || !isOnline) {
+      return undefined;
     }
-  };
+    void handlePullActiveProject(true);
+    const onFocus = () => {
+      void handlePullActiveProject(true);
+    };
+    window.addEventListener('focus', onFocus);
+    const interval = window.setInterval(() => {
+      void handlePullActiveProject(true);
+    }, 60000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(interval);
+    };
+  }, [activeProject?.id, activeProject?.overleaf_remote, isOnline, handlePullActiveProject]);
 
   const handleSyncActiveProject = async () => {
     if (!activeProject) {
@@ -992,8 +1056,13 @@ export const App: React.FC = () => {
               await triggerProjectCompile(activeProject.id, activeEditorPath);
             }
           }}
-          onJumpToFile={(relPath) => {
-            void handleOpenProjectFile({ path: relPath, kind: 'tex' }, false);
+          onJumpToFile={(relPath, line) => {
+            void handleOpenProjectFile(
+              { path: relPath, kind: relPath.endsWith('.bib') ? 'bib' : 'tex' },
+              false,
+              undefined,
+              line,
+            );
           }}
         />
       );
@@ -1036,6 +1105,7 @@ export const App: React.FC = () => {
           source !== savedBuffers[filePath]
         }
         readOnly={isGeneratedReadOnly}
+        jumpToLine={jumpTargets[filePath] || null}
         onChangeSource={(next) => {
           if (filePath.endsWith('.tex')) {
             setActiveEditorPath(filePath);
@@ -1053,8 +1123,8 @@ export const App: React.FC = () => {
             }
             autoSaveTimersRef.current[filePath] = window.setTimeout(() => {
               delete autoSaveTimersRef.current[filePath];
-              void handleSaveProjectFile(filePath, next);
-            }, 1200);
+              void handleSaveProjectFile(filePath, next, false);
+            }, 800);
           }
         }}
         onSaveSource={() => {
@@ -1063,7 +1133,7 @@ export const App: React.FC = () => {
             window.clearTimeout(existingTimer);
             delete autoSaveTimersRef.current[filePath];
           }
-          return handleSaveProjectFile(filePath);
+          return handleSaveProjectFile(filePath, undefined, true);
         }}
         onRevertToHead={() => handleRevertProjectFile(filePath)}
         onAcceptAgentEdits={() => {
@@ -1167,6 +1237,23 @@ export const App: React.FC = () => {
           <button
             type="button"
             className="btn-tiny"
+            onClick={() => {
+              const suggested = `note-${new Date().toISOString().slice(0, 10)}.md`;
+              const entered = window.prompt(
+                'New note path in notes/ (e.g. ideas/experiment.md):',
+                suggested,
+              );
+              if (entered && entered.trim()) {
+                void handleCreateProjectFile('markdown', entered.trim());
+              }
+            }}
+            title="Create a new Markdown note in notes/ (Alt+N)"
+          >
+            + Note
+          </button>
+          <button
+            type="button"
+            className="btn-tiny"
             onClick={() =>
               void handleOpenProjectFile(
                 {
@@ -1245,10 +1332,12 @@ export const App: React.FC = () => {
             onSelectProject={(id) => void handleSelectProject(id)}
             onProjectsChanged={loadProjects}
             onOpenPaper={handleOpenPaper}
-            onOpenProjectFile={(f, split) => void handleOpenProjectFile(f, split)}
+            onOpenProjectFile={(f, split, line) =>
+              void handleOpenProjectFile(f, split, undefined, line)
+            }
             onOpenCompiledPreview={handleOpenCompiledPreview}
             onCreateProjectFile={handleCreateProjectFile}
-            onPullProject={handlePullActiveProject}
+            onPullProject={() => handlePullActiveProject(false)}
             onSyncProject={handleSyncActiveProject}
             onExportOverleafBundle={handleExportOverleafBundle}
             onInsertCitation={handleInsertCitation}

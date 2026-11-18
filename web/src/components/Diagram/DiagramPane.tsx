@@ -14,7 +14,7 @@ interface DiagramPaneProps {
 }
 
 const DRAWIO_EMBED_URL =
-  'https://embed.diagrams.net/?embed=1&proto=json&spin=1&ui=dark&libraries=1&saveAndExit=0&noExitBtn=1';
+  'https://embed.diagrams.net/?embed=1&proto=json&spin=1&ui=dark&libraries=1&math=1&autosave=1&saveAndExit=0&noExitBtn=1';
 
 interface DrawioMessage {
   event?: string;
@@ -32,9 +32,18 @@ export const DiagramPane: React.FC<DiagramPaneProps> = ({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const latestXmlRef = useRef<string>(initialXmlOrSvg || DEFAULT_DRAWIO_XML);
   const pendingInsertRef = useRef<boolean>(false);
+  const autoExportTimerRef = useRef<number | null>(null);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('dupe_active_diagram_name', figureName);
+    } catch {
+      // ignore storage errors
+    }
+  }, [figureName]);
 
   const postToDrawio = (payload: Record<string, unknown>) => {
     const win = iframeRef.current?.contentWindow;
@@ -78,6 +87,22 @@ export const DiagramPane: React.FC<DiagramPaneProps> = ({
 
       if (msg.event === 'autosave' && msg.xml) {
         latestXmlRef.current = msg.xml;
+        try {
+          localStorage.setItem('dupe_active_diagram_name', figureName);
+        } catch {
+          // ignore
+        }
+        if (autoExportTimerRef.current) {
+          window.clearTimeout(autoExportTimerRef.current);
+        }
+        autoExportTimerRef.current = window.setTimeout(() => {
+          pendingInsertRef.current = false;
+          postToDrawio({
+            action: 'export',
+            format: 'xmlsvg',
+            xml: latestXmlRef.current,
+          });
+        }, 900);
         return;
       }
 
