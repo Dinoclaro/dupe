@@ -611,12 +611,20 @@ export const App: React.FC = () => {
         if (isNoteFile) {
           const resolved = resolveNoteWithLocalWins(res.path, res.content);
           setFileBuffers((prev) => ({ ...prev, [res.path]: resolved.content }));
-          setSavedBuffers((prev) => ({ ...prev, [res.path]: resolved.content }));
+          setSavedBuffers((prev) => ({
+            ...prev,
+            [res.path]: resolved.hasConflict ? res.content : resolved.content,
+          }));
           setHeadBuffers((prev) => ({
             ...prev,
             [res.path]: resolved.serverBackupContent || res.head_content || resolved.content,
           }));
-          if (resolved.shouldPushToServer) {
+          if (resolved.hasConflict) {
+            setExternalAgentEdits((prev) => ({ ...prev, [res.path]: true }));
+            setStatusMessage(
+              `Conflict on ${res.path}: both browser and server/VS Code changed. Showing diff vs server version.`,
+            );
+          } else if (resolved.shouldPushToServer) {
             void api
               .writeProjectFile(projId, res.path, resolved.content, false)
               .then(() => {

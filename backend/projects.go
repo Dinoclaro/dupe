@@ -151,12 +151,22 @@ func commitAllIfDirty(ctx context.Context, dir, message string) (bool, string, e
 var commentTargetBacktickRegex = regexp.MustCompile("`([^`]+)`")
 
 func parseAndReconcileComments(projDir string, prependOpenBlock string) ([]string, []string, string) {
+	return parseCommentsInternal(projDir, prependOpenBlock, true)
+}
+
+func readCommentsWithoutWriting(projDir string) ([]string, []string) {
+	open, addressed, _ := parseCommentsInternal(projDir, "", false)
+	return open, addressed
+}
+
+func parseCommentsInternal(projDir string, prependOpenBlock string, writeToDisk bool) ([]string, []string, string) {
 	commentsPath := filepath.Join(projDir, "notes", "comments.md")
 	rawBytes, _ := os.ReadFile(commentsPath)
 	raw := strings.ReplaceAll(string(rawBytes), "\r\n", "\n")
 
 	var openBlocks []string
 	var addressedBlocks []string
+	var customLines []string
 	if strings.TrimSpace(prependOpenBlock) != "" {
 		openBlocks = append(openBlocks, strings.TrimSpace(prependOpenBlock))
 	}
@@ -190,12 +200,16 @@ func parseAndReconcileComments(projDir string, prependOpenBlock string) ([]strin
 				}
 			}
 			quoteText := strings.TrimSpace(strings.Join(quoteLines, "\n"))
+			quoteText = strings.TrimSuffix(quoteText, "…")
+			quoteText = strings.TrimSpace(quoteText)
 			if matches := commentTargetBacktickRegex.FindStringSubmatch(firstLine); len(matches) > 1 && len(quoteText) >= 8 {
 				targetRel := strings.TrimSpace(matches[1])
 				if (strings.HasPrefix(targetRel, "paper/") || strings.HasPrefix(targetRel, "notes/")) && targetRel != "notes/comments.md" {
 					if targetAbs, err := safeJoin(projDir, targetRel); err == nil {
 						if fileBytes, readErr := os.ReadFile(targetAbs); readErr == nil {
-							if !strings.Contains(string(fileBytes), quoteText) {
+							normFile := strings.Join(strings.Fields(string(fileBytes)), " ")
+							normQuote := strings.Join(strings.Fields(quoteText), " ")
+							if !strings.Contains(normFile, normQuote) {
 								isOpen = false
 								blockText = "- [x] " + strings.TrimPrefix(blockText, "- [ ] ")
 							}
@@ -232,18 +246,37 @@ func parseAndReconcileComments(projDir string, prependOpenBlock string) ([]strin
 			currentBlock = []string{"- [x] " + strings.TrimSpace(trimmed[6:])}
 			continue
 		}
-		if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") {
+		if trimmed == "# Project Comments & Annotations" ||
+			trimmed == "## Open Comments" ||
+			trimmed == "## Addressed Comments" ||
+			trimmed == "## Notes" ||
+			trimmed == "_No open comments._" ||
+			trimmed == "_No addressed comments yet._" {
 			flushBlock()
 			continue
 		}
 		if inBlock {
-			currentBlock = append(currentBlock, line)
+			if trimmed == "" || strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t") || strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "**Comment:**") {
+				currentBlock = append(currentBlock, line)
+				continue
+			}
+			flushBlock()
+		}
+		if trimmed != "" {
+			customLines = append(customLines, line)
 		}
 	}
 	flushBlock()
 
 	var b strings.Builder
 	b.WriteString("# Project Comments & Annotations\n\n")
+	if len(customLines) > 0 {
+		b.WriteString("## Notes\n\n")
+		for _, cl := range customLines {
+			b.WriteString(cl + "\n")
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("## Open Comments\n\n")
 	if len(openBlocks) == 0 {
 		b.WriteString("_No open comments._\n\n")
@@ -262,7 +295,13 @@ func parseAndReconcileComments(projDir string, prependOpenBlock string) ([]strin
 	}
 
 	formatted := strings.TrimRight(b.String(), "\n") + "\n"
-	if len(openBlocks) > 0 || len(addressedBlocks) > 0 || len(rawBytes) > 0 {
+	if writeToDisk && (len(openBlocks) > 0 || len(addressedBlocks) > 0 || len(customLines) > 0 || len(rawBytes) > 0) {
+		if len(rawBytes) > 0 && strings.TrimSpace(string(rawBytes)) != strings.TrimSpace(formatted) {
+			histDir := filepath.Join(projDir, ".dupe", "notes_history")
+			_ = os.MkdirAll(histDir, 0o755)
+			stamp := time.Now().UTC().Format("20060102T150405Z")
+			_ = os.WriteFile(filepath.Join(histDir, fmt.Sprintf("comments.md.%s.bak.md", stamp)), rawBytes, 0o644)
+		}
 		_ = os.MkdirAll(filepath.Join(projDir, "notes"), 0o755)
 		_ = os.WriteFile(commentsPath, []byte(formatted), 0o644)
 	}
@@ -294,7 +333,7 @@ func summarizeGitRepoContext(ctx context.Context, dir, label string) string {
 }
 
 func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectConfig, refs []RefIndexEntry, isLocalMode bool) string {
-	openComments, addressedComments, _ := parseAndReconcileComments(projectDir, "")
+	openComments, addressedComments := readCommentsWithoutWriting(projectDir)
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# AGENTS.md — %s\n\n", cfg.Name))
@@ -1244,9 +1283,6 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
 		_, _ = runGitCommand(r.Context(), projDir, "add", "--", relSlash)
 		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): auto-save note "+relSlash)
-	}
-	if (strings.HasPrefix(relSlash, "paper/") || strings.HasPrefix(relSlash, "notes/")) && relSlash != "notes/comments.md" {
-		_, _, _ = parseAndReconcileComments(projDir, "")
 	}
 
 	if strings.HasPrefix(relSlash, "diagrams/") && strings.HasSuffix(relSlash, ".svg") {

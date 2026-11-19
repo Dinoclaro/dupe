@@ -419,6 +419,7 @@ export function resolveNoteWithLocalWins(
   content: string;
   shouldPushToServer: boolean;
   serverBackupContent?: string;
+  hasConflict?: boolean;
 } {
   const vault = loadLocalNotesVault();
   const local = vault[path];
@@ -433,13 +434,12 @@ export function resolveNoteWithLocalWins(
     return { content: serverContent, shouldPushToServer: false };
   }
 
-  const localLen = local.content.trim().length;
   const serverLen = serverContent.trim().length;
   const serverIsBareStub =
     serverLen <= 30 && !serverContent.trim().includes('\n');
 
-  // Local ALWAYS wins if dirty, or if server is a bare stub, or if local has more content
-  if (local.dirty || serverIsBareStub || localLen >= serverLen) {
+  // If the server only has a bare 1-line stub, keep local and push to server.
+  if (serverIsBareStub) {
     return {
       content: local.content,
       shouldPushToServer: true,
@@ -447,7 +447,28 @@ export function resolveNoteWithLocalWins(
     };
   }
 
-  // Only accept serverContent if local was clean (dirty === false) AND server has longer newer content
+  // If local has unsynced edits (dirty === true):
+  if (local.dirty) {
+    // If the server file also changed independently since our last sync, do NOT silently overwrite
+    // the server — surface a conflict diff so the user can review both versions!
+    if (local.syncedContent && local.syncedContent.trim() !== '' && serverContent !== local.syncedContent) {
+      recordLocalNoteBackup(path, serverContent);
+      return {
+        content: local.content,
+        shouldPushToServer: false,
+        serverBackupContent: serverContent,
+        hasConflict: true,
+      };
+    }
+    return {
+      content: local.content,
+      shouldPushToServer: true,
+      serverBackupContent: serverLen > 0 ? serverContent : undefined,
+    };
+  }
+
+  // Local was already synced (dirty === false) and the server file changed (e.g. via VS Code or + Comment):
+  // back up the previous local copy and accept the new server version without overwriting it!
   recordLocalNoteBackup(path, local.content);
   saveLocalNote(path, serverContent, false, serverContent);
   return { content: serverContent, shouldPushToServer: false };
