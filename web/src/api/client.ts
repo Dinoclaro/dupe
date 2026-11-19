@@ -379,6 +379,39 @@ export function markLocalNoteSynced(path: string, syncedContent: string): void {
   }
 }
 
+export function deleteLocalNote(pathPrefix: string): void {
+  const vault = loadLocalNotesVault();
+  for (const k of Object.keys(vault)) {
+    if (k === pathPrefix || k.startsWith(pathPrefix + '/')) {
+      delete vault[k];
+    }
+  }
+  try {
+    storageSet(LOCAL_NOTES_VAULT_KEY, JSON.stringify(vault));
+  } catch {
+    // ignore
+  }
+}
+
+export function renameLocalNote(oldPath: string, newPath: string): void {
+  const vault = loadLocalNotesVault();
+  for (const [k, entry] of Object.entries(vault)) {
+    if (k === oldPath) {
+      delete vault[k];
+      vault[newPath] = { ...entry, path: newPath };
+    } else if (k.startsWith(oldPath + '/')) {
+      const target = newPath + k.slice(oldPath.length);
+      delete vault[k];
+      vault[target] = { ...entry, path: target };
+    }
+  }
+  try {
+    storageSet(LOCAL_NOTES_VAULT_KEY, JSON.stringify(vault));
+  } catch {
+    // ignore
+  }
+}
+
 export function resolveNoteWithLocalWins(
   path: string,
   serverContent: string,
@@ -638,8 +671,29 @@ export const api = {
     });
   },
 
-  async getProjectTree(id: string): Promise<{ project: ProjectConfig; files: ProjectTreeEntry[] }> {
-    return apiFetch<{ project: ProjectConfig; files: ProjectTreeEntry[] }>(`/api/projects/${id}/tree`);
+  async getProjectTree(
+    id: string,
+  ): Promise<{ project: ProjectConfig; files: ProjectTreeEntry[]; cited_keys?: string[] }> {
+    return apiFetch<{ project: ProjectConfig; files: ProjectTreeEntry[]; cited_keys?: string[] }>(
+      `/api/projects/${id}/tree`,
+    );
+  },
+
+  async deleteProjectFile(id: string, filePath: string): Promise<void> {
+    return apiFetch<void>(`/api/projects/${id}/file?path=${encodeURIComponent(filePath)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async renameProjectFile(
+    id: string,
+    oldPath: string,
+    newPath: string,
+  ): Promise<{ old_path: string; new_path: string }> {
+    return apiFetch<{ old_path: string; new_path: string }>(`/api/projects/${id}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ old_path: oldPath, new_path: newPath }),
+    });
   },
 
   async readProjectFile(id: string, filePath: string): Promise<ProjectFilePayload> {

@@ -1056,6 +1056,49 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cfg)
 }
 
+var latexCiteKeysRegex = regexp.MustCompile(`\\cite[a-zA-Z*]*\{([^}]+)\}`)
+var markdownPaperLinkRegex = regexp.MustCompile(`\[\[paper:([a-zA-Z0-9_:-]+)\]\]`)
+
+func collectProjectCitedBibKeys(projDir string, tree []ProjectTreeEntry) []string {
+	seen := make(map[string]bool)
+	var keys []string
+	for _, entry := range tree {
+		if entry.Kind != "tex" && entry.Kind != "markdown" {
+			continue
+		}
+		if entry.Path == "AGENTS.md" || strings.HasPrefix(entry.Path, "refs/") {
+			continue
+		}
+		absPath, err := safeJoin(projDir, entry.Path)
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(absPath)
+		if err != nil {
+			continue
+		}
+		text := string(raw)
+		for _, m := range latexCiteKeysRegex.FindAllStringSubmatch(text, -1) {
+			for _, part := range strings.Split(m[1], ",") {
+				k := strings.TrimSpace(part)
+				if k != "" && !strings.Contains(k, "<") && !seen[k] {
+					seen[k] = true
+					keys = append(keys, k)
+				}
+			}
+		}
+		for _, m := range markdownPaperLinkRegex.FindAllStringSubmatch(text, -1) {
+			k := strings.TrimSpace(m[1])
+			if k != "" && !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func (s *Server) handleGetProjectTree(w http.ResponseWriter, r *http.Request) {
 	claims, ok := currentUser(r)
 	if !ok {
@@ -1075,10 +1118,12 @@ func (s *Server) handleGetProjectTree(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read project tree")
 		return
 	}
+	citedKeys := collectProjectCitedBibKeys(projDir, tree)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"project": cfg,
-		"files":   tree,
+		"project":    cfg,
+		"files":      tree,
+		"cited_keys": citedKeys,
 	})
 }
 
@@ -1221,6 +1266,115 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		"path":         relSlash,
 		"bytes":        len(data),
 		"head_content": headContent,
+	})
+}
+
+func isProtectedProjectPath(relSlash string) bool {
+	switch relSlash {
+	case "", ".", "paper", "notes", "diagrams", "refs", "code", "AGENTS.md", ".dupe", ".git", "paper/dupe_references.bib":
+		return true
+	}
+	return strings.HasPrefix(relSlash, ".git/") ||
+		strings.HasPrefix(relSlash, ".dupe/") ||
+		strings.HasPrefix(relSlash, "refs/") ||
+		strings.Contains(relSlash, "/.git/")
+}
+
+func (s *Server) handleDeleteProjectFile(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	_, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	relFile := strings.TrimSpace(r.URL.Query().Get("path"))
+	relSlash := filepath.ToSlash(filepath.Clean(relFile))
+	if isProtectedProjectPath(relSlash) {
+		writeError(w, http.StatusBadRequest, "cannot delete protected project path")
+		return
+	}
+	targetAbs, err := safeJoin(projDir, relSlash)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+	if _, err := os.Stat(targetAbs); errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if err := os.RemoveAll(targetAbs); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete file")
+		return
+	}
+	if strings.HasPrefix(relSlash, "notes/") {
+		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
+		_, _ = runGitCommand(r.Context(), projDir, "add", "-A", "--", "notes/")
+		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): delete "+relSlash)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type renameProjectFileRequest struct {
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+}
+
+func (s *Server) handleRenameProjectFile(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	_, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var req renameProjectFileRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	oldSlash := filepath.ToSlash(filepath.Clean(strings.TrimSpace(req.OldPath)))
+	newSlash := filepath.ToSlash(filepath.Clean(strings.TrimSpace(req.NewPath)))
+	if isProtectedProjectPath(oldSlash) || isProtectedProjectPath(newSlash) {
+		writeError(w, http.StatusBadRequest, "cannot rename protected project path")
+		return
+	}
+	oldAbs, errOld := safeJoin(projDir, oldSlash)
+	newAbs, errNew := safeJoin(projDir, newSlash)
+	if errOld != nil || errNew != nil {
+		writeError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+	if _, err := os.Stat(oldAbs); errors.Is(err, os.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "source file not found")
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(newAbs), 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create destination folder")
+		return
+	}
+	if err := os.Rename(oldAbs, newAbs); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to rename file")
+		return
+	}
+	if strings.HasPrefix(oldSlash, "notes/") || strings.HasPrefix(newSlash, "notes/") {
+		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
+		_, _ = runGitCommand(r.Context(), projDir, "add", "-A", "--", "notes/")
+		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", fmt.Sprintf("chore(dupe): rename %s to %s", oldSlash, newSlash))
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"old_path": oldSlash,
+		"new_path": newSlash,
 	})
 }
 

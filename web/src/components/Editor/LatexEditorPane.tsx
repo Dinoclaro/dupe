@@ -124,7 +124,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   const isMarkdown = fileLabel.endsWith('.md');
   const [diffEnabled, setDiffEnabled] = useState<boolean>(false);
   const [mdViewMode, setMdViewMode] = useState<'preview' | 'split' | 'raw'>(
-    isMarkdown ? (readOnly ? 'preview' : 'split') : 'raw',
+    isMarkdown ? (readOnly ? 'preview' : 'raw') : 'raw',
   );
   const [showCommentBox, setShowCommentBox] = useState(false);
   const [commentQuote, setCommentQuote] = useState('');
@@ -222,6 +222,11 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       langExt,
       oneDark,
       EditorView.lineWrapping,
+      EditorView.contentAttributes.of({
+        spellcheck: 'true',
+        autocorrect: 'on',
+        autocapitalize: 'sentences',
+      }),
       EditorState.readOnly.of(readOnly),
       autocompletion({
         override: [createCitationCompletionSource(() => papersRef.current, isMarkdown)],

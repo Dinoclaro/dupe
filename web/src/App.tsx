@@ -6,6 +6,7 @@ import {
   ProjectTreeEntry,
   User,
   api,
+  deleteLocalNote,
   enqueueOutboxEntry,
   getOutboxQueue,
   getStoredGitHubPat,
@@ -14,6 +15,7 @@ import {
   loadWorkspaceSnapshot,
   markLocalNoteSynced,
   pushFilesToGitHubDirect,
+  renameLocalNote,
   resolveNoteWithLocalWins,
   saveLocalNote,
   saveWorkspaceSnapshot,
@@ -147,6 +149,7 @@ export const App: React.FC = () => {
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectTree, setProjectTree] = useState<ProjectTreeEntry[]>([]);
+  const [projectCitedKeys, setProjectCitedKeys] = useState<string[]>([]);
 
   // File buffers & Git HEAD snapshots keyed by relative project path (e.g. 'paper/main.tex').
   // Initialize immediately from local notes vault + snapshot so local notes ALWAYS win before any network response.
@@ -313,6 +316,9 @@ export const App: React.FC = () => {
   const refreshProjectTree = useCallback(async (projectId: string) => {
     const res = await api.getProjectTree(projectId);
     setProjectTree(res.files);
+    if (res.cited_keys) {
+      setProjectCitedKeys(res.cited_keys);
+    }
     saveWorkspaceSnapshot({ projectTree: res.files });
     return res.files;
   }, []);
@@ -880,6 +886,77 @@ export const App: React.FC = () => {
       setStatusMessage(`Reverted ${filePath} to Git HEAD.`);
     } catch (err) {
       setStatusMessage(`Revert failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleRenameProjectFile = async (oldPath: string, newPath: string) => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      const res = await api.renameProjectFile(activeProject.id, oldPath, newPath);
+      renameLocalNote(res.old_path, res.new_path);
+      setFileBuffers((prev) => {
+        const next = { ...prev };
+        for (const [k, v] of Object.entries(prev)) {
+          if (k === res.old_path) {
+            delete next[k];
+            next[res.new_path] = v;
+          } else if (k.startsWith(res.old_path + '/')) {
+            const target = res.new_path + k.slice(res.old_path.length);
+            delete next[k];
+            next[target] = v;
+          }
+        }
+        saveWorkspaceSnapshot({ fileBuffers: next });
+        return next;
+      });
+      setLeftTabs((prev) =>
+        prev.map((t) =>
+          t.filePath === res.old_path
+            ? { ...t, id: `file:${res.new_path}`, title: res.new_path, filePath: res.new_path }
+            : t,
+        ),
+      );
+      setRightTabs((prev) =>
+        prev.map((t) =>
+          t.filePath === res.old_path
+            ? { ...t, id: `file:${res.new_path}`, title: res.new_path, filePath: res.new_path }
+            : t,
+        ),
+      );
+      setActiveLeftTabId((prev) => (prev === `file:${res.old_path}` ? `file:${res.new_path}` : prev));
+      setActiveRightTabId((prev) => (prev === `file:${res.old_path}` ? `file:${res.new_path}` : prev));
+      await refreshProjectTree(activeProject.id);
+      setStatusMessage(`Renamed ${res.old_path} -> ${res.new_path}.`);
+    } catch (err) {
+      setStatusMessage(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleDeleteProjectFile = async (filePath: string) => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      await api.deleteProjectFile(activeProject.id, filePath);
+      deleteLocalNote(filePath);
+      setFileBuffers((prev) => {
+        const next = { ...prev };
+        for (const k of Object.keys(next)) {
+          if (k === filePath || k.startsWith(filePath + '/')) {
+            delete next[k];
+          }
+        }
+        saveWorkspaceSnapshot({ fileBuffers: next });
+        return next;
+      });
+      setLeftTabs((prev) => prev.filter((t) => t.filePath !== filePath && !t.filePath?.startsWith(filePath + '/')));
+      setRightTabs((prev) => prev.filter((t) => t.filePath !== filePath && !t.filePath?.startsWith(filePath + '/')));
+      await refreshProjectTree(activeProject.id);
+      setStatusMessage(`Deleted ${filePath}.`);
+    } catch (err) {
+      setStatusMessage(`Delete failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -1506,6 +1583,7 @@ export const App: React.FC = () => {
         {showSidebar && (
           <ExplorerSidebar
             papers={papers}
+            citedBibKeys={Array.from(new Set([...projectCitedKeys, ...compiled.citedKeys]))}
             projects={projects}
             activeProject={activeProject}
             projectFiles={projectTree}
@@ -1518,6 +1596,8 @@ export const App: React.FC = () => {
             }
             onOpenCompiledPreview={handleOpenCompiledPreview}
             onCreateProjectFile={handleCreateProjectFile}
+            onRenameProjectFile={handleRenameProjectFile}
+            onDeleteProjectFile={handleDeleteProjectFile}
             onPullProject={() => handlePullActiveProject(false)}
             onSyncProject={handleSyncActiveProject}
             onGatherContext={handleGatherProjectContext}

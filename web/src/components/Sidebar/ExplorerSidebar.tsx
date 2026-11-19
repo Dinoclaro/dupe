@@ -96,6 +96,7 @@ export function buildFolderTree(entries: ProjectTreeEntry[]): FolderTreeNode {
 
 interface ExplorerSidebarProps {
   papers: Paper[];
+  citedBibKeys?: string[];
   projects: ProjectConfig[];
   activeProject: ProjectConfig | null;
   projectFiles: ProjectTreeEntry[];
@@ -106,6 +107,8 @@ interface ExplorerSidebarProps {
   onOpenProjectFile: (file: ProjectTreeEntry, inSplit: boolean, line?: number) => void;
   onOpenCompiledPreview: (inSplit: boolean) => void;
   onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
+  onRenameProjectFile?: (oldPath: string, newPath: string) => Promise<void>;
+  onDeleteProjectFile?: (filePath: string) => Promise<void>;
   onPullProject: () => Promise<void>;
   onSyncProject: () => Promise<void>;
   onGatherContext: () => Promise<void>;
@@ -139,8 +142,56 @@ function getPaperFolder(paper: Paper): string {
   return '';
 }
 
+export function recommendFolderForPaper(
+  paper: Paper,
+  existingFolders: string[],
+  citedKeySet: Set<string>,
+): string {
+  const keyLower = (paper.bibtex_key || '').toLowerCase();
+  if (keyLower && citedKeySet.has(keyLower)) {
+    return 'Core References';
+  }
+  const text = `${paper.title} ${paper.bibtex_raw}`.toLowerCase();
+  for (const folder of existingFolders) {
+    const words = folder
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 4 && w !== 'list' && w !== 'papers' && w !== 'references');
+    if (words.length > 0 && words.some((w) => text.includes(w))) {
+      return folder;
+    }
+  }
+  if (/(world model|dreamer|model-based|mbrl|dynamics model|imagination|muzero|planet)/.test(text)) {
+    return 'World Models & MBRL';
+  }
+  if (/(offline|conservative|cql|iql|d4rl|dataset|batch reinforcement|behavior cloning)/.test(text)) {
+    return 'Offline RL';
+  }
+  if (/(robot|locomotion|manipulation|quadruped|sim-to-real|actuator|control|mpc)/.test(text)) {
+    return 'Robotics & Control';
+  }
+  if (/(transformer|attention|diffusion|language model|foundation model|autoregressive)/.test(text)) {
+    return 'Sequence & Generative Models';
+  }
+  if (/(reinforcement learning|policy gradient|actor-critic|q-learning|mdp|bellman|ppo|sac)/.test(text)) {
+    return 'Reinforcement Learning';
+  }
+  return '';
+}
+
+interface SidebarContextMenuState {
+  x: number;
+  y: number;
+  kind: 'file' | 'dir' | 'paper' | 'pdf-folder';
+  file?: ProjectTreeEntry;
+  dirPath?: string;
+  paper?: Paper;
+  pdfFolder?: string;
+}
+
 export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   papers,
+  citedBibKeys = [],
   projects,
   activeProject,
   projectFiles,
@@ -151,6 +202,8 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   onOpenProjectFile,
   onOpenCompiledPreview,
   onCreateProjectFile,
+  onRenameProjectFile,
+  onDeleteProjectFile,
   onPullProject,
   onSyncProject,
   onGatherContext,
@@ -184,6 +237,27 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const [collapsedPdfFolders, setCollapsedPdfFolders] = useState<Record<string, boolean>>({});
   const [showNewPdfFolder, setShowNewPdfFolder] = useState(false);
   const [newPdfFolderName, setNewPdfFolderName] = useState('');
+  const [pdfSectionCollapsed, setPdfSectionCollapsed] = useState(false);
+  const [projectSectionCollapsed, setProjectSectionCollapsed] = useState(false);
+  const [contextMenu, setContextMenu] = useState<SidebarContextMenuState | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return undefined;
+    }
+    const close = () => setContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [contextMenu]);
 
   // Recursive Project Directory Expanded State (paper, notes, diagrams open by default; code & refs collapsed)
   const [expandedProjDirs, setExpandedProjDirs] = useState<Record<string, boolean>>({
@@ -251,6 +325,19 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
         p.doi.toLowerCase().includes(q),
     );
   }, [papers, pdfSearch]);
+
+  const citedKeySet = useMemo(
+    () => new Set(citedBibKeys.map((k) => k.trim().toLowerCase()).filter(Boolean)),
+    [citedBibKeys],
+  );
+
+  const referencedPapers = useMemo(
+    () =>
+      filteredPapers.filter(
+        (p) => p.bibtex_key && citedKeySet.has(p.bibtex_key.trim().toLowerCase()),
+      ),
+    [filteredPapers, citedKeySet],
+  );
 
   const pdfFolderGroups = useMemo(() => {
     const folderMap = new Map<string, Paper[]>();
@@ -350,16 +437,112 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     setUploading(true);
     try {
       const created = await api.uploadPapers(files);
+      const addedFolders = new Set<string>(customPdfFolders);
+      const assignedSummaries: string[] = [];
+      for (const paper of created) {
+        if (!getPaperFolder(paper)) {
+          const recommended = recommendFolderForPaper(paper, Array.from(addedFolders), citedKeySet);
+          if (recommended) {
+            addedFolders.add(recommended);
+            const otherTags = (paper.tags || []).filter((t) => !t.startsWith('folder:'));
+            await api.updatePaper(paper.id, { tags: [...otherTags, `folder:${recommended}`] });
+            assignedSummaries.push(`@${paper.bibtex_key || 'paper'} -> ${recommended}`);
+          }
+        }
+      }
+      if (addedFolders.size !== customPdfFolders.length) {
+        const nextFolders = Array.from(addedFolders);
+        setCustomPdfFolders(nextFolders);
+        localStorage.setItem(PDF_FOLDERS_STORAGE_KEY, JSON.stringify(nextFolders));
+      }
       await onPapersChanged();
       if (created.length > 0) {
         onOpenPaper(created[0], false);
       }
-      onStatusMessage(`Uploaded ${created.length} PDF(s) and extracted BibTeX.`);
+      onStatusMessage(
+        assignedSummaries.length > 0
+          ? `Uploaded ${created.length} PDF(s) & auto-grouped (${assignedSummaries.join(', ')}).`
+          : `Uploaded ${created.length} PDF(s) and extracted BibTeX.`,
+      );
     } catch (err) {
       onStatusMessage(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUploading(false);
     }
+  };
+
+  const handleAutoGroupAllPapers = async () => {
+    setUploading(true);
+    try {
+      const addedFolders = new Set<string>(customPdfFolders);
+      let movedCount = 0;
+      for (const paper of papers) {
+        const current = getPaperFolder(paper);
+        const isCited = Boolean(paper.bibtex_key && citedKeySet.has(paper.bibtex_key.toLowerCase()));
+        if (!current || (isCited && current !== 'Core References')) {
+          const recommended = recommendFolderForPaper(paper, Array.from(addedFolders), citedKeySet);
+          if (recommended && recommended !== current) {
+            addedFolders.add(recommended);
+            const otherTags = (paper.tags || []).filter((t) => !t.startsWith('folder:'));
+            await api.updatePaper(paper.id, { tags: [...otherTags, `folder:${recommended}`] });
+            movedCount++;
+          }
+        }
+      }
+      const nextFolders = Array.from(addedFolders);
+      setCustomPdfFolders(nextFolders);
+      localStorage.setItem(PDF_FOLDERS_STORAGE_KEY, JSON.stringify(nextFolders));
+      await onPapersChanged();
+
+      const agentPrompt = `Review my PDF library using the dupe MCP search_papers and assign_paper_folder tools. Put all papers cited in paper/*.tex into "Core References" and group the remaining papers into topic folders (${nextFolders.join(', ')}).`;
+      try {
+        await navigator.clipboard.writeText(agentPrompt);
+      } catch {
+        // clipboard optional
+      }
+      onStatusMessage(
+        `Auto-grouped ${movedCount} paper(s) into folders (and copied MCP Agent grouping prompt to clipboard).`,
+      );
+    } catch (err) {
+      onStatusMessage(`Auto-group failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleRenamePdfFolder = async (oldFolder: string, newFolder: string) => {
+    const cleaned = newFolder.trim();
+    if (!cleaned || cleaned === oldFolder) {
+      return;
+    }
+    const nextFolders = customPdfFolders.map((f) => (f === oldFolder ? cleaned : f));
+    if (!nextFolders.includes(cleaned)) {
+      nextFolders.push(cleaned);
+    }
+    setCustomPdfFolders(nextFolders);
+    localStorage.setItem(PDF_FOLDERS_STORAGE_KEY, JSON.stringify(nextFolders));
+    for (const p of papers) {
+      if (getPaperFolder(p) === oldFolder) {
+        const otherTags = (p.tags || []).filter((t) => !t.startsWith('folder:'));
+        await api.updatePaper(p.id, { tags: [...otherTags, `folder:${cleaned}`] });
+      }
+    }
+    await onPapersChanged();
+    onStatusMessage(`Renamed PDF folder "${oldFolder}" -> "${cleaned}".`);
+  };
+
+  const handleDeletePdfFolder = async (folderName: string) => {
+    const nextFolders = customPdfFolders.filter((f) => f !== folderName);
+    setCustomPdfFolders(nextFolders);
+    localStorage.setItem(PDF_FOLDERS_STORAGE_KEY, JSON.stringify(nextFolders));
+    for (const p of papers) {
+      if (getPaperFolder(p) === folderName) {
+        const otherTags = (p.tags || []).filter((t) => !t.startsWith('folder:'));
+        await api.updatePaper(p.id, { tags: otherTags });
+      }
+    }
+    await onPapersChanged();
+    onStatusMessage(`Deleted PDF folder "${folderName}" (papers moved to Unfiled).`);
   };
 
   const openBibEditor = (paper: Paper, event: React.MouseEvent) => {
@@ -503,7 +686,17 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
             }
           }}
           onClick={() => onOpenPaper(paper, false)}
-          title={`${paper.title}\n${paper.authors}\n@${paper.bibtex_key}\n(Drag onto a folder to organize, or drag into editor to cite)`}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              kind: 'paper',
+              paper,
+            });
+          }}
+          title={`${paper.title}\n${paper.authors}\n@${paper.bibtex_key}\n(Right-click for options, drag onto a folder to organize, or drag into editor to cite)`}
         >
           <span className="file-icon pdf-icon">PDF</span>
           <div className="tree-label-col">
@@ -620,6 +813,16 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
               [node.fullPath]: !prev[node.fullPath],
             }))
           }
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              kind: 'dir',
+              dirPath: node.fullPath,
+            });
+          }}
         >
           <span className="folder-chevron">{isExpanded ? '▾' : '▸'}</span>
           <span className="folder-title">📁 {node.name}/</span>
@@ -664,7 +867,17 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                     }
                   }}
                   onClick={() => onOpenProjectFile(file, false)}
-                  title={file.path}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContextMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      kind: 'file',
+                      file,
+                    });
+                  }}
+                  title={`${file.path} (Right-click to rename or delete)`}
                 >
                   <span className={`file-icon kind-${file.kind}`}>{badge}</span>
                   <div className="tree-label-col">
@@ -868,11 +1081,33 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
       ) : (
         <>
           {/* TOP HALF: PDF LIBRARY EXPLORER */}
-          <section className="explorer-section" style={{ flex: `${topRatio} 1 0%` }}>
-            <div className="explorer-section-header">
-              <span className="explorer-chevron">▾</span>
+          <section
+            className="explorer-section"
+            style={{
+              flex: pdfSectionCollapsed
+                ? '0 0 auto'
+                : projectSectionCollapsed
+                  ? '1 1 0%'
+                  : `${topRatio} 1 0%`,
+            }}
+          >
+            <div
+              className="explorer-section-header"
+              style={{ cursor: 'pointer' }}
+              onClick={() => setPdfSectionCollapsed((v) => !v)}
+            >
+              <span className="explorer-chevron">{pdfSectionCollapsed ? '▸' : '▾'}</span>
               <span className="explorer-section-title">PDF LIBRARY ({papers.length})</span>
-              <div className="explorer-header-actions">
+              <div className="explorer-header-actions" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  disabled={uploading || papers.length === 0}
+                  title="Auto-group papers into folders & copy MCP Agent grouping prompt"
+                  onClick={() => void handleAutoGroupAllPapers()}
+                >
+                  Auto-Group
+                </button>
                 <button
                   type="button"
                   className="icon-btn"
@@ -894,42 +1129,110 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
               </div>
             </div>
 
-            {showNewPdfFolder && (
-              <form className="inline-new-file-form" onSubmit={handleCreatePdfFolder}>
-                <input
-                  type="text"
-                  placeholder="Folder name (e.g. World Models)"
-                  value={newPdfFolderName}
-                  onChange={(e) => setNewPdfFolderName(e.target.value)}
-                  autoFocus
-                />
-                <button type="submit" className="btn-primary btn-tiny">
-                  Create
-                </button>
-              </form>
-            )}
+            {!pdfSectionCollapsed && (
+              <>
+                {showNewPdfFolder && (
+                  <form className="inline-new-file-form" onSubmit={handleCreatePdfFolder}>
+                    <input
+                      type="text"
+                      placeholder="Folder name (e.g. World Models)"
+                      value={newPdfFolderName}
+                      onChange={(e) => setNewPdfFolderName(e.target.value)}
+                      autoFocus
+                    />
+                    <button type="submit" className="btn-primary btn-tiny">
+                      Create
+                    </button>
+                  </form>
+                )}
 
-            <div className="explorer-search-row">
-              <input
-                type="search"
-                placeholder="Filter 230+ papers (@key, title, author)..."
-                value={pdfSearch}
-                onChange={(e) => setPdfSearch(e.target.value)}
-              />
-            </div>
+                <div className="explorer-search-row">
+                  <input
+                    type="search"
+                    placeholder="Filter 230+ papers (@key, title, author)..."
+                    value={pdfSearch}
+                    onChange={(e) => setPdfSearch(e.target.value)}
+                  />
+                </div>
 
-            <div className="explorer-tree-list">
-              {/* User PDF Folders */}
-              {pdfFolderGroups.folders.map(([folderName, folderPapers]) => {
-                const isCollapsed = Boolean(collapsedPdfFolders[folderName]);
-                return (
-                  <div key={folderName} className="folder-group">
+                <div className="explorer-tree-list">
+                  {/* Automatic Referenced in Manuscript Section */}
+                  <div className="folder-group">
                     <div
                       className="folder-header-row"
                       onClick={() =>
                         setCollapsedPdfFolders((prev) => ({
                           ...prev,
-                          [folderName]: !prev[folderName],
+                          __cited__: !prev.__cited__,
+                        }))
+                      }
+                    >
+                      <span className="folder-chevron">
+                        {collapsedPdfFolders.__cited__ ? '▸' : '▾'}
+                      </span>
+                      <span className="folder-title">📌 Referenced in Paper</span>
+                      <span className="folder-count">{referencedPapers.length}</span>
+                    </div>
+                    {!collapsedPdfFolders.__cited__ &&
+                      (referencedPapers.length === 0 ? (
+                        <div className="muted-hint" style={{ padding: '4px 20px', fontSize: 11 }}>
+                          Cite papers with \cite&#123;key&#125; in paper/ to list them here.
+                        </div>
+                      ) : (
+                        referencedPapers.map(renderPaperRow)
+                      ))}
+                  </div>
+
+                  {/* User PDF Folders */}
+                  {pdfFolderGroups.folders.map(([folderName, folderPapers]) => {
+                    const isCollapsed = Boolean(collapsedPdfFolders[folderName]);
+                    return (
+                      <div key={folderName} className="folder-group">
+                        <div
+                          className="folder-header-row"
+                          onClick={() =>
+                            setCollapsedPdfFolders((prev) => ({
+                              ...prev,
+                              [folderName]: !prev[folderName],
+                            }))
+                          }
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setContextMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              kind: 'pdf-folder',
+                              pdfFolder: folderName,
+                            });
+                          }}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            const paperId = e.dataTransfer.getData('application/x-dupe-paper-id');
+                            const found = papers.find((p) => p.id === paperId);
+                            if (found) {
+                              void movePaperToFolder(found, folderName);
+                            }
+                          }}
+                        >
+                          <span className="folder-chevron">{isCollapsed ? '▸' : '▾'}</span>
+                          <span className="folder-title">📁 {folderName}</span>
+                          <span className="folder-count">{folderPapers.length}</span>
+                        </div>
+                        {!isCollapsed && folderPapers.map(renderPaperRow)}
+                      </div>
+                    );
+                  })}
+
+                  {/* Unfiled / All Papers Folder */}
+                  <div className="folder-group">
+                    <div
+                      className="folder-header-row"
+                      onClick={() =>
+                        setCollapsedPdfFolders((prev) => ({
+                          ...prev,
+                          __unfiled__: !prev.__unfiled__,
                         }))
                       }
                       onDragOver={(e) => e.preventDefault()}
@@ -938,67 +1241,55 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                         const paperId = e.dataTransfer.getData('application/x-dupe-paper-id');
                         const found = papers.find((p) => p.id === paperId);
                         if (found) {
-                          void movePaperToFolder(found, folderName);
+                          void movePaperToFolder(found, '');
                         }
                       }}
                     >
-                      <span className="folder-chevron">{isCollapsed ? '▸' : '▾'}</span>
-                      <span className="folder-title">📁 {folderName}</span>
-                      <span className="folder-count">{folderPapers.length}</span>
+                      <span className="folder-chevron">
+                        {collapsedPdfFolders.__unfiled__ ? '▸' : '▾'}
+                      </span>
+                      <span className="folder-title">📚 All / Unfiled Papers</span>
+                      <span className="folder-count">{pdfFolderGroups.unfiled.length}</span>
                     </div>
-                    {!isCollapsed && folderPapers.map(renderPaperRow)}
+                    {!collapsedPdfFolders.__unfiled__ &&
+                      pdfFolderGroups.unfiled.map(renderPaperRow)}
                   </div>
-                );
-              })}
-
-              {/* Unfiled / All Papers Folder */}
-              <div className="folder-group">
-                <div
-                  className="folder-header-row"
-                  onClick={() =>
-                    setCollapsedPdfFolders((prev) => ({
-                      ...prev,
-                      __unfiled__: !prev.__unfiled__,
-                    }))
-                  }
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    const paperId = e.dataTransfer.getData('application/x-dupe-paper-id');
-                    const found = papers.find((p) => p.id === paperId);
-                    if (found) {
-                      void movePaperToFolder(found, '');
-                    }
-                  }}
-                >
-                  <span className="folder-chevron">
-                    {collapsedPdfFolders.__unfiled__ ? '▸' : '▾'}
-                  </span>
-                  <span className="folder-title">📚 All / Unfiled Papers</span>
-                  <span className="folder-count">{pdfFolderGroups.unfiled.length}</span>
                 </div>
-                {!collapsedPdfFolders.__unfiled__ &&
-                  pdfFolderGroups.unfiled.map(renderPaperRow)}
-              </div>
-            </div>
+              </>
+            )}
           </section>
 
           {/* HORIZONTAL RESIZE HANDLE */}
-          <div
-            className="sidebar-split-handle"
-            role="separator"
-            aria-orientation="horizontal"
-            onPointerDown={handleVerticalSplitDrag}
-          />
+          {!pdfSectionCollapsed && !projectSectionCollapsed && (
+            <div
+              className="sidebar-split-handle"
+              role="separator"
+              aria-orientation="horizontal"
+              onPointerDown={handleVerticalSplitDrag}
+            />
+          )}
 
           {/* BOTTOM HALF: RECURSIVE PROJECT FOLDER EXPLORER */}
-          <section className="explorer-section" style={{ flex: `${1 - topRatio} 1 0%` }}>
-            <div className="explorer-section-header">
-              <span className="explorer-chevron">▾</span>
+          <section
+            className="explorer-section"
+            style={{
+              flex: projectSectionCollapsed
+                ? '0 0 auto'
+                : pdfSectionCollapsed
+                  ? '1 1 0%'
+                  : `${1 - topRatio} 1 0%`,
+            }}
+          >
+            <div
+              className="explorer-section-header"
+              style={{ cursor: 'pointer' }}
+              onClick={() => setProjectSectionCollapsed((v) => !v)}
+            >
+              <span className="explorer-chevron">{projectSectionCollapsed ? '▸' : '▾'}</span>
               <span className="explorer-section-title">
                 PROJECT {modifiedCount > 0 ? `(${modifiedCount} changed)` : ''}
               </span>
-              <div className="explorer-header-actions">
+              <div className="explorer-header-actions" onClick={(e) => e.stopPropagation()}>
                 <button
                   type="button"
                   className="icon-btn"
@@ -1034,8 +1325,10 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
               </div>
             </div>
 
-            {/* Project selector & Sync bar */}
-            <div className="git-sync-bar">
+            {!projectSectionCollapsed && (
+              <>
+                {/* Project selector & Sync bar */}
+                <div className="git-sync-bar">
               <select
                 value={activeProject?.id || ''}
                 onChange={(e) => onSelectProject(e.target.value)}
@@ -1251,9 +1544,266 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   </div>
                 );
               })}
-            </div>
+                </div>
+              </>
+            )}
           </section>
         </>
+      )}
+
+      {contextMenu && (
+        <div
+          className="context-menu-popover"
+          style={{
+            top: Math.min(contextMenu.y, window.innerHeight - 240),
+            left: Math.min(contextMenu.x, window.innerWidth - 220),
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {contextMenu.kind === 'file' && contextMenu.file && (
+            <>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  onOpenProjectFile(contextMenu.file!, false);
+                  setContextMenu(null);
+                }}
+              >
+                Open {contextMenu.file.path.split('/').pop()}
+              </button>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  onOpenProjectFile(contextMenu.file!, true);
+                  setContextMenu(null);
+                }}
+              >
+                Open in Right Split
+              </button>
+              {onRenameProjectFile &&
+                contextMenu.file.path !== 'AGENTS.md' &&
+                !contextMenu.file.path.startsWith('refs/') && (
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => {
+                      const targetFile = contextMenu.file!;
+                      setContextMenu(null);
+                      const nextPath = window.prompt('Rename / move file path:', targetFile.path);
+                      if (nextPath && nextPath.trim() && nextPath.trim() !== targetFile.path) {
+                        void onRenameProjectFile(targetFile.path, nextPath.trim());
+                      }
+                    }}
+                  >
+                    Rename / Move…
+                  </button>
+                )}
+              {onDeleteProjectFile &&
+                contextMenu.file.path !== 'AGENTS.md' &&
+                !contextMenu.file.path.startsWith('refs/') && (
+                  <button
+                    type="button"
+                    className="context-menu-item danger"
+                    onClick={() => {
+                      const targetFile = contextMenu.file!;
+                      setContextMenu(null);
+                      if (window.confirm(`Delete "${targetFile.path}"?`)) {
+                        void onDeleteProjectFile(targetFile.path);
+                      }
+                    }}
+                  >
+                    Delete File…
+                  </button>
+                )}
+            </>
+          )}
+
+          {contextMenu.kind === 'dir' && contextMenu.dirPath && (
+            <>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  const dir = contextMenu.dirPath!;
+                  setContextMenu(null);
+                  const name = window.prompt(`New file in ${dir}/:`, `${dir}/note.md`);
+                  if (name && name.trim()) {
+                    const kind = name.endsWith('.tex')
+                      ? 'tex'
+                      : name.endsWith('.svg') || name.startsWith('diagrams/')
+                        ? 'diagram'
+                        : 'markdown';
+                    void onCreateProjectFile(kind, name.trim());
+                  }
+                }}
+              >
+                New File in {contextMenu.dirPath}/…
+              </button>
+              {onRenameProjectFile &&
+                !['paper', 'notes', 'diagrams', 'refs', 'code'].includes(contextMenu.dirPath) && (
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => {
+                      const dir = contextMenu.dirPath!;
+                      setContextMenu(null);
+                      const nextPath = window.prompt('Rename folder path:', dir);
+                      if (nextPath && nextPath.trim() && nextPath.trim() !== dir) {
+                        void onRenameProjectFile(dir, nextPath.trim());
+                      }
+                    }}
+                  >
+                    Rename Folder…
+                  </button>
+                )}
+              {onDeleteProjectFile &&
+                !['paper', 'notes', 'diagrams', 'refs', 'code'].includes(contextMenu.dirPath) && (
+                  <button
+                    type="button"
+                    className="context-menu-item danger"
+                    onClick={() => {
+                      const dir = contextMenu.dirPath!;
+                      setContextMenu(null);
+                      if (window.confirm(`Delete folder "${dir}" and all its contents?`)) {
+                        void onDeleteProjectFile(dir);
+                      }
+                    }}
+                  >
+                    Delete Folder…
+                  </button>
+                )}
+            </>
+          )}
+
+          {contextMenu.kind === 'paper' && contextMenu.paper && (
+            <>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  onOpenPaper(contextMenu.paper!, false);
+                  setContextMenu(null);
+                }}
+              >
+                Open PDF
+              </button>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  onOpenPaper(contextMenu.paper!, true);
+                  setContextMenu(null);
+                }}
+              >
+                Open PDF in Right Split
+              </button>
+              {contextMenu.paper.bibtex_key && (
+                <button
+                  type="button"
+                  className="context-menu-item"
+                  onClick={() => {
+                    onInsertCitation(contextMenu.paper!.bibtex_key);
+                    setContextMenu(null);
+                  }}
+                >
+                  Insert \cite&#123;{contextMenu.paper.bibtex_key}&#125;
+                </button>
+              )}
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  const target = contextMenu.paper!;
+                  setContextMenu(null);
+                  const nextTitle = window.prompt('Rename paper title:', target.title);
+                  if (nextTitle && nextTitle.trim() && nextTitle.trim() !== target.title) {
+                    void api
+                      .updatePaper(target.id, { title: nextTitle.trim() })
+                      .then(() => onPapersChanged())
+                      .then(() => onStatusMessage('Renamed paper title.'));
+                  }
+                }}
+              >
+                Rename Paper Title…
+              </button>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  const target = contextMenu.paper!;
+                  setContextMenu(null);
+                  const current = getPaperFolder(target);
+                  const folderList = customPdfFolders.join(', ');
+                  const chosen = window.prompt(
+                    `Move paper to folder (${folderList} — or leave empty for Unfiled):`,
+                    current,
+                  );
+                  if (chosen !== null) {
+                    const cleanFolder = chosen.trim();
+                    if (cleanFolder && !customPdfFolders.includes(cleanFolder)) {
+                      const nextFolders = [...customPdfFolders, cleanFolder];
+                      setCustomPdfFolders(nextFolders);
+                      localStorage.setItem(PDF_FOLDERS_STORAGE_KEY, JSON.stringify(nextFolders));
+                    }
+                    void movePaperToFolder(target, cleanFolder);
+                  }
+                }}
+              >
+                Move to Folder…
+              </button>
+              <button
+                type="button"
+                className="context-menu-item danger"
+                onClick={() => {
+                  const target = contextMenu.paper!;
+                  setContextMenu(null);
+                  if (window.confirm(`Delete PDF "${target.title}" from library?`)) {
+                    void api
+                      .deletePaper(target.id)
+                      .then(() => onPapersChanged())
+                      .then(() => onStatusMessage(`Deleted "${target.title}".`));
+                  }
+                }}
+              >
+                Delete PDF…
+              </button>
+            </>
+          )}
+
+          {contextMenu.kind === 'pdf-folder' && contextMenu.pdfFolder && (
+            <>
+              <button
+                type="button"
+                className="context-menu-item"
+                onClick={() => {
+                  const oldName = contextMenu.pdfFolder!;
+                  setContextMenu(null);
+                  const nextName = window.prompt('Rename PDF folder:', oldName);
+                  if (nextName && nextName.trim()) {
+                    void handleRenamePdfFolder(oldName, nextName.trim());
+                  }
+                }}
+              >
+                Rename Folder…
+              </button>
+              <button
+                type="button"
+                className="context-menu-item danger"
+                onClick={() => {
+                  const oldName = contextMenu.pdfFolder!;
+                  setContextMenu(null);
+                  if (window.confirm(`Delete PDF folder "${oldName}" (papers will move to Unfiled)?`)) {
+                    void handleDeletePdfFolder(oldName);
+                  }
+                }}
+              >
+                Delete Folder
+              </button>
+            </>
+          )}
+        </div>
       )}
     </aside>
   );

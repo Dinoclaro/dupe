@@ -129,6 +129,18 @@ func (s *Server) handleMCPRequest(ctx context.Context, userID int, username stri
 							"required": []string{"key"},
 						},
 					},
+					{
+						"name":        "assign_paper_folder",
+						"description": "Assign a paper by its bibtex_key to a PDF Library folder (e.g. 'World Models', 'Core References').",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"key":    map[string]any{"type": "string", "description": "BibTeX citation key"},
+								"folder": map[string]any{"type": "string", "description": "Target folder name (empty string to unfile)"},
+							},
+							"required": []string{"key", "folder"},
+						},
+					},
 				},
 			},
 		}
@@ -277,6 +289,37 @@ func (s *Server) executeMCPTool(ctx context.Context, userID int, username, toolN
 			return fmt.Sprintf("Failed to regenerate project artifacts: %v", err), true
 		}
 		return fmt.Sprintf("Linked @%s (%s) to project %s and regenerated references.bib and %s.", targetPaper.BibtexKey, targetPaper.Title, cfg.Name, filepath.Join("refs", "text", targetPaper.BibtexKey+".md")), false
+
+	case "assign_paper_folder":
+		key := strArg("key")
+		folder := strArg("folder")
+		papers, err := s.queryLinkedPapersForProject(ctx, userID, ProjectConfig{LinkAllPapers: true})
+		if err != nil {
+			return fmt.Sprintf("Failed to query papers: %v", err), true
+		}
+		var targetPaper *Paper
+		for i := range papers {
+			if strings.EqualFold(papers[i].BibtexKey, key) {
+				targetPaper = &papers[i]
+				break
+			}
+		}
+		if targetPaper == nil {
+			return fmt.Sprintf("No paper found with bibtex_key %q", key), true
+		}
+		nextTags := make([]string, 0, len(targetPaper.Tags)+1)
+		for _, t := range targetPaper.Tags {
+			if !strings.HasPrefix(t, "folder:") {
+				nextTags = append(nextTags, t)
+			}
+		}
+		if folder != "" {
+			nextTags = append(nextTags, "folder:"+folder)
+		}
+		if err := s.replacePaperTags(ctx, targetPaper.ID, nextTags); err != nil {
+			return fmt.Sprintf("Failed to update paper folder: %v", err), true
+		}
+		return fmt.Sprintf("Assigned @%s (%s) to folder %q.", targetPaper.BibtexKey, targetPaper.Title, folder), false
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", toolName), true

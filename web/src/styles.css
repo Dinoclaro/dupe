@@ -1254,4 +1254,46 @@ textarea:focus {
   flex-shrink: 1;
 }
 
+.context-menu-popover {
+  position: fixed;
+  z-index: 9999;
+  min-width: 190px;
+  background: #1e2430;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.context-menu-item {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  width: 100%;
+}
+
+.context-menu-item:hover {
+  background: rgba(59, 130, 246, 0.2);
+  color: #ffffff;
+}
+
+.context-menu-item.danger {
+  color: #f87171;
+}
+
+.context-menu-item.danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fecaca;
+}
+
+
 
