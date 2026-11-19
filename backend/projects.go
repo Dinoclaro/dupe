@@ -312,9 +312,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 
 	b.WriteString("## 2. Project Structure\n\n")
 	b.WriteString("- `paper/`: Overleaf-linked LaTeX repository (`main.tex`, `dupe_references.bib`, `figures/`).\n")
-	if isLocalMode || cfg.CodeRemote != "" {
-		b.WriteString("- `code/`: Implementation code repository (edited in VS Code).\n")
-	}
+	b.WriteString("- `code/`: Implementation code repository (edited in VS Code).\n")
 	b.WriteString("- `notes/`: Markdown research notes (`*.md`) and `notes/comments.md` annotation queue.\n")
 	b.WriteString("- `diagrams/`: Editable Draw.io/Excalidraw diagram sources (`*.drawio.svg`).\n")
 	b.WriteString("- `refs/index.json`: Metadata and BibTeX keys for linked reference papers.\n")
@@ -443,17 +441,15 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 
 	paperDir := filepath.Join(projectDir, "paper")
 	figuresDir := filepath.Join(paperDir, "figures")
+	codeDir := filepath.Join(projectDir, "code")
 	notesDir := filepath.Join(projectDir, "notes")
 	diagramsDir := filepath.Join(projectDir, "diagrams")
 	refsTextDir := filepath.Join(projectDir, "refs", "text")
 
-	for _, d := range []string{paperDir, figuresDir, notesDir, diagramsDir, refsTextDir} {
+	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, diagramsDir, refsTextDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
-	}
-	if s.mode == "local" {
-		_ = os.MkdirAll(filepath.Join(projectDir, "code"), 0o755)
 	}
 
 	var bibEntries []string

@@ -614,14 +614,123 @@ func (s *Server) runRemoteSyncCycle(ctx context.Context, cfg RemoteSyncConfig) (
 	cfg.LastSyncedAt = nowStr
 	_ = s.saveRemoteSyncConfig(cfg)
 
+	syncedProjects := s.syncRemoteProjectsToLocalDisk(ctx, client, cfg)
+
 	return map[string]any{
 		"remote_url":      cfg.RemoteURL,
 		"pulled_papers":   pulledPapers,
 		"downloaded_pdfs": downloadedPDFs,
 		"pushed_papers":   pushedPapers,
 		"uploaded_blobs":  uploadedBlobs,
+		"synced_projects": syncedProjects,
 		"last_synced_at":  nowStr,
 	}, nil
+}
+
+func (s *Server) syncRemoteProjectsToLocalDisk(ctx context.Context, client *http.Client, cfg RemoteSyncConfig) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.RemoteURL+"/api/projects", nil)
+	if err != nil {
+		return 0
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+	var remoteProjects []ProjectConfig
+	if err := json.NewDecoder(resp.Body).Decode(&remoteProjects); err != nil {
+		return 0
+	}
+
+	root := s.userProjectsRoot(1)
+	_ = os.MkdirAll(root, 0o755)
+	syncedCount := 0
+
+	for _, rp := range remoteProjects {
+		folderName := sanitizeProjectFolderName(rp.FolderName)
+		if rp.FolderName != "" && !strings.Contains(rp.FolderName, "/") && !strings.Contains(rp.FolderName, "..") {
+			folderName = rp.FolderName
+		}
+		projDir := filepath.Join(root, folderName)
+		paperDir := filepath.Join(projDir, "paper")
+		codeDir := filepath.Join(projDir, "code")
+		notesDir := filepath.Join(projDir, "notes")
+		diagramsDir := filepath.Join(projDir, "diagrams")
+		refsTextDir := filepath.Join(projDir, "refs", "text")
+
+		for _, d := range []string{paperDir, filepath.Join(paperDir, "figures"), codeDir, notesDir, diagramsDir, refsTextDir} {
+			_ = os.MkdirAll(d, 0o755)
+		}
+
+		if _, err := os.Stat(filepath.Join(projDir, ".dupe", "project.json")); errors.Is(err, os.ErrNotExist) {
+			_ = writeProjectConfig(projDir, rp)
+		}
+		if rp.OverleafRemote != "" {
+			if _, err := os.Stat(filepath.Join(paperDir, ".git")); errors.Is(err, os.ErrNotExist) {
+				_, _ = syncOverleafRemoteIntoPaperDir(ctx, paperDir, rp.OverleafRemote, "dino")
+			}
+		}
+		if rp.CodeRemote != "" {
+			if entries, err := os.ReadDir(codeDir); err == nil && len(entries) == 0 {
+				_, _ = cloneGitRepoIntoDir(ctx, codeDir, rp.CodeRemote, "dino")
+			}
+		}
+
+		// Sync notes/, diagrams/, and AGENTS.md from remote project
+		treeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/projects/%s/tree", cfg.RemoteURL, rp.ID), nil)
+		if err == nil {
+			treeReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+			if treeResp, tErr := client.Do(treeReq); tErr == nil {
+				var treeData struct {
+					Files []ProjectTreeEntry `json:"files"`
+				}
+				_ = json.NewDecoder(treeResp.Body).Decode(&treeData)
+				_ = treeResp.Body.Close()
+
+				for _, entry := range treeData.Files {
+					if !strings.HasPrefix(entry.Path, "notes/") &&
+						!strings.HasPrefix(entry.Path, "diagrams/") &&
+						entry.Path != "AGENTS.md" &&
+						!strings.HasPrefix(entry.Path, "refs/") {
+						continue
+					}
+					localAbs, joinErr := safeJoin(projDir, entry.Path)
+					if joinErr != nil {
+						continue
+					}
+					fileURL := fmt.Sprintf("%s/api/projects/%s/file?path=%s", cfg.RemoteURL, rp.ID, url.QueryEscape(entry.Path))
+					fReq, fErr := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+					if fErr != nil {
+						continue
+					}
+					fReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+					if fResp, doErr := client.Do(fReq); doErr == nil {
+						var payload struct {
+							Content string `json:"content"`
+						}
+						if fResp.StatusCode == http.StatusOK && json.NewDecoder(fResp.Body).Decode(&payload) == nil {
+							localBytes, lErr := os.ReadFile(localAbs)
+							// Write remote content if file is missing locally or remote is longer/updated (AGENTS.md & refs always update)
+							if errors.Is(lErr, os.ErrNotExist) ||
+								entry.Path == "AGENTS.md" ||
+								strings.HasPrefix(entry.Path, "refs/") ||
+								len(strings.TrimSpace(payload.Content)) >= len(bytes.TrimSpace(localBytes)) {
+								_ = os.MkdirAll(filepath.Dir(localAbs), 0o755)
+								_ = os.WriteFile(localAbs, []byte(payload.Content), 0o644)
+							}
+						}
+						_ = fResp.Body.Close()
+					}
+				}
+			}
+		}
+		syncedCount++
+	}
+	return syncedCount
 }
 
 func (s *Server) downloadRemotePDF(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, paperID, expectedHash, destPath string) error {
