@@ -1113,6 +1113,80 @@ export const App: React.FC = () => {
     window.addEventListener('pointerup', onUp);
   };
 
+  const handleAddProjectComment = async (
+    sourceLabel: string,
+    location: string,
+    quote: string,
+    comment: string,
+  ) => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      const res = await api.addProjectComment(activeProject.id, {
+        source: sourceLabel,
+        location,
+        quote,
+        comment,
+      });
+      setFileBuffers((prev) => {
+        const next = {
+          ...prev,
+          'notes/comments.md': res.comments_md,
+          'AGENTS.md': res.agents_md,
+        };
+        saveWorkspaceSnapshot({ fileBuffers: next });
+        return next;
+      });
+      setSavedBuffers((prev) => ({
+        ...prev,
+        'notes/comments.md': res.comments_md,
+        'AGENTS.md': res.agents_md,
+      }));
+      markLocalNoteSynced('notes/comments.md', res.comments_md);
+      await refreshProjectTree(activeProject.id);
+      setStatusMessage(
+        `Saved comment to notes/comments.md (${res.open_count} open, ${res.addressed_count} addressed) and updated AGENTS.md.`,
+      );
+    } catch (err) {
+      setStatusMessage(
+        `Failed to save comment: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  const handleGatherProjectContext = async () => {
+    if (!activeProject) {
+      return;
+    }
+    try {
+      const res = await api.gatherProjectContext(activeProject.id);
+      setFileBuffers((prev) => {
+        const next = {
+          ...prev,
+          'notes/comments.md': res.comments_md,
+          'AGENTS.md': res.agents_md,
+        };
+        saveWorkspaceSnapshot({ fileBuffers: next });
+        return next;
+      });
+      setSavedBuffers((prev) => ({
+        ...prev,
+        'notes/comments.md': res.comments_md,
+        'AGENTS.md': res.agents_md,
+      }));
+      markLocalNoteSynced('notes/comments.md', res.comments_md);
+      await refreshProjectTree(activeProject.id);
+      setStatusMessage(
+        `Gathered context: updated AGENTS.md (${res.open_count} open comments, ${res.addressed_count} addressed, plus git logs).`,
+      );
+    } catch (err) {
+      setStatusMessage(
+        `Gather context failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
   const renderTabContent = (tab: StudioTab | null) => {
     if (!tab) {
       return (
@@ -1129,6 +1203,7 @@ export const App: React.FC = () => {
           key={tab.id}
           paper={paper}
           onInsertCitation={handleInsertCitation}
+          onAddComment={handleAddProjectComment}
         />
       );
     }
@@ -1237,6 +1312,7 @@ export const App: React.FC = () => {
           setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
         }}
         onOpenPreviewSplit={() => handleOpenCompiledPreview(true)}
+        onAddComment={handleAddProjectComment}
         registerInsertSnippet={(fn) => {
           insertSnippetRef.current = fn;
         }}
@@ -1366,6 +1442,15 @@ export const App: React.FC = () => {
           <button
             type="button"
             className="btn-tiny"
+            disabled={!activeProject}
+            onClick={() => void handleGatherProjectContext()}
+            title="Reconcile notes/comments.md, inspect git log for paper/ and code/, and update AGENTS.md"
+          >
+            Gather Context
+          </button>
+          <button
+            type="button"
+            className="btn-tiny"
             onClick={() => handleOpenCompiledPreview(true)}
             title="Open Compiled Preview in Right Split"
           >
@@ -1435,6 +1520,7 @@ export const App: React.FC = () => {
             onCreateProjectFile={handleCreateProjectFile}
             onPullProject={() => handlePullActiveProject(false)}
             onSyncProject={handleSyncActiveProject}
+            onGatherContext={handleGatherProjectContext}
             onExportOverleafBundle={handleExportOverleafBundle}
             onInsertCitation={handleInsertCitation}
             onPapersChanged={async () => {

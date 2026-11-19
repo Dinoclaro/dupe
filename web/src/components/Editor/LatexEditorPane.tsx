@@ -87,6 +87,7 @@ interface LatexEditorPaneProps {
   onRevertToHead?: () => Promise<void>;
   onAcceptAgentEdits?: () => void;
   onOpenPreviewSplit?: () => void;
+  onAddComment?: (source: string, location: string, quote: string, comment: string) => Promise<void>;
   registerInsertSnippet: (fn: (snippet: string) => void) => void;
 }
 
@@ -105,6 +106,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   onRevertToHead,
   onAcceptAgentEdits,
   onOpenPreviewSplit,
+  onAddComment,
   registerInsertSnippet,
 }) => {
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
@@ -124,6 +126,44 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   const [mdViewMode, setMdViewMode] = useState<'preview' | 'split' | 'raw'>(
     isMarkdown ? (readOnly ? 'preview' : 'split') : 'raw',
   );
+  const [showCommentBox, setShowCommentBox] = useState(false);
+  const [commentQuote, setCommentQuote] = useState('');
+  const [commentLocation, setCommentLocation] = useState('');
+  const [commentText, setCommentText] = useState('');
+  const [submittingComment, setSubmittingComment] = useState(false);
+
+  const openCommentDrawer = () => {
+    const view = editorViewRef.current;
+    if (view) {
+      const sel = view.state.selection.main;
+      const startLine = view.state.doc.lineAt(sel.from).number;
+      const endLine = view.state.doc.lineAt(sel.to).number;
+      const selected = view.state.sliceDoc(sel.from, sel.to).trim();
+      const fallbackLine = view.state.doc.line(startLine).text.trim();
+      setCommentQuote(selected || fallbackLine);
+      setCommentLocation(startLine === endLine ? `line ${startLine}` : `lines ${startLine}-${endLine}`);
+    } else {
+      const domSel = window.getSelection()?.toString().trim() || '';
+      setCommentQuote(domSel);
+      setCommentLocation('');
+    }
+    setShowCommentBox((v) => !v);
+  };
+
+  const handleSubmitComment = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!onAddComment || !commentText.trim()) {
+      return;
+    }
+    setSubmittingComment(true);
+    try {
+      await onAddComment(fileLabel, commentLocation, commentQuote, commentText.trim());
+      setCommentText('');
+      setShowCommentBox(false);
+    } finally {
+      setSubmittingComment(false);
+    }
+  };
 
   const hasHeadDiff = Boolean(headContent && headContent !== source);
 
@@ -417,6 +457,16 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
           >
             🔍 Find
           </button>
+          {onAddComment && (
+            <button
+              type="button"
+              className={`btn-tiny ${showCommentBox ? 'active-btn' : ''}`}
+              onClick={openCommentDrawer}
+              title="Highlight text and add a comment to notes/comments.md for the coding agent"
+            >
+              + Comment
+            </button>
+          )}
           {!readOnly && (
             <>
               <span
@@ -441,6 +491,39 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
           )}
         </div>
       </div>
+
+      {showCommentBox && onAddComment && (
+        <form className="inline-bib-drawer" onSubmit={(e) => void handleSubmitComment(e)}>
+          <div className="row-gap" style={{ justifyContent: 'space-between' }}>
+            <strong>
+              Comment on <code>{fileLabel}</code> {commentLocation ? `(${commentLocation})` : ''}
+            </strong>
+            <span className="muted-hint">Saved to notes/comments.md &amp; AGENTS.md</span>
+          </div>
+          <input
+            type="text"
+            placeholder="Quoted selection (optional)"
+            value={commentQuote}
+            onChange={(e) => setCommentQuote(e.target.value)}
+          />
+          <input
+            type="text"
+            placeholder="Instruction or note for the coding agent..."
+            value={commentText}
+            onChange={(e) => setCommentText(e.target.value)}
+            autoFocus
+            required
+          />
+          <div className="row-gap">
+            <button type="submit" className="btn-primary btn-tiny" disabled={submittingComment}>
+              {submittingComment ? 'Saving…' : 'Save Comment'}
+            </button>
+            <button type="button" className="btn-tiny" onClick={() => setShowCommentBox(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
 
       <div className="editor-split">
         {(!isMarkdown || mdViewMode !== 'preview') && (

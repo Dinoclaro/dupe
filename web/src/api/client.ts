@@ -84,6 +84,13 @@ export interface ProjectPullResponse {
   last_synced_at: string;
 }
 
+export interface ProjectContextResponse {
+  comments_md: string;
+  agents_md: string;
+  open_count: number;
+  addressed_count: number;
+}
+
 export interface ProjectSyncResponse {
   project: ProjectConfig;
   committed: boolean;
@@ -660,6 +667,22 @@ export const api = {
     return apiFetch<ProjectFilePayload>(`/api/projects/${id}/revert`, {
       method: 'POST',
       body: JSON.stringify({ path: filePath }),
+    });
+  },
+
+  async addProjectComment(
+    id: string,
+    input: { source: string; location: string; quote: string; comment: string },
+  ): Promise<ProjectContextResponse> {
+    return apiFetch<ProjectContextResponse>(`/api/projects/${id}/comments`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async gatherProjectContext(id: string): Promise<ProjectContextResponse> {
+    return apiFetch<ProjectContextResponse>(`/api/projects/${id}/context`, {
+      method: 'POST',
     });
   },
 

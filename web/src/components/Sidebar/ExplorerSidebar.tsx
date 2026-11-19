@@ -108,6 +108,7 @@ interface ExplorerSidebarProps {
   onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
   onPullProject: () => Promise<void>;
   onSyncProject: () => Promise<void>;
+  onGatherContext: () => Promise<void>;
   onExportOverleafBundle: () => void;
   onInsertCitation: (bibtexKey: string) => void;
   onPapersChanged: () => Promise<void>;
@@ -152,6 +153,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   onCreateProjectFile,
   onPullProject,
   onSyncProject,
+  onGatherContext,
   onExportOverleafBundle,
   onInsertCitation,
   onPapersChanged,
@@ -453,6 +455,15 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     setSyncingGit(true);
     try {
       await onSyncProject();
+    } finally {
+      setSyncingGit(false);
+    }
+  };
+
+  const handleTriggerGatherContext = async () => {
+    setSyncingGit(true);
+    try {
+      await onGatherContext();
     } finally {
       setSyncingGit(false);
     }
@@ -1055,6 +1066,15 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 }}
               >
                 ⚙
+              </button>
+              <button
+                type="button"
+                className="btn-tiny"
+                disabled={syncingGit || !activeProject}
+                onClick={() => void handleTriggerGatherContext()}
+                title="Reconcile notes/comments.md, read git logs for paper/ and code/, and update AGENTS.md"
+              >
+                Context
               </button>
               <button
                 type="button"

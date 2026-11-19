@@ -416,4 +416,52 @@ doc.close()
 	}
 }
 
+func TestCommentsAndGatherContext(t *testing.T) {
+	projDir := t.TempDir()
+	paperDir := filepath.Join(projDir, "paper")
+	notesDir := filepath.Join(projDir, "notes")
+	_ = os.MkdirAll(paperDir, 0o755)
+	_ = os.MkdirAll(notesDir, 0o755)
+
+	mainTex := filepath.Join(paperDir, "main.tex")
+	_ = os.WriteFile(mainTex, []byte("\\section{Intro}\nWe evaluate on three benchmarks.\n"), 0o644)
+
+	newBlock := "- [ ] **[2026-11-19 13:00] `paper/main.tex` (line 2)**\n  > \"We evaluate on three benchmarks.\"\n  **Comment:** Add the fourth ablation benchmark."
+	open, addressed, md := parseAndReconcileComments(projDir, newBlock)
+	if len(open) != 1 || len(addressed) != 0 {
+		t.Fatalf("expected 1 open and 0 addressed comments, got open=%d addressed=%d", len(open), len(addressed))
+	}
+	if !strings.Contains(md, "## Open Comments") || !strings.Contains(md, "Add the fourth ablation benchmark.") {
+		t.Fatalf("unexpected comments.md: %s", md)
+	}
+
+	// Modify the quoted text in paper/main.tex and verify auto-resolution
+	_ = os.WriteFile(mainTex, []byte("\\section{Intro}\nWe evaluate on four ablation benchmarks.\n"), 0o644)
+	open2, addressed2, _ := parseAndReconcileComments(projDir, "")
+	if len(open2) != 0 || len(addressed2) != 1 {
+		t.Fatalf("expected auto-resolved comment (0 open, 1 addressed), got open=%d addressed=%d", len(open2), len(addressed2))
+	}
+
+	cfg := ProjectConfig{
+		ID:             "11111111-1111-4111-8111-111111111111",
+		Name:           "Test Paper",
+		FolderName:     "test-paper",
+		OverleafRemote: "git@github.com:user/paper.git",
+		CodeRemote:     "git@github.com:user/code.git",
+	}
+	agentsMD := buildProjectAgentsMD(context.Background(), projDir, cfg, nil, true)
+	for _, section := range []string{
+		"## 1. Project Summary",
+		"## 2. Project Structure",
+		"## 3. Rules for Agents",
+		"## 4. Current Context",
+		"### Recently Addressed Comments",
+	} {
+		if !strings.Contains(agentsMD, section) {
+			t.Fatalf("expected AGENTS.md to contain %q, got:\n%s", section, agentsMD)
+		}
+	}
+}
+
+
 

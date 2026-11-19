@@ -91,11 +91,13 @@ const PdfPageCanvas: React.FC<PdfPageCanvasProps> = ({ doc, pageNumber, scale })
 interface PdfReaderPaneProps {
   paper: Paper | null;
   onInsertCitation: (bibtexKey: string) => void;
+  onAddComment?: (source: string, location: string, quote: string, comment: string) => Promise<void>;
 }
 
 export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({
   paper,
   onInsertCitation,
+  onAddComment,
 }) => {
   const [viewerMode, setViewerMode] = useState<'native' | 'pdfjs'>('native');
   const [zoomPercent, setZoomPercent] = useState(110);
@@ -103,6 +105,11 @@ export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({
   const [numPages, setNumPages] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showCommentBox, setShowCommentBox] = useState(false);
+  const [commentQuote, setCommentQuote] = useState('');
+  const [commentLocation, setCommentLocation] = useState('PDF');
+  const [commentText, setCommentText] = useState('');
+  const [submittingComment, setSubmittingComment] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -175,6 +182,22 @@ export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({
               Cite \cite&#123;{paper.bibtex_key}&#125;
             </button>
           )}
+          {onAddComment && (
+            <button
+              type="button"
+              className={`btn-tiny ${showCommentBox ? 'active-btn' : ''}`}
+              onClick={() => {
+                const sel = window.getSelection()?.toString().trim() || '';
+                if (sel) {
+                  setCommentQuote(sel);
+                }
+                setShowCommentBox((v) => !v);
+              }}
+              title="Add a comment on this paper to notes/comments.md for the coding agent"
+            >
+              + Comment
+            </button>
+          )}
           <button
             type="button"
             className="btn-tiny"
@@ -213,6 +236,67 @@ export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({
           </a>
         </div>
       </div>
+
+      {showCommentBox && onAddComment && (
+        <form
+          className="inline-bib-drawer"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!commentText.trim()) {
+              return;
+            }
+            setSubmittingComment(true);
+            try {
+              const sourceKey = paper.bibtex_key ? `[[paper:${paper.bibtex_key}]]` : paper.title;
+              await onAddComment(sourceKey, commentLocation, commentQuote, commentText.trim());
+              setCommentText('');
+              setCommentQuote('');
+              setShowCommentBox(false);
+            } finally {
+              setSubmittingComment(false);
+            }
+          }}
+        >
+          <div className="row-gap" style={{ justifyContent: 'space-between' }}>
+            <strong>
+              Comment on <code>@{paper.bibtex_key || paper.title}</code>
+            </strong>
+            <span className="muted-hint">Saved to notes/comments.md &amp; AGENTS.md</span>
+          </div>
+          <div className="row-gap">
+            <input
+              type="text"
+              placeholder="Page / Section (e.g. Page 4)"
+              value={commentLocation}
+              onChange={(e) => setCommentLocation(e.target.value)}
+              style={{ width: 140 }}
+            />
+            <input
+              type="text"
+              placeholder="Quoted text from PDF (optional)"
+              value={commentQuote}
+              onChange={(e) => setCommentQuote(e.target.value)}
+              style={{ flex: 1 }}
+            />
+          </div>
+          <input
+            type="text"
+            placeholder="Comment or instruction for the coding agent..."
+            value={commentText}
+            onChange={(e) => setCommentText(e.target.value)}
+            autoFocus
+            required
+          />
+          <div className="row-gap">
+            <button type="submit" className="btn-primary btn-tiny" disabled={submittingComment}>
+              {submittingComment ? 'Saving…' : 'Save Comment'}
+            </button>
+            <button type="button" className="btn-tiny" onClick={() => setShowCommentBox(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
 
       {viewerMode === 'native' ? (
         <div className="reader-native-stage">

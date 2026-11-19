@@ -148,21 +148,221 @@ func commitAllIfDirty(ctx context.Context, dir, message string) (bool, string, e
 	return true, sha, nil
 }
 
-func buildProjectAgentsMD(cfg ProjectConfig, refs []RefIndexEntry, isLocalMode bool) string {
+var commentTargetBacktickRegex = regexp.MustCompile("`([^`]+)`")
+
+func parseAndReconcileComments(projDir string, prependOpenBlock string) ([]string, []string, string) {
+	commentsPath := filepath.Join(projDir, "notes", "comments.md")
+	rawBytes, _ := os.ReadFile(commentsPath)
+	raw := strings.ReplaceAll(string(rawBytes), "\r\n", "\n")
+
+	var openBlocks []string
+	var addressedBlocks []string
+	if strings.TrimSpace(prependOpenBlock) != "" {
+		openBlocks = append(openBlocks, strings.TrimSpace(prependOpenBlock))
+	}
+
+	lines := strings.Split(raw, "\n")
+	var currentBlock []string
+	currentIsOpen := true
+	inBlock := false
+
+	flushBlock := func() {
+		if !inBlock || len(currentBlock) == 0 {
+			return
+		}
+		blockText := strings.TrimSpace(strings.Join(currentBlock, "\n"))
+		if blockText == "" {
+			return
+		}
+		isOpen := currentIsOpen
+		if isOpen {
+			// Auto-resolve if the quoted text in a local project file was modified or removed.
+			firstLine := currentBlock[0]
+			var quoteLines []string
+			for _, l := range currentBlock[1:] {
+				trimmed := strings.TrimSpace(l)
+				if strings.HasPrefix(trimmed, ">") {
+					q := strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+					q = strings.Trim(q, "\"")
+					if q != "" {
+						quoteLines = append(quoteLines, q)
+					}
+				}
+			}
+			quoteText := strings.TrimSpace(strings.Join(quoteLines, "\n"))
+			if matches := commentTargetBacktickRegex.FindStringSubmatch(firstLine); len(matches) > 1 && len(quoteText) >= 8 {
+				targetRel := strings.TrimSpace(matches[1])
+				if (strings.HasPrefix(targetRel, "paper/") || strings.HasPrefix(targetRel, "notes/")) && targetRel != "notes/comments.md" {
+					if targetAbs, err := safeJoin(projDir, targetRel); err == nil {
+						if fileBytes, readErr := os.ReadFile(targetAbs); readErr == nil {
+							if !strings.Contains(string(fileBytes), quoteText) {
+								isOpen = false
+								blockText = "- [x] " + strings.TrimPrefix(blockText, "- [ ] ")
+							}
+						}
+					}
+				}
+			}
+		}
+		if isOpen {
+			openBlocks = append(openBlocks, blockText)
+		} else {
+			if strings.HasPrefix(blockText, "- [ ] ") {
+				blockText = "- [x] " + strings.TrimPrefix(blockText, "- [ ] ")
+			}
+			addressedBlocks = append(addressedBlocks, blockText)
+		}
+		currentBlock = nil
+		inBlock = false
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [ ] ") {
+			flushBlock()
+			inBlock = true
+			currentIsOpen = true
+			currentBlock = []string{trimmed}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "- [x] ") || strings.HasPrefix(trimmed, "- [X] ") {
+			flushBlock()
+			inBlock = true
+			currentIsOpen = false
+			currentBlock = []string{"- [x] " + strings.TrimSpace(trimmed[6:])}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") {
+			flushBlock()
+			continue
+		}
+		if inBlock {
+			currentBlock = append(currentBlock, line)
+		}
+	}
+	flushBlock()
+
+	var b strings.Builder
+	b.WriteString("# Project Comments & Annotations\n\n")
+	b.WriteString("## Open Comments\n\n")
+	if len(openBlocks) == 0 {
+		b.WriteString("_No open comments._\n\n")
+	} else {
+		for _, blk := range openBlocks {
+			b.WriteString(blk + "\n\n")
+		}
+	}
+	b.WriteString("## Addressed Comments\n\n")
+	if len(addressedBlocks) == 0 {
+		b.WriteString("_No addressed comments yet._\n")
+	} else {
+		for _, blk := range addressedBlocks {
+			b.WriteString(blk + "\n\n")
+		}
+	}
+
+	formatted := strings.TrimRight(b.String(), "\n") + "\n"
+	if len(openBlocks) > 0 || len(addressedBlocks) > 0 || len(rawBytes) > 0 {
+		_ = os.MkdirAll(filepath.Join(projDir, "notes"), 0o755)
+		_ = os.WriteFile(commentsPath, []byte(formatted), 0o644)
+	}
+	return openBlocks, addressedBlocks, formatted
+}
+
+func summarizeGitRepoContext(ctx context.Context, dir, label string) string {
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return ""
+	}
+	logOut, _ := runGitCommand(ctx, dir, "log", "-n", "5", "--oneline")
+	statusOut, _ := runGitCommand(ctx, dir, "status", "-s")
+	if strings.TrimSpace(logOut) == "" && strings.TrimSpace(statusOut) == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("- **%s**:\n", label))
+	if strings.TrimSpace(logOut) != "" {
+		for _, l := range strings.Split(strings.TrimSpace(logOut), "\n") {
+			b.WriteString(fmt.Sprintf("  - commit `%s`\n", strings.TrimSpace(l)))
+		}
+	}
+	if strings.TrimSpace(statusOut) != "" {
+		for _, l := range strings.Split(strings.TrimSpace(statusOut), "\n") {
+			b.WriteString(fmt.Sprintf("  - status `%s`\n", strings.TrimSpace(l)))
+		}
+	}
+	return b.String()
+}
+
+func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectConfig, refs []RefIndexEntry, isLocalMode bool) string {
+	openComments, addressedComments, _ := parseAndReconcileComments(projectDir, "")
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# AGENTS.md — %s\n\n", cfg.Name))
 	b.WriteString("Generated by `dupe`. Read this file before editing the project.\n\n")
-	b.WriteString("## Project layout\n\n")
+
+	b.WriteString("## 1. Project Summary\n\n")
+	b.WriteString(fmt.Sprintf("- **Project Name:** %s (`%s/`)\n", cfg.Name, cfg.FolderName))
+	if strings.TrimSpace(cfg.OverleafRemote) != "" {
+		b.WriteString(fmt.Sprintf("- **Manuscript Remote (`paper/`):** `%s`\n", cfg.OverleafRemote))
+	}
+	if strings.TrimSpace(cfg.CodeRemote) != "" {
+		b.WriteString(fmt.Sprintf("- **Code Remote (`code/`):** `%s`\n", cfg.CodeRemote))
+	}
+	b.WriteString(fmt.Sprintf("- **Linked Reference Papers:** %d\n\n", len(refs)))
+
+	b.WriteString("## 2. Project Structure\n\n")
 	b.WriteString("- `paper/`: Overleaf-linked LaTeX repository (`main.tex`, `dupe_references.bib`, `figures/`).\n")
-	b.WriteString("- `notes/`: Markdown research notes (`*.md`) with `[[paper:<bibtex_key>]]` links.\n")
+	if isLocalMode || cfg.CodeRemote != "" {
+		b.WriteString("- `code/`: Implementation code repository (edited in VS Code).\n")
+	}
+	b.WriteString("- `notes/`: Markdown research notes (`*.md`) and `notes/comments.md` annotation queue.\n")
 	b.WriteString("- `diagrams/`: Editable Draw.io/Excalidraw diagram sources (`*.drawio.svg`).\n")
 	b.WriteString("- `refs/index.json`: Metadata and BibTeX keys for linked reference papers.\n")
 	b.WriteString("- `refs/text/<bibtex_key>.md`: Extracted full text of each reference paper.\n\n")
-	b.WriteString("## Rules for agents\n\n")
+
+	b.WriteString("## 3. Rules for Agents\n\n")
 	b.WriteString("- Edit LaTeX manuscripts in `paper/` and research notes in `notes/`.\n")
+	b.WriteString("- Check **Open Comments** below (and `notes/comments.md`) for user annotations and tasks.\n")
+	b.WriteString("- When you address an open comment (`- [ ]`), mark it `- [x]` and move it under `## Addressed Comments` in `notes/comments.md`.\n")
 	b.WriteString("- Do not edit `AGENTS.md`, `paper/dupe_references.bib`, or `refs/` manually; `dupe` regenerates them.\n")
 	b.WriteString("- Cite linked papers in LaTeX with `\\cite{<bibtex_key>}` and in Markdown notes with `[[paper:<bibtex_key>]]`.\n\n")
-	b.WriteString("## Available citation keys\n\n")
+
+	b.WriteString("## 4. Current Context\n\n")
+	b.WriteString("### Open Comments (`notes/comments.md`)\n\n")
+	if len(openComments) == 0 {
+		b.WriteString("No open comments.\n\n")
+	} else {
+		limit := len(openComments)
+		if limit > 10 {
+			limit = 10
+		}
+		for i := 0; i < limit; i++ {
+			b.WriteString(openComments[i] + "\n\n")
+		}
+	}
+
+	if len(addressedComments) > 0 {
+		b.WriteString("### Recently Addressed Comments\n\n")
+		limit := len(addressedComments)
+		if limit > 5 {
+			limit = 5
+		}
+		for i := 0; i < limit; i++ {
+			b.WriteString(addressedComments[i] + "\n\n")
+		}
+	}
+
+	b.WriteString("### Recent Git Activity\n\n")
+	paperGit := summarizeGitRepoContext(ctx, filepath.Join(projectDir, "paper"), "paper/ (LaTeX)")
+	codeGit := summarizeGitRepoContext(ctx, filepath.Join(projectDir, "code"), "code/ (Implementation)")
+	rootGit := summarizeGitRepoContext(ctx, projectDir, "project root (notes & diagrams)")
+	if paperGit == "" && codeGit == "" && rootGit == "" {
+		b.WriteString("No Git commits recorded yet.\n\n")
+	} else {
+		b.WriteString(paperGit + codeGit + rootGit + "\n")
+	}
+
+	b.WriteString("### Available Citation Keys\n\n")
 	if len(refs) == 0 {
 		b.WriteString("No papers linked yet.\n")
 	} else {
@@ -317,7 +517,7 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 		return err
 	}
 
-	agentsMD := buildProjectAgentsMD(cfg, refsIndex, s.mode == "local")
+	agentsMD := buildProjectAgentsMD(ctx, projectDir, cfg, refsIndex, s.mode == "local")
 	if err := os.WriteFile(filepath.Join(projectDir, "AGENTS.md"), []byte(agentsMD), 0o644); err != nil {
 		return err
 	}
@@ -1004,6 +1204,9 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		_, _ = runGitCommand(r.Context(), projDir, "add", "--", relSlash)
 		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): auto-save note "+relSlash)
 	}
+	if (strings.HasPrefix(relSlash, "paper/") || strings.HasPrefix(relSlash, "notes/")) && relSlash != "notes/comments.md" {
+		_, _, _ = parseAndReconcileComments(projDir, "")
+	}
 
 	if strings.HasPrefix(relSlash, "diagrams/") && strings.HasSuffix(relSlash, ".svg") {
 		baseName := strings.TrimSuffix(filepath.Base(relSlash), ".drawio.svg")
@@ -1018,6 +1221,105 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		"path":         relSlash,
 		"bytes":        len(data),
 		"head_content": headContent,
+	})
+}
+
+type addProjectCommentRequest struct {
+	Source   string `json:"source"`
+	Location string `json:"location"`
+	Quote    string `json:"quote"`
+	Comment  string `json:"comment"`
+}
+
+func (s *Server) handleAddProjectComment(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	cfg, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	var req addProjectCommentRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	commentText := strings.TrimSpace(req.Comment)
+	if commentText == "" {
+		writeError(w, http.StatusBadRequest, "comment is required")
+		return
+	}
+	sourceLabel := strings.TrimSpace(req.Source)
+	if sourceLabel == "" {
+		sourceLabel = "project"
+	}
+	locLabel := strings.TrimSpace(req.Location)
+	stamp := time.Now().UTC().Format("2006-01-02 15:04")
+
+	header := fmt.Sprintf("- [ ] **[%s] `%s`", stamp, sourceLabel)
+	if locLabel != "" {
+		header += fmt.Sprintf(" (%s)", locLabel)
+	}
+	header += "**"
+
+	var block strings.Builder
+	block.WriteString(header + "\n")
+	quoteText := strings.TrimSpace(req.Quote)
+	if quoteText != "" {
+		singleLineQuote := strings.Join(strings.Fields(quoteText), " ")
+		if len(singleLineQuote) > 280 {
+			singleLineQuote = singleLineQuote[:280] + "…"
+		}
+		block.WriteString(fmt.Sprintf("  > \"%s\"\n", singleLineQuote))
+	}
+	block.WriteString(fmt.Sprintf("  **Comment:** %s", commentText))
+
+	openBlocks, addressedBlocks, commentsMD := parseAndReconcileComments(projDir, block.String())
+	_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
+	agentsBytes, _ := os.ReadFile(filepath.Join(projDir, "AGENTS.md"))
+
+	initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
+	_, _ = runGitCommand(r.Context(), projDir, "add", "--", "notes/comments.md", "AGENTS.md")
+	_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): add comment on "+sourceLabel)
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"comments_md":     commentsMD,
+		"agents_md":       string(agentsBytes),
+		"open_count":      len(openBlocks),
+		"addressed_count": len(addressedBlocks),
+	})
+}
+
+func (s *Server) handleGatherProjectContext(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	cfg, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	openBlocks, addressedBlocks, commentsMD := parseAndReconcileComments(projDir, "")
+	if err := s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to regenerate AGENTS.md")
+		return
+	}
+	agentsBytes, _ := os.ReadFile(filepath.Join(projDir, "AGENTS.md"))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"comments_md":     commentsMD,
+		"agents_md":       string(agentsBytes),
+		"open_count":      len(openBlocks),
+		"addressed_count": len(addressedBlocks),
 	})
 }
 
