@@ -56,6 +56,7 @@ export interface ProjectConfig {
   name: string;
   folder_name: string;
   overleaf_remote: string;
+  code_remote?: string;
   linked_paper_ids: string[];
   link_all_papers: boolean;
   pending_push: boolean;
@@ -604,6 +605,7 @@ export const api = {
   async createProject(input: {
     name: string;
     overleaf_remote?: string;
+    code_remote?: string;
     link_all_papers?: boolean;
   }): Promise<ProjectConfig> {
     return apiFetch<ProjectConfig>('/api/projects', {
@@ -618,6 +620,7 @@ export const api = {
       name?: string;
       overleaf_remote?: string;
       overleaf_token?: string;
+      code_remote?: string;
       linked_paper_ids?: string[];
       link_all_papers?: boolean;
     },

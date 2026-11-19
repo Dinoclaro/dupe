@@ -192,30 +192,12 @@ func main() {
 		isMCPSubcmd = true
 	}
 
-	databaseURL := envOrDefault("DATABASE_URL", "postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable")
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	pool, err := initDB(ctx, databaseURL)
-	if err != nil {
-		slog.Error("database initialization failed", "error", err)
-		os.Exit(1)
+	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
+	if mode == "" {
+		mode = strings.ToLower(envOrDefault("DUPE_MODE", "hosted"))
 	}
-	defer pool.Close()
-
-	if *createUser != "" {
-		if err := createOrUpdateUser(ctx, pool, *createUser, *password, *colorHex); err != nil {
-			slog.Error("failed to create user", "username", *createUser, "error", err)
-			os.Exit(1)
-		}
-		slog.Info("user provisioned", "username", *createUser)
-		return
-	}
-
-	jwtSecret := envOrDefault("JWT_SECRET", "dev-local-jwt-secret-change-in-production-32b")
-	if len(jwtSecret) < 16 {
-		slog.Error("JWT_SECRET must be at least 16 bytes")
+	if mode != "local" && mode != "hosted" {
+		slog.Error("invalid mode; expected local or hosted", "mode", mode)
 		os.Exit(1)
 	}
 
@@ -229,12 +211,50 @@ func main() {
 		os.Exit(1)
 	}
 
-	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
-	if mode == "" {
-		mode = strings.ToLower(envOrDefault("DUPE_MODE", "hosted"))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var db pgxQuerier
+	var closeDB func()
+	explicitDBURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+
+	if mode == "local" && (explicitDBURL == "" || strings.HasPrefix(explicitDBURL, "sqlite:")) {
+		sqlitePath := filepath.Join(storageDir, "library.db")
+		if strings.HasPrefix(explicitDBURL, "sqlite:") {
+			sqlitePath = strings.TrimPrefix(explicitDBURL, "sqlite:")
+		}
+		sqDB, sqErr := initSQLiteDB(ctx, sqlitePath)
+		if sqErr != nil {
+			slog.Error("sqlite initialization failed", "path", sqlitePath, "error", sqErr)
+			os.Exit(1)
+		}
+		db = sqDB
+		closeDB = sqDB.Close
+		slog.Info("using local sqlite library cache", "path", sqlitePath)
+	} else {
+		databaseURL := envOrDefault("DATABASE_URL", "postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable")
+		pool, pgErr := initDB(ctx, databaseURL)
+		if pgErr != nil {
+			slog.Error("database initialization failed", "error", pgErr)
+			os.Exit(1)
+		}
+		db = pool
+		closeDB = pool.Close
 	}
-	if mode != "local" && mode != "hosted" {
-		slog.Error("invalid mode; expected local or hosted", "mode", mode)
+	defer closeDB()
+
+	if *createUser != "" {
+		if err := createOrUpdateUser(ctx, db, *createUser, *password, *colorHex); err != nil {
+			slog.Error("failed to create user", "username", *createUser, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("user provisioned", "username", *createUser)
+		return
+	}
+
+	jwtSecret := envOrDefault("JWT_SECRET", "dev-local-jwt-secret-change-in-production-32b")
+	if len(jwtSecret) < 16 {
+		slog.Error("JWT_SECRET must be at least 16 bytes")
 		os.Exit(1)
 	}
 
@@ -248,7 +268,7 @@ func main() {
 	}
 
 	if mode == "local" {
-		_ = createOrUpdateUser(ctx, pool, "local", "local-mode-implicit-user", "#FFEB3B")
+		_ = createOrUpdateUser(ctx, db, "local", "local-mode-implicit-user", "#FFEB3B")
 	}
 
 	pythonBin := envOrDefault("PYTHON_BIN", resolveDefaultPath("../.venv/bin/python3", "./.venv/bin/python3", "python3"))
@@ -264,7 +284,7 @@ func main() {
 	}
 
 	srv := &Server{
-		db:            pool,
+		db:            db,
 		jwtSecret:     []byte(jwtSecret),
 		storageDir:    storageDir,
 		projectsDir:   projectsDir,

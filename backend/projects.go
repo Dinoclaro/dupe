@@ -28,6 +28,7 @@ type ProjectConfig struct {
 	Name           string    `json:"name"`
 	FolderName     string    `json:"folder_name"`
 	OverleafRemote string    `json:"overleaf_remote"`
+	CodeRemote     string    `json:"code_remote,omitempty"`
 	LinkedPaperIDs []string  `json:"linked_paper_ids"`
 	LinkAllPapers  bool      `json:"link_all_papers"`
 	PendingPush    bool      `json:"pending_push"`
@@ -251,6 +252,9 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 			return err
 		}
 	}
+	if s.mode == "local" {
+		_ = os.MkdirAll(filepath.Join(projectDir, "code"), 0o755)
+	}
 
 	var bibEntries []string
 	seenKeys := make(map[string]bool)
@@ -341,13 +345,34 @@ func (s *Server) ensureDefaultProject(ctx context.Context, userID int, username 
 		}
 	}
 
-	return s.createProjectOnDisk(ctx, userID, username, "Default Paper Project", "", true)
+	return s.createProjectOnDisk(ctx, userID, username, "Default Paper Project", "", "", true)
+}
+
+func cloneGitRepoIntoDir(ctx context.Context, targetDir, remoteURL, username string) (string, error) {
+	clean := strings.TrimSpace(remoteURL)
+	if clean == "" {
+		return "", nil
+	}
+	if _, err := runGitCommand(ctx, "", "clone", "--", clean, targetDir); err != nil {
+		_ = os.RemoveAll(targetDir)
+		sshURL := githubHTTPSFallbackToSSH(clean)
+		if sshURL == "" {
+			return clean, err
+		}
+		if _, sshErr := runGitCommand(ctx, "", "clone", "--", sshURL, targetDir); sshErr != nil {
+			_ = os.RemoveAll(targetDir)
+			return clean, err
+		}
+		clean = sshURL
+	}
+	initGitRepoIfNeeded(ctx, targetDir, username)
+	return clean, nil
 }
 
 func (s *Server) createProjectOnDisk(
 	ctx context.Context,
 	userID int,
-	username, name, overleafRemote string,
+	username, name, overleafRemote, codeRemote string,
 	linkAll bool,
 ) (ProjectConfig, string, error) {
 	root := s.userProjectsRoot(userID)
@@ -374,6 +399,7 @@ func (s *Server) createProjectOnDisk(
 		Name:           strings.TrimSpace(name),
 		FolderName:     filepath.Base(projDir),
 		OverleafRemote: normalizeOverleafRemote(overleafRemote, ""),
+		CodeRemote:     strings.TrimSpace(codeRemote),
 		LinkedPaperIDs: []string{},
 		LinkAllPapers:  linkAll,
 	}
@@ -383,14 +409,18 @@ func (s *Server) createProjectOnDisk(
 		if err := os.MkdirAll(projDir, 0o755); err != nil {
 			return ProjectConfig{}, "", err
 		}
-		if _, err := runGitCommand(ctx, "", "clone", "--", cfg.OverleafRemote, paperDir); err != nil {
-			_ = os.RemoveAll(paperDir)
-			sshURL := githubHTTPSFallbackToSSH(cfg.OverleafRemote)
-			if sshURL != "" {
-				if _, sshErr := runGitCommand(ctx, "", "clone", "--", sshURL, paperDir); sshErr == nil {
-					cfg.OverleafRemote = sshURL
-				}
-			}
+		if resolved, cloneErr := cloneGitRepoIntoDir(ctx, paperDir, cfg.OverleafRemote, username); cloneErr == nil {
+			cfg.OverleafRemote = resolved
+		}
+	}
+
+	if s.mode == "local" && cfg.CodeRemote != "" {
+		if err := os.MkdirAll(projDir, 0o755); err != nil {
+			return ProjectConfig{}, "", err
+		}
+		codeDir := filepath.Join(projDir, "code")
+		if resolved, cloneErr := cloneGitRepoIntoDir(ctx, codeDir, cfg.CodeRemote, username); cloneErr == nil {
+			cfg.CodeRemote = resolved
 		}
 	}
 
@@ -642,6 +672,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 type createProjectRequest struct {
 	Name           string `json:"name"`
 	OverleafRemote string `json:"overleaf_remote"`
+	CodeRemote     string `json:"code_remote"`
 	LinkAllPapers  *bool  `json:"link_all_papers"`
 }
 
@@ -661,6 +692,18 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project name is required")
 		return
 	}
+	if strings.TrimSpace(req.OverleafRemote) != "" {
+		if err := validateRemoteURL(req.OverleafRemote); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if strings.TrimSpace(req.CodeRemote) != "" {
+		if err := validateRemoteURL(req.CodeRemote); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	linkAll := true
 	if req.LinkAllPapers != nil {
 		linkAll = *req.LinkAllPapers
@@ -672,6 +715,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		claims.Username,
 		req.Name,
 		req.OverleafRemote,
+		req.CodeRemote,
 		linkAll,
 	)
 	if err != nil {
@@ -685,6 +729,7 @@ type updateProjectRequest struct {
 	Name           *string  `json:"name"`
 	OverleafRemote *string  `json:"overleaf_remote"`
 	OverleafToken  *string  `json:"overleaf_token"`
+	CodeRemote     *string  `json:"code_remote"`
 	LinkedPaperIDs []string `json:"linked_paper_ids"`
 	LinkAllPapers  *bool    `json:"link_all_papers"`
 }
@@ -764,6 +809,38 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			cfg.OverleafRemote = ""
+		}
+	}
+	if req.CodeRemote != nil && s.mode == "local" {
+		codeRemote := strings.TrimSpace(*req.CodeRemote)
+		if codeRemote != "" {
+			if err := validateRemoteURL(codeRemote); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			codeDir := filepath.Join(projDir, "code")
+			if entries, readErr := os.ReadDir(codeDir); readErr == nil && len(entries) > 0 {
+				if _, err := os.Stat(filepath.Join(codeDir, ".git")); err == nil {
+					if _, err := runGitCommand(r.Context(), codeDir, "remote", "set-url", "origin", codeRemote); err != nil {
+						_, _ = runGitCommand(r.Context(), codeDir, "remote", "add", "origin", codeRemote)
+					}
+					cfg.CodeRemote = codeRemote
+				} else {
+					writeError(w, http.StatusConflict, "code/ directory is not empty and not a git repo")
+					return
+				}
+			} else {
+				_ = os.RemoveAll(codeDir)
+				resolved, cloneErr := cloneGitRepoIntoDir(r.Context(), codeDir, codeRemote, claims.Username)
+				if cloneErr != nil {
+					_ = os.MkdirAll(codeDir, 0o755)
+					writeError(w, http.StatusBadGateway, fmt.Sprintf("Failed to clone code repo: %v", cloneErr))
+					return
+				}
+				cfg.CodeRemote = resolved
+			}
+		} else {
+			cfg.CodeRemote = ""
 		}
 	}
 

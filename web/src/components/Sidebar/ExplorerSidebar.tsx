@@ -193,9 +193,11 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
   const [newProjName, setNewProjName] = useState('');
   const [newProjRemote, setNewProjRemote] = useState('');
+  const [newProjCodeRemote, setNewProjCodeRemote] = useState('');
 
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [settingsRemote, setSettingsRemote] = useState('');
+  const [settingsCodeRemote, setSettingsCodeRemote] = useState('');
   const [settingsToken, setSettingsToken] = useState('');
   const [settingsGithubPat, setSettingsGithubPat] = useState(getStoredGitHubPat);
   const [syncingGit, setSyncingGit] = useState(false);
@@ -397,11 +399,13 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
       const created = await api.createProject({
         name: newProjName.trim(),
         overleaf_remote: newProjRemote.trim(),
+        code_remote: newProjCodeRemote.trim(),
         link_all_papers: true,
       });
       setShowNewProjectForm(false);
       setNewProjName('');
       setNewProjRemote('');
+      setNewProjCodeRemote('');
       await onProjectsChanged();
       onSelectProject(created.id);
       onStatusMessage(`Created project "${created.name}" (${created.folder_name}/).`);
@@ -423,6 +427,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
       await api.updateProject(activeProject.id, {
         overleaf_remote: settingsRemote.trim(),
         overleaf_token: settingsToken.trim(),
+        code_remote: settingsCodeRemote.trim(),
       });
       setShowProjectSettings(false);
       setSettingsToken('');
@@ -1045,6 +1050,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 title="Configure Overleaf GitHub remote"
                 onClick={() => {
                   setSettingsRemote(activeProject?.overleaf_remote || '');
+                  setSettingsCodeRemote(activeProject?.code_remote || '');
                   setShowProjectSettings((v) => !v);
                 }}
               >
@@ -1082,9 +1088,15 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 />
                 <input
                   type="text"
-                  placeholder="Overleaf GitHub Remote URL (optional)"
+                  placeholder="Overleaf GitHub Remote URL (optional -> paper/)"
                   value={newProjRemote}
                   onChange={(e) => setNewProjRemote(e.target.value)}
+                />
+                <input
+                  type="text"
+                  placeholder="Code GitHub Repo URL (optional -> code/)"
+                  value={newProjCodeRemote}
+                  onChange={(e) => setNewProjCodeRemote(e.target.value)}
                 />
                 <div className="row-gap">
                   <button type="submit" className="btn-primary btn-tiny" disabled={syncingGit}>
@@ -1109,6 +1121,12 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   placeholder="https://git@git.overleaf.com/... or git@github.com:..."
                   value={settingsRemote}
                   onChange={(e) => setSettingsRemote(e.target.value)}
+                />
+                <input
+                  type="text"
+                  placeholder="Code GitHub Repo URL (clones into code/)"
+                  value={settingsCodeRemote}
+                  onChange={(e) => setSettingsCodeRemote(e.target.value)}
                 />
                 <input
                   type="password"
