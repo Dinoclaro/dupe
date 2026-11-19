@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+export PATH="$HOME/.local/share/mise/shims:$HOME/.nvm/versions/node/v20.20.2/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
 REMOTE_HOST="${1:-dinoclaro}"
 TUNNEL_ID="49104743-700f-424a-80a1-4189931eb32b"
 
@@ -22,10 +22,14 @@ rsync -az --delete \
   --exclude 'web/node_modules' \
   /home/dino/dupe/ "${REMOTE_HOST}:/home/dinoclaro/dupe/"
 
-echo "4. Copying Cloudflare Tunnel credentials to ${REMOTE_HOST}:~/.cloudflared..."
+echo "4. Ensuring remote directories and Cloudflare Tunnel credentials on ${REMOTE_HOST}..."
 ssh "${REMOTE_HOST}" "mkdir -p ~/.cloudflared ~/.local/bin ~/.config/systemd/user ~/dupe/storage/pdfs ~/dupe/storage/repos"
-scp -q "/home/dino/.cloudflared/cert.pem" "${REMOTE_HOST}:/home/dinoclaro/.cloudflared/cert.pem"
-scp -q "/home/dino/.cloudflared/${TUNNEL_ID}.json" "${REMOTE_HOST}:/home/dinoclaro/.cloudflared/${TUNNEL_ID}.json"
+if [[ -f "/home/dino/.cloudflared/cert.pem" ]]; then
+  scp -q "/home/dino/.cloudflared/cert.pem" "${REMOTE_HOST}:/home/dinoclaro/.cloudflared/cert.pem"
+fi
+if [[ -f "/home/dino/.cloudflared/${TUNNEL_ID}.json" ]]; then
+  scp -q "/home/dino/.cloudflared/${TUNNEL_ID}.json" "${REMOTE_HOST}:/home/dinoclaro/.cloudflared/${TUNNEL_ID}.json"
+fi
 
 echo "5. Provisioning PostgreSQL 16, Python environment, cloudflared, and systemd services on ${REMOTE_HOST}..."
 ssh "${REMOTE_HOST}" bash -s <<'EOF'
@@ -67,6 +71,8 @@ ingress:
     service: http://127.0.0.1:8080
     originRequest:
       noTLSVerify: true
+  - hostname: ssh.dupe.ing
+    service: ssh://127.0.0.1:22
   - service: http_status:404
 CFEOF
 
@@ -133,11 +139,9 @@ sleep 2
   "$ENV_DIR/bin/createdb" -h 127.0.0.1 -p 5432 -U dupe dupe
 
 systemctl --user enable --now dupe.service
+systemctl --user restart dupe.service
 systemctl --user enable --now dupe-tunnel.service
 sleep 2
-
-cd "$HOME/dupe/backend"
-DATABASE_URL="postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable" ./server --create-user dino --password "dino-dev-password"
 
 systemctl --user status dupe-postgres.service dupe.service dupe-tunnel.service --no-pager
 EOF
