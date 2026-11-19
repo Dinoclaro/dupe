@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -160,7 +162,77 @@ type loginResponse struct {
 	User  User   `json:"user"`
 }
 
+type loginAttemptEntry struct {
+	failures    int
+	firstFailed time.Time
+	lockedUntil time.Time
+}
+
+var (
+	loginAttemptsMu  sync.Mutex
+	loginAttemptsMap = make(map[string]loginAttemptEntry)
+)
+
+func clientIPFromRequest(r *http.Request) string {
+	if cfIP := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); cfIP != "" {
+		return cfIP
+	}
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func checkLoginRateLimit(ip string, now time.Time) bool {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	entry, ok := loginAttemptsMap[ip]
+	if !ok {
+		return true
+	}
+	if now.Before(entry.lockedUntil) {
+		return false
+	}
+	if now.Sub(entry.firstFailed) > 5*time.Minute {
+		delete(loginAttemptsMap, ip)
+	}
+	return true
+}
+
+func recordLoginFailure(ip string, now time.Time) {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	entry, ok := loginAttemptsMap[ip]
+	if !ok || now.Sub(entry.firstFailed) > 5*time.Minute {
+		entry = loginAttemptEntry{failures: 1, firstFailed: now}
+	} else {
+		entry.failures++
+	}
+	if entry.failures >= 8 {
+		entry.lockedUntil = now.Add(1 * time.Minute)
+	}
+	loginAttemptsMap[ip] = entry
+}
+
+func clearLoginFailures(ip string) {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	delete(loginAttemptsMap, ip)
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	clientIP := clientIPFromRequest(r)
+	now := time.Now().UTC()
+	if !checkLoginRateLimit(clientIP, now) {
+		writeError(w, http.StatusTooManyRequests, "too many failed login attempts; try again in 1 minute")
+		return
+	}
+
 	var req loginRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -187,6 +259,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		&user.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		recordLoginFailure(clientIP, now)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -196,11 +269,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := verifyPassword(passwordHash, req.Password); err != nil {
+		recordLoginFailure(clientIP, now)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	clearLoginFailures(clientIP)
 
-	token, err := issueToken(s.jwtSecret, user.ID, user.Username, time.Now().UTC())
+	token, err := issueToken(s.jwtSecret, user.ID, user.Username, now)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to sign token")
 		return

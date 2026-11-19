@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +33,10 @@ type GitRepo struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
+var allowLocalGitRemotesForTesting = false
+
+var allowedRemoteURLRegex = regexp.MustCompile(`^(https://([a-zA-Z0-9._:-]+@)?(github\.com|git\.overleaf\.com)/[a-zA-Z0-9._/-]+|git@github\.com:[a-zA-Z0-9._/-]+)$`)
+
 func runGitCommand(ctx context.Context, dir string, args ...string) (string, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, gitCmdTimeout)
 	defer cancel()
@@ -40,7 +45,11 @@ func runGitCommand(ctx context.Context, dir string, args ...string) (string, err
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	allowProto := "GIT_ALLOW_PROTOCOL=https:ssh"
+	if allowLocalGitRemotesForTesting {
+		allowProto = "GIT_ALLOW_PROTOCOL=file:https:ssh"
+	}
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", allowProto)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -63,6 +72,13 @@ func validateRemoteURL(rawURL string) error {
 	}
 	if strings.HasPrefix(trimmed, "-") {
 		return fmt.Errorf("remote_url must not start with '-'")
+	}
+	cleaned := normalizeOverleafRemote(trimmed, "")
+	if allowLocalGitRemotesForTesting && (filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "file://")) {
+		return nil
+	}
+	if strings.Contains(cleaned, "..") || !allowedRemoteURLRegex.MatchString(cleaned) {
+		return fmt.Errorf("remote_url must be a GitHub (https://github.com/... or git@github.com:...) or Overleaf (https://git.overleaf.com/...) URL")
 	}
 	return nil
 }

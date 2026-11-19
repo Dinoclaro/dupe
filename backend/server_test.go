@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -165,6 +167,8 @@ func TestRunExtractMetaFallbackWhenFileMissing(t *testing.T) {
 }
 
 func TestEndToEndUploadAndGitSync(t *testing.T) {
+	allowLocalGitRemotesForTesting = true
+	defer func() { allowLocalGitRemotesForTesting = false }()
 	dbURL := envOrDefault("DATABASE_URL", "postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -462,6 +466,125 @@ func TestCommentsAndGatherContext(t *testing.T) {
 		}
 	}
 }
+
+func TestSecurityAllowlistRateLimitAndSQLiteSync(t *testing.T) {
+	allowLocalGitRemotesForTesting = false
+
+	validRemotes := []string{
+		"https://github.com/Dinoclaro/dupe.git",
+		"git@github.com:Dinoclaro/dupe.git",
+		"https://git.overleaf.com/654321abcdef",
+		"https://git:olp_token123@git.overleaf.com/654321abcdef",
+	}
+	for _, u := range validRemotes {
+		if err := validateRemoteURL(u); err != nil {
+			t.Fatalf("expected valid remote URL %q, got error: %v", u, err)
+		}
+	}
+
+	invalidRemotes := []string{
+		"/etc/passwd",
+		"file:///home/dino/repo",
+		"ext::sh -c touch%20/tmp/pwn",
+		"http://127.0.0.1:8080/repo.git",
+		"https://github.com/../../etc/passwd",
+		"-u ./payload",
+	}
+	for _, u := range invalidRemotes {
+		if err := validateRemoteURL(u); err == nil {
+			t.Fatalf("expected invalid remote URL %q to be rejected", u)
+		}
+	}
+
+	// Verify login rate limiter blocks after 8 failures and clears on success
+	testIP := "203.0.113.99"
+	now := time.Now().UTC()
+	clearLoginFailures(testIP)
+	for i := 0; i < 8; i++ {
+		if !checkLoginRateLimit(testIP, now) {
+			t.Fatalf("expected rate limit to allow attempt %d", i+1)
+		}
+		recordLoginFailure(testIP, now)
+	}
+	if checkLoginRateLimit(testIP, now) {
+		t.Fatal("expected IP to be locked out after 8 failed login attempts")
+	}
+	clearLoginFailures(testIP)
+	if !checkLoginRateLimit(testIP, now) {
+		t.Fatal("expected IP lockout to clear after clearLoginFailures")
+	}
+
+	// Verify local SQLite mode <-> hosted SQLite server sync cycle
+	ctx := context.Background()
+	hostedDir := t.TempDir()
+	hostedDB, err := initSQLiteDB(ctx, filepath.Join(hostedDir, "hosted.db"))
+	if err != nil {
+		t.Fatalf("initSQLiteDB hosted: %v", err)
+	}
+	defer hostedDB.Close()
+	_ = createOrUpdateUser(ctx, hostedDB, "dino", "strong-password-123", "#FFEB3B")
+
+	hostedSrv := &Server{
+		db:          hostedDB,
+		jwtSecret:   []byte("test-secret-at-least-16-bytes-long"),
+		storageDir:  hostedDir,
+		projectsDir: filepath.Join(hostedDir, "projects"),
+		mode:        "hosted",
+	}
+	_ = os.MkdirAll(filepath.Join(hostedDir, "pdfs"), 0o755)
+	ts := httptest.NewServer(hostedSrv.routes())
+	defer ts.Close()
+
+	localDir := t.TempDir()
+	localDB, err := initSQLiteDB(ctx, filepath.Join(localDir, "local.db"))
+	if err != nil {
+		t.Fatalf("initSQLiteDB local: %v", err)
+	}
+	defer localDB.Close()
+	_ = createOrUpdateUser(ctx, localDB, "local", "local-mode-implicit-user", "#FFEB3B")
+	_ = os.MkdirAll(filepath.Join(localDir, "pdfs"), 0o755)
+
+	localSrv := &Server{
+		db:          localDB,
+		jwtSecret:   []byte("test-secret-at-least-16-bytes-long"),
+		storageDir:  localDir,
+		projectsDir: filepath.Join(localDir, "projects"),
+		mode:        "local",
+	}
+
+	// Insert a paper & PDF blob on the local client and sync to the hosted server
+	samplePDF := []byte("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
+	sum := sha256.Sum256(samplePDF)
+	hash := hex.EncodeToString(sum[:])
+	_ = os.WriteFile(filepath.Join(localDir, "pdfs", hash+".pdf"), samplePDF, 0o644)
+	paperID := "22222222-2222-4222-8222-222222222222"
+	_, err = localDB.Exec(
+		ctx,
+		`INSERT INTO papers (id, owner_id, title, authors, bibtex_key, bibtex_raw, file_path, file_hash, updated_at)
+		 VALUES ($1, 1, 'Sync Paper', 'Dino', 'dino2026sync', '@article{dino2026sync}', $2, $3, $4)`,
+		paperID, "pdfs/"+hash+".pdf", hash, time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("insert local paper: %v", err)
+	}
+
+	token, _ := issueToken(hostedSrv.jwtSecret, 1, "dino", time.Now().UTC())
+	summary, err := localSrv.runRemoteSyncCycle(ctx, RemoteSyncConfig{
+		RemoteURL: ts.URL,
+		Username:  "dino",
+		Token:     token,
+	})
+	if err != nil {
+		t.Fatalf("runRemoteSyncCycle failed: %v", err)
+	}
+	if summary["pushed_papers"] != 1 || summary["uploaded_blobs"] != 1 {
+		t.Fatalf("expected 1 pushed paper and 1 uploaded blob, got %+v", summary)
+	}
+	if _, err := os.Stat(filepath.Join(hostedDir, "pdfs", hash+".pdf")); err != nil {
+		t.Fatalf("expected PDF blob to exist on hosted server: %v", err)
+	}
+}
+
 
 
 

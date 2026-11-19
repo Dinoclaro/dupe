@@ -142,6 +142,8 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /api/library/changes", s.requireAuth(s.handleLibraryChanges))
 	mux.HandleFunc("POST /api/library/sync", s.requireAuth(s.handleLibrarySync))
+	mux.HandleFunc("GET /api/library/remote-sync", s.requireAuth(s.handleGetRemoteSyncStatus))
+	mux.HandleFunc("POST /api/library/remote-sync", s.requireAuth(s.handleTriggerRemoteSync))
 	mux.HandleFunc("PUT /api/papers/blob/{sha256}", s.requireAuth(s.handleUploadPaperBlob))
 
 	if s.webDistDir != "" {
@@ -177,9 +179,11 @@ func main() {
 	createUser := flag.String("create-user", "", "Create or update a user account and exit")
 	password := flag.String("password", "", "Password for --create-user")
 	colorHex := flag.String("color", "#FFEB3B", "Highlight color hex for --create-user")
-	addrFlag := flag.String("addr", "", "HTTP listen address (default 0.0.0.0:8080)")
+	addrFlag := flag.String("addr", "", "HTTP listen address (default 127.0.0.1:8080)")
 	modeFlag := flag.String("mode", "", "Runtime mode: local or hosted (default hosted)")
 	projectsFlag := flag.String("projects", "", "Projects root directory for local mode")
+	syncURLFlag := flag.String("sync-url", "", "Hosted server URL for local-mode sync (e.g. https://dupe.ing)")
+	syncTokenFlag := flag.String("sync-token", "", "Bearer token for hosted server sync")
 	mcpFlag := flag.Bool("mcp", false, "Run Model Context Protocol (MCP) server over stdio")
 
 	args := os.Args[1:]
@@ -280,11 +284,7 @@ func main() {
 	webDistDir := envOrDefault("WEB_DIST_DIR", resolveDefaultPath("../web/dist", "./web/dist"))
 	listenAddr := *addrFlag
 	if listenAddr == "" {
-		defaultAddr := "0.0.0.0:8080"
-		if mode == "local" {
-			defaultAddr = "127.0.0.1:8080"
-		}
-		listenAddr = envOrDefault("ADDR", defaultAddr)
+		listenAddr = envOrDefault("ADDR", "127.0.0.1:8080")
 	}
 
 	srv := &Server{
@@ -296,6 +296,28 @@ func main() {
 		pythonBin:     pythonBin,
 		extractScript: extractScript,
 		webDistDir:    webDistDir,
+	}
+
+	if mode == "local" {
+		initSyncURL := strings.TrimSpace(*syncURLFlag)
+		if initSyncURL == "" {
+			initSyncURL = envOrDefault("DUPE_SYNC_URL", "")
+		}
+		initSyncToken := strings.TrimSpace(*syncTokenFlag)
+		if initSyncToken == "" {
+			initSyncToken = envOrDefault("DUPE_SYNC_TOKEN", "")
+		}
+		if initSyncURL != "" || initSyncToken != "" {
+			cfg := srv.loadRemoteSyncConfig()
+			if initSyncURL != "" {
+				cfg.RemoteURL = strings.TrimRight(initSyncURL, "/")
+			}
+			if initSyncToken != "" {
+				cfg.Token = initSyncToken
+			}
+			_ = srv.saveRemoteSyncConfig(cfg)
+		}
+		go srv.startBackgroundRemoteSync(ctx)
 	}
 
 	if isMCPSubcmd {

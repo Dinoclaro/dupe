@@ -91,6 +91,12 @@ RestartSec=3
 WantedBy=default.target
 PGEO
 
+if [[ ! -f "$HOME/.config/dupe_jwt_secret" ]]; then
+  openssl rand -hex 32 > "$HOME/.config/dupe_jwt_secret"
+  chmod 600 "$HOME/.config/dupe_jwt_secret"
+fi
+JWT_SECRET_VAL="$(cat "$HOME/.config/dupe_jwt_secret")"
+
 cat > "$HOME/.config/systemd/user/dupe.service" <<SVCEOF
 [Unit]
 Description=dupe (Dino's Ultimate Paper Editor) Server
@@ -100,7 +106,8 @@ Requires=dupe-postgres.service
 [Service]
 Type=simple
 WorkingDirectory=/home/dinoclaro/dupe/backend
-Environment="ADDR=0.0.0.0:8080"
+Environment="ADDR=127.0.0.1:8080"
+Environment="JWT_SECRET=${JWT_SECRET_VAL}"
 Environment="DATABASE_URL=postgres://dupe:dupe_dev_password@127.0.0.1:5432/dupe?sslmode=disable"
 Environment="STORAGE_DIR=/home/dinoclaro/dupe/storage"
 Environment="PYTHON_BIN=${ENV_DIR}/bin/python3"
