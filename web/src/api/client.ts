@@ -145,6 +145,7 @@ export interface LocalBrowseDir {
   path: string;
   is_dupe_project: boolean;
   has_tex: boolean;
+  has_code: boolean;
   has_git: boolean;
 }
 
@@ -782,12 +783,14 @@ export const api = {
     files: ProjectTreeEntry[];
     cited_keys?: string[];
     compiled_pdf?: CompiledPdfMeta;
+    code_target?: string;
   }> {
     return apiFetch<{
       project: ProjectConfig;
       files: ProjectTreeEntry[];
       cited_keys?: string[];
       compiled_pdf?: CompiledPdfMeta;
+      code_target?: string;
     }>(`/api/projects/${id}/tree`);
   },
 
@@ -1057,7 +1060,8 @@ export const api = {
   async linkLocalFolder(input: {
     name: string;
     source_path: string;
-    link_mode: 'symlink_paper' | 'symlink_project';
+    link_mode: 'symlink_code' | 'symlink_paper' | 'symlink_project';
+    target_project_id?: string;
   }): Promise<ProjectConfig> {
     return apiFetch<ProjectConfig>('/api/local/link-folder', {
       method: 'POST',

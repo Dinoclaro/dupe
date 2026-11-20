@@ -760,6 +760,33 @@ func TestLocalModeFolderWizardAndSymlink(t *testing.T) {
 	if !foundMimic {
 		t.Fatalf("expected paper/mimic.tex in symlinked tree, got %+v", tree)
 	}
+
+	var linkedCfg ProjectConfig
+	_ = json.Unmarshal(linkRec.Body.Bytes(), &linkedCfg)
+
+	existingCodeDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(existingCodeDir, "Cargo.toml"), []byte("[package]\nname=\"mimic\"\n"), 0o644)
+	_, hasTexFlag, hasCodeFlag, _ := inspectDirFlags(existingCodeDir)
+	if hasTexFlag || !hasCodeFlag {
+		t.Fatalf("expected hasTex=false, hasCode=true, got tex=%v code=%v", hasTexFlag, hasCodeFlag)
+	}
+
+	attachPayload, _ := json.Marshal(map[string]string{
+		"source_path":       existingCodeDir,
+		"link_mode":         "symlink_code",
+		"target_project_id": linkedCfg.ID,
+	})
+	attachReq := httptest.NewRequest(http.MethodPost, "/api/local/link-folder", bytes.NewReader(attachPayload))
+	attachReq.Header.Set("Content-Type", "application/json")
+	attachRec := httptest.NewRecorder()
+	localHandler.ServeHTTP(attachRec, attachReq)
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for attach symlink_code, got %d: %s", attachRec.Code, attachRec.Body.String())
+	}
+	codeTarget, readLinkErr := os.Readlink(filepath.Join(chosenRoot, "dinomimic", "code"))
+	if readLinkErr != nil || codeTarget != existingCodeDir {
+		t.Fatalf("expected code symlink -> %q, got %q (err=%v)", existingCodeDir, codeTarget, readLinkErr)
+	}
 }
 
 

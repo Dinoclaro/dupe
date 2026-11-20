@@ -1289,11 +1289,17 @@ func (s *Server) handleGetProjectTree(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	codeTarget := ""
+	if target, linkErr := os.Readlink(filepath.Join(projDir, "code")); linkErr == nil {
+		codeTarget = target
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project":      cfg,
 		"files":        tree,
 		"cited_keys":   citedKeys,
 		"compiled_pdf": compiledPDF,
+		"code_target":  codeTarget,
 	})
 }
 

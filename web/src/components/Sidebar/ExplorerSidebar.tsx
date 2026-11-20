@@ -99,6 +99,7 @@ interface ExplorerSidebarProps {
   citedBibKeys?: string[];
   commentCountsByFile?: Record<string, { open: number; addressed: number }>;
   hasLatexOrPreviewOpen?: boolean;
+  codeTarget?: string;
   projects: ProjectConfig[];
   activeProject: ProjectConfig | null;
   projectFiles: ProjectTreeEntry[];
@@ -196,6 +197,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   citedBibKeys = [],
   commentCountsByFile = {},
   hasLatexOrPreviewOpen = false,
+  codeTarget = '',
   projects,
   activeProject,
   projectFiles,
@@ -1550,9 +1552,23 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 </div>
               </div>
 
-              {/* Recursive Folder Hierarchy (paper/, code/mbrl_soft/..., notes/, diagrams/, refs/) */}
+              {/* Recursive Folder Hierarchy (paper/, notes/, diagrams/, refs/) */}
               {folderTreeRoot.childrenDirs.map((dirNode) =>
                 renderFolderTreeNode(dirNode, 0),
+              )}
+
+              {codeTarget && (
+                <div
+                  className="tree-row"
+                  title={`Linked local code folder: ${codeTarget} (edit code in VS Code; agents read code/ and paper/ together)`}
+                  onClick={() => onStatusMessage(`Linked code/ -> ${codeTarget} (edit in VS Code)`)}
+                >
+                  <span className="file-icon kind-diagram">CODE</span>
+                  <div className="tree-label-col">
+                    <span className="tree-primary-text">code/ (linked)</span>
+                    <span className="tree-sub-text">→ {codeTarget}</span>
+                  </div>
+                </div>
               )}
 
               {/* Root Project Files (e.g. AGENTS.md) */}

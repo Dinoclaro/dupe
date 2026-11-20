@@ -11,6 +11,7 @@ interface LocalModeModalProps {
   open: boolean;
   runtimeMode: string;
   loggedIn: boolean;
+  activeProject?: ProjectConfig | null;
   onClose: () => void;
   onStatusMessage: (msg: string) => void;
   onLocalWorkspaceChanged: (selectProjectId?: string) => Promise<void>;
@@ -20,6 +21,7 @@ export const LocalModeModal: React.FC<LocalModeModalProps> = ({
   open,
   runtimeMode,
   loggedIn,
+  activeProject = null,
   onClose,
   onStatusMessage,
   onLocalWorkspaceChanged,
@@ -42,7 +44,8 @@ export const LocalModeModal: React.FC<LocalModeModalProps> = ({
   const [browseError, setBrowseError] = useState<string | null>(null);
   const [selectedSourceDir, setSelectedSourceDir] = useState<string>('');
   const [linkProjectName, setLinkProjectName] = useState('');
-  const [linkMode, setLinkMode] = useState<'symlink_paper' | 'symlink_project'>('symlink_paper');
+  const [linkMode, setLinkMode] = useState<'symlink_code' | 'symlink_paper' | 'symlink_project'>('symlink_code');
+  const [attachToActive, setAttachToActive] = useState(false);
   const [submittingAction, setSubmittingAction] = useState(false);
 
   const isLocalMode = runtimeMode === 'local';
@@ -159,13 +162,24 @@ export const LocalModeModal: React.FC<LocalModeModalProps> = ({
     setSubmittingAction(true);
     setBrowseError(null);
     try {
+      const useTargetProject =
+        attachToActive && activeProject && linkMode !== 'symlink_project';
       const created: ProjectConfig = await api.linkLocalFolder({
         name: linkProjectName.trim() || selectedSourceDir.split('/').filter(Boolean).pop() || 'Project',
         source_path: selectedSourceDir.trim(),
         link_mode: linkMode,
+        ...(useTargetProject ? { target_project_id: activeProject.id } : {}),
       });
       await onLocalWorkspaceChanged(created.id);
-      onStatusMessage(`Linked local folder ${selectedSourceDir} as project "${created.name}".`);
+      onStatusMessage(
+        `Linked ${selectedSourceDir} as ${
+          linkMode === 'symlink_code'
+            ? 'code/'
+            : linkMode === 'symlink_paper'
+              ? 'paper/'
+              : 'project'
+        } in "${created.name}".`,
+      );
       onClose();
     } catch (err) {
       setBrowseError(err instanceof Error ? err.message : 'Failed to link local folder');
@@ -384,12 +398,20 @@ export const LocalModeModal: React.FC<LocalModeModalProps> = ({
                       onClick={() => {
                         setSelectedSourceDir(d.path);
                         setLinkProjectName(d.name);
+                        if (d.has_code && !d.has_tex) {
+                          setLinkMode('symlink_code');
+                        } else if (d.has_tex) {
+                          setLinkMode('symlink_paper');
+                        } else if (d.is_dupe_project) {
+                          setLinkMode('symlink_project');
+                        }
                       }}
                       onDoubleClick={() => void loadLocalBrowse(d.path)}
                     >
                       <span>📁 {d.name}</span>
                       <div className="row-gap">
                         {d.is_dupe_project && <span className="git-badge git-badge-u">dupe</span>}
+                        {d.has_code && <span className="bibkey-badge">Code</span>}
                         {d.has_tex && <span className="git-badge git-badge-m">LaTeX</span>}
                         {d.has_git && <span className="folder-count">git</span>}
                         <button
@@ -411,33 +433,57 @@ export const LocalModeModal: React.FC<LocalModeModalProps> = ({
 
             <form className="wizard-step-card" onSubmit={(e) => void handleLinkFolder(e)}>
               <div className="wizard-step-title">
-                Link Existing Folder Without Moving Files (Symlink)
+                Link Selected Folder Without Moving Files (Symlink)
+              </div>
+              <div className="muted-hint">
+                Selected: <code>{selectedSourceDir || currentPath}</code>
               </div>
               <div className="row-gap" style={{ flexWrap: 'wrap' }}>
-                <input
-                  type="text"
-                  placeholder="Project Name (e.g. dinoMimic)"
-                  value={linkProjectName}
-                  onChange={(e) => setLinkProjectName(e.target.value)}
-                  required
-                  style={{ flex: 1, minWidth: 180 }}
-                />
                 <select
                   value={linkMode}
                   onChange={(e) =>
-                    setLinkMode(e.target.value as 'symlink_paper' | 'symlink_project')
+                    setLinkMode(
+                      e.target.value as 'symlink_code' | 'symlink_paper' | 'symlink_project',
+                    )
                   }
-                  style={{ flex: 1, minWidth: 220 }}
+                  style={{ flex: 1, minWidth: 260 }}
                 >
+                  <option value="symlink_code">
+                    Link as code/ (Implementation repo — for VS Code &amp; agents)
+                  </option>
                   <option value="symlink_paper">
-                    Symlink selected folder as paper/ (keep notes/diagrams separate)
+                    Link as paper/ (LaTeX / Overleaf manuscript folder)
                   </option>
                   <option value="symlink_project">
-                    Symlink entire selected folder as a dupe project
+                    Link entire folder as a complete dupe project
                   </option>
                 </select>
+                {activeProject && linkMode !== 'symlink_project' && (
+                  <label className="checkbox-inline">
+                    <input
+                      type="checkbox"
+                      checked={attachToActive}
+                      onChange={(e) => setAttachToActive(e.target.checked)}
+                    />
+                    Attach into current project ({activeProject.name})
+                  </label>
+                )}
+              </div>
+              <div className="row-gap" style={{ flexWrap: 'wrap', marginTop: 4 }}>
+                {(!attachToActive || !activeProject || linkMode === 'symlink_project') && (
+                  <input
+                    type="text"
+                    placeholder="New Project Name (e.g. dinoMimic)"
+                    value={linkProjectName}
+                    onChange={(e) => setLinkProjectName(e.target.value)}
+                    required
+                    style={{ flex: 1, minWidth: 180 }}
+                  />
+                )}
                 <button type="submit" className="btn-primary btn-tiny" disabled={submittingAction}>
-                  🔗 Link &amp; Open
+                  🔗 {attachToActive && activeProject && linkMode !== 'symlink_project'
+                    ? `Attach to ${activeProject.name}`
+                    : 'Create Linked Project'}
                 </button>
               </div>
             </form>

@@ -309,10 +309,24 @@ type localBrowseDirEntry struct {
 	Path          string `json:"path"`
 	IsDupeProject bool   `json:"is_dupe_project"`
 	HasTex        bool   `json:"has_tex"`
+	HasCode       bool   `json:"has_code"`
 	HasGit        bool   `json:"has_git"`
 }
 
-func inspectDirFlags(absDir string) (isDupeProject, hasTex, hasGit bool) {
+func isCodeMarkerFile(lowerName string) bool {
+	switch lowerName {
+	case "cargo.toml", "pyproject.toml", "package.json", "cmakelists.txt", "makefile", "setup.py", "go.mod":
+		return true
+	}
+	for _, ext := range []string{".py", ".rs", ".go", ".ts", ".tsx", ".js", ".cpp", ".cc", ".c", ".h"} {
+		if strings.HasSuffix(lowerName, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func inspectDirFlags(absDir string) (isDupeProject, hasTex, hasCode, hasGit bool) {
 	if _, err := os.Stat(filepath.Join(absDir, ".dupe", "project.json")); err == nil {
 		isDupeProject = true
 	}
@@ -324,9 +338,11 @@ func inspectDirFlags(absDir string) (isDupeProject, hasTex, hasGit bool) {
 		return
 	}
 	for _, it := range items {
-		if strings.HasSuffix(strings.ToLower(it.Name()), ".tex") {
+		lower := strings.ToLower(it.Name())
+		if strings.HasSuffix(lower, ".tex") {
 			hasTex = true
-			break
+		} else if isCodeMarkerFile(lower) {
+			hasCode = true
 		}
 		if it.IsDir() && it.Name() == "paper" {
 			if sub, subErr := os.ReadDir(filepath.Join(absDir, "paper")); subErr == nil {
@@ -337,6 +353,9 @@ func inspectDirFlags(absDir string) (isDupeProject, hasTex, hasGit bool) {
 					}
 				}
 			}
+		}
+		if it.IsDir() && (it.Name() == "src" || it.Name() == "code") {
+			hasCode = true
 		}
 	}
 	return
@@ -377,12 +396,13 @@ func (s *Server) handleLocalBrowse(w http.ResponseWriter, r *http.Request) {
 		if stErr != nil || !st.IsDir() {
 			continue
 		}
-		isProj, hasTex, hasGit := inspectDirFlags(fullPath)
+		isProj, hasTex, hasCode, hasGit := inspectDirFlags(fullPath)
 		dirs = append(dirs, localBrowseDirEntry{
 			Name:          name,
 			Path:          fullPath,
 			IsDupeProject: isProj,
 			HasTex:        hasTex,
+			HasCode:       hasCode,
 			HasGit:        hasGit,
 		})
 	}
@@ -441,6 +461,33 @@ func generateUUIDv4() string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+func replaceEmptyOrSymlinkSubdir(targetSubdir, sourcePath string) (int, error) {
+	if lstat, err := os.Lstat(targetSubdir); err == nil {
+		if lstat.Mode()&os.ModeSymlink != 0 {
+			if rmErr := os.Remove(targetSubdir); rmErr != nil {
+				return http.StatusInternalServerError, fmt.Errorf("remove previous symlink: %w", rmErr)
+			}
+		} else if lstat.IsDir() {
+			entries, readErr := os.ReadDir(targetSubdir)
+			if readErr != nil {
+				return http.StatusInternalServerError, readErr
+			}
+			if len(entries) > 0 {
+				return http.StatusConflict, fmt.Errorf("%s already contains files; choose a new project or clean %s first", filepath.Base(targetSubdir), filepath.Base(targetSubdir))
+			}
+			if rmErr := os.Remove(targetSubdir); rmErr != nil {
+				return http.StatusInternalServerError, rmErr
+			}
+		} else {
+			return http.StatusConflict, fmt.Errorf("%s exists and is not a directory", filepath.Base(targetSubdir))
+		}
+	}
+	if err := os.Symlink(sourcePath, targetSubdir); err != nil {
+		return http.StatusInternalServerError, fmt.Errorf("symlink failed: %w", err)
+	}
+	return http.StatusOK, nil
+}
+
 func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 	if s.mode != "local" {
 		writeError(w, http.StatusForbidden, "only available in local mode")
@@ -453,9 +500,10 @@ func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name       string `json:"name"`
-		SourcePath string `json:"source_path"`
-		LinkMode   string `json:"link_mode"` // "symlink_project" | "symlink_paper"
+		Name            string `json:"name"`
+		SourcePath      string `json:"source_path"`
+		LinkMode        string `json:"link_mode"` // "symlink_code" | "symlink_paper" | "symlink_project"
+		TargetProjectID string `json:"target_project_id,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -473,20 +521,50 @@ func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = filepath.Base(sourcePath)
 	}
-	slug := sanitizeProjectFolderName(name)
 	root := s.getProjectsDir()
 	_ = os.MkdirAll(root, 0o755)
-	projDir := filepath.Join(root, slug)
 
 	linkMode := strings.TrimSpace(req.LinkMode)
-	if linkMode == "" {
-		linkMode = "symlink_paper"
+	if linkMode != "symlink_code" && linkMode != "symlink_paper" && linkMode != "symlink_project" {
+		_, hasTex, hasCode, _ := inspectDirFlags(sourcePath)
+		if hasCode && !hasTex {
+			linkMode = "symlink_code"
+		} else {
+			linkMode = "symlink_paper"
+		}
 	}
 
 	if sourcePath == root || strings.HasPrefix(root+string(os.PathSeparator), sourcePath+string(os.PathSeparator)) {
 		writeError(w, http.StatusBadRequest, "cannot link the active projects root or a parent directory into itself")
 		return
 	}
+
+	var projDir string
+	var cfg ProjectConfig
+
+	if targetID := strings.TrimSpace(req.TargetProjectID); targetID != "" && linkMode != "symlink_project" {
+		existingCfg, existingDir, lookupErr := s.lookupProjectDir(r.Context(), claims.UserID, targetID, claims.Username)
+		if lookupErr != nil {
+			writeError(w, http.StatusNotFound, "target project not found")
+			return
+		}
+		projDir = existingDir
+		cfg = existingCfg
+		subdirName := "paper"
+		if linkMode == "symlink_code" {
+			subdirName = "code"
+		}
+		if codeStatus, symErr := replaceEmptyOrSymlinkSubdir(filepath.Join(projDir, subdirName), sourcePath); symErr != nil {
+			writeError(w, codeStatus, symErr.Error())
+			return
+		}
+		_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
+		writeJSON(w, http.StatusOK, cfg)
+		return
+	}
+
+	slug := sanitizeProjectFolderName(name)
+	projDir = filepath.Join(root, slug)
 
 	if linkMode == "symlink_project" {
 		if _, statErr := os.Lstat(projDir); statErr == nil {
@@ -506,14 +584,25 @@ func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("mkdir project failed: %v", err))
 			return
 		}
-		if err := os.Symlink(sourcePath, filepath.Join(projDir, "paper")); err != nil {
+		subdirName := "paper"
+		if linkMode == "symlink_code" {
+			subdirName = "code"
+		}
+		if err := os.Symlink(sourcePath, filepath.Join(projDir, subdirName)); err != nil {
 			_ = os.RemoveAll(projDir)
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("symlink paper/ failed: %v", err))
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("symlink %s/ failed: %v", subdirName, err))
 			return
+		}
+		if linkMode == "symlink_code" {
+			paperDir := filepath.Join(projDir, "paper")
+			_ = os.MkdirAll(filepath.Join(paperDir, "figures"), 0o755)
+			mainTex := fmt.Sprintf("\\documentclass{article}\n\\title{%s}\n\\begin{document}\n\\maketitle\n\\section{Introduction}\nStart writing your manuscript here.\n\\bibliographystyle{plain}\n\\bibliography{dupe_references}\n\\end{document}\n", name)
+			_ = os.WriteFile(filepath.Join(paperDir, "main.tex"), []byte(mainTex), 0o644)
 		}
 	}
 
-	cfg, cfgErr := readProjectConfig(projDir)
+	var cfgErr error
+	cfg, cfgErr = readProjectConfig(projDir)
 	if cfgErr != nil {
 		cfg = ProjectConfig{
 			ID:             generateUUIDv4(),

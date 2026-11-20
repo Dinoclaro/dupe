@@ -154,6 +154,7 @@ export const App: React.FC = () => {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectTree, setProjectTree] = useState<ProjectTreeEntry[]>([]);
   const [projectCitedKeys, setProjectCitedKeys] = useState<string[]>([]);
+  const [codeTarget, setCodeTarget] = useState<string>('');
 
   // File buffers & Git HEAD snapshots keyed by relative project path (e.g. 'paper/main.tex').
   // Initialize immediately from local notes vault + snapshot so local notes ALWAYS win before any network response.
@@ -336,6 +337,7 @@ export const App: React.FC = () => {
   const refreshProjectTree = useCallback(async (projectId: string) => {
     const res = await api.getProjectTree(projectId);
     setProjectTree(res.files);
+    setCodeTarget(res.code_target || '');
     if (res.cited_keys) {
       setProjectCitedKeys(res.cited_keys);
     }
@@ -1956,6 +1958,7 @@ export const App: React.FC = () => {
             citedBibKeys={Array.from(new Set([...projectCitedKeys, ...compiled.citedKeys]))}
             commentCountsByFile={commentCountsByFile}
             hasLatexOrPreviewOpen={hasLatexOrPreviewOpen}
+            codeTarget={codeTarget}
             projects={projects}
             activeProject={activeProject}
             projectFiles={projectTree}
@@ -2146,6 +2149,7 @@ export const App: React.FC = () => {
         open={showLocalModal}
         runtimeMode={runtimeMode}
         loggedIn={Boolean(user)}
+        activeProject={activeProject}
         onClose={() => setShowLocalModal(false)}
         onStatusMessage={setStatusMessage}
         onLocalWorkspaceChanged={async (selectProjectId) => {
