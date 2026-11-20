@@ -20,6 +20,7 @@ import {
   loadLocalNotesVault,
   loadWorkspaceSnapshot,
   parseGitHubOwnerRepo,
+  resolveActiveProjectId,
   resolveNoteWithLocalWins,
   saveLocalNote,
   saveWorkspaceSnapshot,
@@ -349,5 +350,35 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     expect(matched).toHaveLength(2);
     expect(matched[0].line).toBe(42);
     expect(matched[1].category).toBe('reference');
+  });
+
+  it('preserves the selected project across reloads via workspace snapshot', () => {
+    const projectList = [
+      {
+        id: 'proj-default',
+        name: 'Default Paper Project',
+        folder_name: 'default-paper-project',
+        overleaf_remote: '',
+        linked_paper_ids: [],
+        link_all_papers: true,
+        pending_push: false,
+        updated_at: '2026-11-20T12:00:00Z',
+      },
+      {
+        id: 'proj-mimic',
+        name: 'mimic',
+        folder_name: 'mimic',
+        overleaf_remote: '',
+        linked_paper_ids: [],
+        link_all_papers: true,
+        pending_push: false,
+        updated_at: '2026-11-20T12:01:00Z',
+      },
+    ];
+
+    saveWorkspaceSnapshot({ activeProjectId: 'proj-mimic' });
+    expect(resolveActiveProjectId(projectList)).toBe('proj-mimic');
+    expect(resolveActiveProjectId(projectList, 'proj-missing')).toBe('proj-default');
+    expect(resolveActiveProjectId([])).toBeNull();
   });
 });

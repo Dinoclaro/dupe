@@ -17,6 +17,7 @@ import {
   markLocalNoteSynced,
   pushFilesToGitHubDirect,
   renameLocalNote,
+  resolveActiveProjectId,
   resolveNoteWithLocalWins,
   saveLocalNote,
   saveWorkspaceSnapshot,
@@ -151,7 +152,17 @@ export const App: React.FC = () => {
   const [showSidebar, setShowSidebar] = useState(true);
   const [papers, setPapers] = useState<Paper[]>([]);
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(
+    () => loadWorkspaceSnapshot().activeProjectId ?? null,
+  );
+  const activeProjectIdRef = useRef<string | null>(activeProjectId);
+  const commitActiveProjectId = useCallback((projectId: string | null) => {
+    activeProjectIdRef.current = projectId;
+    setActiveProjectId(projectId);
+    if (projectId) {
+      saveWorkspaceSnapshot({ activeProjectId: projectId });
+    }
+  }, []);
   const [projectTree, setProjectTree] = useState<ProjectTreeEntry[]>([]);
   const [projectCitedKeys, setProjectCitedKeys] = useState<string[]>([]);
   const [codeTarget, setCodeTarget] = useState<string>('');
@@ -436,12 +447,9 @@ export const App: React.FC = () => {
     const list = await api.listProjects();
     setProjects(list);
     saveWorkspaceSnapshot({ projects: list });
-    if (list.length > 0) {
-      const chosenId =
-        activeProjectId && list.some((p) => p.id === activeProjectId)
-          ? activeProjectId
-          : list[0].id;
-      setActiveProjectId(chosenId);
+    const chosenId = resolveActiveProjectId(list, activeProjectIdRef.current);
+    if (chosenId) {
+      commitActiveProjectId(chosenId);
       const files = await refreshProjectTree(chosenId);
       const preferredTex =
         files.find(
@@ -526,7 +534,7 @@ export const App: React.FC = () => {
         void triggerProjectCompile(chosenId, preferredTex?.path);
       }
     }
-  }, [activeProjectId, refreshProjectTree, triggerProjectCompile]);
+  }, [commitActiveProjectId, refreshProjectTree, triggerProjectCompile]);
 
   const loadInitialWorkspace = useCallback(async () => {
     await Promise.all([loadPapers(), loadProjects()]);
@@ -544,7 +552,9 @@ export const App: React.FC = () => {
       }
       if (cached.projects && cached.projects.length > 0) {
         setProjects(cached.projects);
-        setActiveProjectId((prev) => prev || cached.projects![0].id);
+        commitActiveProjectId(
+          resolveActiveProjectId(cached.projects, cached.activeProjectId ?? activeProjectIdRef.current),
+        );
       }
       if (cached.projectTree) {
         setProjectTree(cached.projectTree);
@@ -624,7 +634,12 @@ export const App: React.FC = () => {
             }
             if (cached.projects && cached.projects.length > 0) {
               setProjects(cached.projects);
-              setActiveProjectId(cached.projects[0].id);
+              commitActiveProjectId(
+                resolveActiveProjectId(
+                  cached.projects,
+                  cached.activeProjectId ?? activeProjectIdRef.current,
+                ),
+              );
             }
             if (cached.projectTree) {
               setProjectTree(cached.projectTree);
@@ -648,10 +663,10 @@ export const App: React.FC = () => {
       window.clearInterval(interval);
       window.removeEventListener('dupe:unauthorized', onUnauthorized);
     };
-  }, [loadInitialWorkspace]);
+  }, [commitActiveProjectId, loadInitialWorkspace]);
 
   const handleSelectProject = async (projectId: string) => {
-    setActiveProjectId(projectId);
+    commitActiveProjectId(projectId);
     const files = await refreshProjectTree(projectId);
     const preferredTex =
       files.find((f) => f.kind === 'tex' && f.path.startsWith('paper/')) || files[0];

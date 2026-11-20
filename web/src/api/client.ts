@@ -247,6 +247,7 @@ export interface CachedWorkspaceSnapshot {
   user?: User;
   papers?: Paper[];
   projects?: ProjectConfig[];
+  activeProjectId?: string;
   projectTree?: ProjectTreeEntry[];
   fileBuffers?: Record<string, string>;
 }
@@ -292,6 +293,20 @@ export function saveWorkspaceSnapshot(patch: Partial<CachedWorkspaceSnapshot>): 
   } catch {
     // ignore storage quota errors
   }
+}
+
+export function resolveActiveProjectId(
+  projects: ProjectConfig[],
+  preferredId?: string | null,
+): string | null {
+  if (projects.length === 0) {
+    return null;
+  }
+  const candidate = preferredId ?? loadWorkspaceSnapshot().activeProjectId;
+  if (candidate && projects.some((p) => p.id === candidate)) {
+    return candidate;
+  }
+  return projects[0].id;
 }
 
 const LOCAL_NOTES_VAULT_KEY = 'dupe_local_notes_v1';
