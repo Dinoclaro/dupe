@@ -24,6 +24,7 @@ import {
 import { ExplorerSidebar } from './components/Sidebar/ExplorerSidebar';
 import { PdfReaderPane } from './components/Reader/PdfReaderPane';
 import { LatexEditorPane } from './components/Editor/LatexEditorPane';
+import { buildCommentCountMap } from './components/Editor/commentMarkers';
 import { CompiledPreviewPane } from './components/Editor/CompiledPreviewPane';
 import { DiagramPane } from './components/Diagram/DiagramPane';
 import {
@@ -221,6 +222,11 @@ export const App: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState('Ready.');
 
   const activeSourceText = fileBuffers[activeEditorPath] ?? DEFAULT_LATEX_TEMPLATE;
+  const commentsMdText = fileBuffers['notes/comments.md'] || '';
+  const commentCountsByFile = useMemo(
+    () => buildCommentCountMap(commentsMdText),
+    [commentsMdText],
+  );
 
   const [compiled, setCompiled] = useState<CompileResponse>(() =>
     compileLatexPreview({
@@ -320,6 +326,25 @@ export const App: React.FC = () => {
       setProjectCitedKeys(res.cited_keys);
     }
     saveWorkspaceSnapshot({ projectTree: res.files });
+    if (res.files.some((f) => f.path === 'notes/comments.md')) {
+      void api
+        .readProjectFile(projectId, 'notes/comments.md')
+        .then((cRes) => {
+          const resolved = resolveNoteWithLocalWins(cRes.path, cRes.content);
+          setFileBuffers((prev) => {
+            if (prev['notes/comments.md'] === resolved.content) {
+              return prev;
+            }
+            const next = { ...prev, 'notes/comments.md': resolved.content };
+            saveWorkspaceSnapshot({ fileBuffers: next });
+            return next;
+          });
+          setSavedBuffers((prev) => ({ ...prev, 'notes/comments.md': resolved.content }));
+        })
+        .catch(() => {
+          // ignore if offline
+        });
+    }
     return res.files;
   }, []);
 
@@ -1357,6 +1382,7 @@ export const App: React.FC = () => {
           source !== savedBuffers[filePath]
         }
         readOnly={isGeneratedReadOnly}
+        commentsMd={commentsMdText}
         jumpToLine={jumpTargets[filePath] || null}
         onChangeSource={(next) => {
           if (filePath.endsWith('.tex')) {
@@ -1592,6 +1618,7 @@ export const App: React.FC = () => {
           <ExplorerSidebar
             papers={papers}
             citedBibKeys={Array.from(new Set([...projectCitedKeys, ...compiled.citedKeys]))}
+            commentCountsByFile={commentCountsByFile}
             projects={projects}
             activeProject={activeProject}
             projectFiles={projectTree}

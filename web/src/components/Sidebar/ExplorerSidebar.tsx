@@ -97,6 +97,7 @@ export function buildFolderTree(entries: ProjectTreeEntry[]): FolderTreeNode {
 interface ExplorerSidebarProps {
   papers: Paper[];
   citedBibKeys?: string[];
+  commentCountsByFile?: Record<string, { open: number; addressed: number }>;
   projects: ProjectConfig[];
   activeProject: ProjectConfig | null;
   projectFiles: ProjectTreeEntry[];
@@ -192,6 +193,7 @@ interface SidebarContextMenuState {
 export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   papers,
   citedBibKeys = [],
+  commentCountsByFile = {},
   projects,
   activeProject,
   projectFiles,
@@ -884,6 +886,16 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                     <span className="tree-primary-text">{shortName}</span>
                   </div>
                   <div className="tree-row-actions" onClick={(e) => e.stopPropagation()}>
+                    {commentCountsByFile[file.path] && (commentCountsByFile[file.path].open > 0 || commentCountsByFile[file.path].addressed > 0) && (
+                      <span
+                        className={`comment-tree-badge ${commentCountsByFile[file.path].open > 0 ? 'open' : 'addressed'}`}
+                        title={`${commentCountsByFile[file.path].open} open, ${commentCountsByFile[file.path].addressed} addressed comment(s)`}
+                      >
+                        {commentCountsByFile[file.path].open > 0
+                          ? `💬${commentCountsByFile[file.path].open}`
+                          : `✓${commentCountsByFile[file.path].addressed}`}
+                      </span>
+                    )}
                     {file.git_status && !file.path.startsWith('refs/') && (
                       <span
                         className={`git-badge git-badge-${file.git_status.toLowerCase()}`}

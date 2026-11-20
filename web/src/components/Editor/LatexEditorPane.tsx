@@ -12,6 +12,11 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { Paper } from '../../api/client';
 import { renderMarkdownPreview } from '../../workers/latexCompiler';
 import { createCitationCompletionSource } from './citationCompletion';
+import {
+  commentMarkerExtensions,
+  resolveCommentAnchors,
+  setCommentAnchorsEffect,
+} from './commentMarkers';
 
 export function convertDrawioClipboardToSnippet(
   rawText: string,
@@ -81,6 +86,7 @@ interface LatexEditorPaneProps {
   saving: boolean;
   dirty?: boolean;
   readOnly?: boolean;
+  commentsMd?: string;
   jumpToLine?: { line: number; seq: number } | null;
   onChangeSource: (next: string) => void;
   onSaveSource: () => Promise<void>;
@@ -100,6 +106,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   saving,
   dirty = false,
   readOnly = false,
+  commentsMd = '',
   jumpToLine = null,
   onChangeSource,
   onSaveSource,
@@ -127,10 +134,16 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     isMarkdown ? (readOnly ? 'preview' : 'raw') : 'raw',
   );
   const [showCommentBox, setShowCommentBox] = useState(false);
+  const [showCommentsList, setShowCommentsList] = useState(false);
   const [commentQuote, setCommentQuote] = useState('');
   const [commentLocation, setCommentLocation] = useState('');
   const [commentText, setCommentText] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
+
+  const fileCommentAnchors = useMemo(
+    () => resolveCommentAnchors(commentsMd, fileLabel, source),
+    [commentsMd, fileLabel, source],
+  );
 
   const openCommentDrawer = () => {
     const view = editorViewRef.current;
@@ -203,6 +216,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
 
     const extensions: Extension[] = [
       lineNumbers(),
+      ...commentMarkerExtensions,
       history(),
       search(),
       keymap.of([
@@ -282,6 +296,12 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     });
     editorViewRef.current = view;
 
+    if (fileCommentAnchors.length > 0) {
+      view.dispatch({
+        effects: setCommentAnchorsEffect.of(fileCommentAnchors),
+      });
+    }
+
     if (pendingOpenFindRef.current) {
       pendingOpenFindRef.current = false;
       openSearchPanel(view);
@@ -320,6 +340,16 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       });
     }
   }, [source]);
+
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view) {
+      return;
+    }
+    view.dispatch({
+      effects: setCommentAnchorsEffect.of(fileCommentAnchors),
+    });
+  }, [fileCommentAnchors]);
 
   useEffect(() => {
     if (!jumpToLine || jumpToLine.line < 1) {
@@ -462,6 +492,16 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
           >
             🔍 Find
           </button>
+          {fileCommentAnchors.length > 0 && (
+            <button
+              type="button"
+              className={`btn-tiny ${showCommentsList ? 'active-btn' : ''}`}
+              onClick={() => setShowCommentsList((v) => !v)}
+              title="Show commented passages in this file"
+            >
+              💬 {fileCommentAnchors.filter((a) => a.comment.open).length || fileCommentAnchors.length}
+            </button>
+          )}
           {onAddComment && (
             <button
               type="button"
@@ -496,6 +536,48 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
           )}
         </div>
       </div>
+
+      {showCommentsList && fileCommentAnchors.length > 0 && (
+        <div className="inline-bib-drawer">
+          <div className="row-gap" style={{ justifyContent: 'space-between' }}>
+            <strong>Comments in {fileLabel}</strong>
+            <button type="button" className="btn-tiny" onClick={() => setShowCommentsList(false)}>
+              Close
+            </button>
+          </div>
+          {fileCommentAnchors.map((anchor, idx) => (
+            <div
+              key={`${anchor.line}-${idx}`}
+              className="tree-row"
+              onClick={() => {
+                const view = editorViewRef.current;
+                if (view && anchor.line >= 1 && anchor.line <= view.state.doc.lines) {
+                  const lineInfo = view.state.doc.line(anchor.line);
+                  view.dispatch({
+                    selection: {
+                      anchor: anchor.from ?? lineInfo.from,
+                      head: anchor.to ?? lineInfo.to,
+                    },
+                    effects: EditorView.scrollIntoView(anchor.from ?? lineInfo.from, { y: 'center' }),
+                  });
+                  view.focus();
+                }
+              }}
+              title="Click to jump to commented line"
+            >
+              <span className="file-icon">{anchor.comment.open ? '💬' : '✓'}</span>
+              <div className="tree-label-col">
+                <span className="tree-primary-text">
+                  Line {anchor.line}: {anchor.comment.comment}
+                </span>
+                {anchor.comment.quote && (
+                  <span className="tree-sub-text">&ldquo;{anchor.comment.quote}&rdquo;</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {showCommentBox && onAddComment && (
         <form className="inline-bib-drawer" onSubmit={(e) => void handleSubmitComment(e)}>

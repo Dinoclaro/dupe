@@ -26,6 +26,10 @@ import {
 } from '../api/client';
 import { buildFolderTree } from '../components/Sidebar/ExplorerSidebar';
 import { convertDrawioClipboardToSnippet } from '../components/Editor/LatexEditorPane';
+import {
+  buildCommentCountMap,
+  resolveCommentAnchors,
+} from '../components/Editor/commentMarkers';
 
 const SAMPLE_PAPERS: Paper[] = [
   {
@@ -264,5 +268,32 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     const resolvedChanges = resolveNoteWithLocalWins('notes/changes.md', '# changes\n\n- Old');
     expect(resolvedChanges.content).toContain('New local bullet');
     expect(resolvedChanges.shouldPushToServer).toBe(true);
+  });
+
+  it('parses comments.md into gutter anchors and file comment counts', () => {
+    const commentsMd = `# Project Comments & Annotations
+
+## Open Comments
+
+- [ ] **[2026-11-20 07:20] \`paper/experiments.tex\` (line 2)**
+  > "We compare against offline baselines"
+  **Comment:** Tighten this framing.
+
+## Addressed Comments
+
+- [x] **[2026-11-19 20:46] \`paper/experiments.tex\` (line 3)**
+  > "Done section"
+  **Comment:** Looks good now.
+`;
+    const counts = buildCommentCountMap(commentsMd);
+    expect(counts['paper/experiments.tex']).toEqual({ open: 1, addressed: 1 });
+
+    const doc = '\\section{Exp}\nWe compare against offline baselines here.\nDone section.\n';
+    const anchors = resolveCommentAnchors(commentsMd, 'paper/experiments.tex', doc);
+    expect(anchors).toHaveLength(2);
+    expect(anchors[0].line).toBe(2);
+    expect(anchors[0].comment.open).toBe(true);
+    expect(anchors[1].line).toBe(3);
+    expect(anchors[1].comment.open).toBe(false);
   });
 });
