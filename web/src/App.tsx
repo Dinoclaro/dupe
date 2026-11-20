@@ -1530,12 +1530,8 @@ export const App: React.FC = () => {
   const hasRightSplit = rightTabs.length > 0;
   const currentHighlightedTabId =
     focusedGroup === 0 ? activeLeftTab?.id || null : activeRightTab?.id || null;
-  const hasLatexOrPreviewOpen = useMemo(
-    () =>
-      [...leftTabs, ...rightTabs].some(
-        (t) => t.kind === 'tex' || t.kind === 'bib' || t.kind === 'preview',
-      ),
-    [leftTabs, rightTabs],
+  const hasLatexOrPreviewOpen = [...leftTabs, ...rightTabs].some(
+    (t) => t.kind === 'tex' || t.kind === 'bib' || t.kind === 'preview',
   );
 
   return (
