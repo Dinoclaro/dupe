@@ -1,11 +1,13 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -136,6 +139,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/compile", s.requireAuth(s.handleCompileProject))
 	mux.HandleFunc("GET /api/projects/{id}/compiled.pdf", s.requireAuth(s.handleStreamCompiledPDF))
 	mux.HandleFunc("GET /api/projects/{id}/synctex", s.requireAuth(s.handleSyncTexLookup))
+	mux.HandleFunc("GET /api/projects/{id}/synctex-forward", s.requireAuth(s.handleSyncTexForward))
 	mux.HandleFunc("GET /api/projects/{id}/search", s.requireAuth(s.handleSearchProject))
 	mux.HandleFunc("POST /api/projects/{id}/comments", s.requireAuth(s.handleAddProjectComment))
 	mux.HandleFunc("POST /api/projects/{id}/context", s.requireAuth(s.handleGatherProjectContext))
@@ -149,11 +153,105 @@ func (s *Server) routes() http.Handler {
 	if s.webDistDir != "" {
 		if info, err := os.Stat(s.webDistDir); err == nil && info.IsDir() {
 			fileServer := http.FileServer(http.Dir(s.webDistDir))
-			mux.Handle("/", fileServer)
+			mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/assets/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else if r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".html") {
+					w.Header().Set("Cache-Control", "no-cache")
+				}
+				fileServer.ServeHTTP(w, r)
+			}))
 		}
 	}
 
-	return mux
+	return gzipMiddleware(mux)
+}
+
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		gz, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		return gz
+	},
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz          *gzip.Writer
+	wroteHeader bool
+	passthrough bool
+}
+
+func isCompressiblePath(path string) bool {
+	lower := strings.ToLower(path)
+	for _, ext := range []string{".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2", ".gz", ".zip", ".wasm"} {
+		if strings.HasSuffix(lower, ext) {
+			return false
+		}
+	}
+	if strings.HasSuffix(lower, "/file") && strings.HasPrefix(lower, "/api/papers/") {
+		return false
+	}
+	return true
+}
+
+func (g *gzipResponseWriter) WriteHeader(statusCode int) {
+	if g.wroteHeader {
+		return
+	}
+	g.wroteHeader = true
+	ct := strings.ToLower(g.Header().Get("Content-Type"))
+	if statusCode == http.StatusNoContent || statusCode == http.StatusNotModified ||
+		strings.Contains(ct, "application/pdf") ||
+		strings.Contains(ct, "font/") ||
+		strings.Contains(ct, "image/png") ||
+		strings.Contains(ct, "image/jpeg") ||
+		strings.Contains(ct, "image/webp") ||
+		g.Header().Get("Content-Encoding") != "" {
+		g.passthrough = true
+		g.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+	g.Header().Del("Content-Length")
+	g.Header().Set("Content-Encoding", "gzip")
+	g.Header().Add("Vary", "Accept-Encoding")
+	gz := gzipWriterPool.Get().(*gzip.Writer)
+	gz.Reset(g.ResponseWriter)
+	g.gz = gz
+	g.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (g *gzipResponseWriter) Write(p []byte) (int, error) {
+	if !g.wroteHeader {
+		if g.Header().Get("Content-Type") == "" {
+			g.Header().Set("Content-Type", http.DetectContentType(p))
+		}
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.passthrough || g.gz == nil {
+		return g.ResponseWriter.Write(p)
+	}
+	return g.gz.Write(p)
+}
+
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead ||
+			!strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") ||
+			strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
+			!isCompressiblePath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gw := &gzipResponseWriter{ResponseWriter: w}
+		defer func() {
+			if gw.gz != nil {
+				_ = gw.gz.Close()
+				gw.gz.Reset(io.Discard)
+				gzipWriterPool.Put(gw.gz)
+			}
+		}()
+		next.ServeHTTP(gw, r)
+	})
 }
 
 func envOrDefault(key, fallback string) string {

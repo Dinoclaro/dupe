@@ -1,15 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorState, Extension } from '@codemirror/state';
-import { EditorView, keymap, lineNumbers } from '@codemirror/view';
+import {
+  EditorView,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  keymap,
+  lineNumbers,
+} from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { openSearchPanel, search, searchKeymap } from '@codemirror/search';
-import { autocompletion } from '@codemirror/autocomplete';
-import { StreamLanguage } from '@codemirror/language';
+import { autocompletion, closeBrackets } from '@codemirror/autocomplete';
+import { StreamLanguage, bracketMatching } from '@codemirror/language';
 import { stex } from '@codemirror/legacy-modes/mode/stex';
 import { markdown } from '@codemirror/lang-markdown';
 import { unifiedMergeView } from '@codemirror/merge';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { Paper } from '../../api/client';
+import { CompileProjectResponse, Paper } from '../../api/client';
 import { renderMarkdownPreview } from '../../workers/latexCompiler';
 import { createCitationCompletionSource } from './citationCompletion';
 import {
@@ -17,6 +23,18 @@ import {
   resolveCommentAnchors,
   setCommentAnchorsEffect,
 } from './commentMarkers';
+import {
+  checkLatexStructure,
+  latexDiagnosticExtensions,
+  matchDiagnosticsForFile,
+  normalizeDiagnosticRelPath,
+  setLatexDiagnosticsEffect,
+} from './latexDiagnostics';
+
+const editorViewportCache = new Map<
+  string,
+  { anchor: number; head: number; scrollTop: number }
+>();
 
 export function convertDrawioClipboardToSnippet(
   rawText: string,
@@ -87,12 +105,18 @@ interface LatexEditorPaneProps {
   dirty?: boolean;
   readOnly?: boolean;
   commentsMd?: string;
+  compileResult?: CompileProjectResponse | null;
+  compilingPdf?: boolean;
+  autoCompile?: boolean;
+  onToggleAutoCompile?: () => void;
   jumpToLine?: { line: number; seq: number } | null;
   onChangeSource: (next: string) => void;
-  onSaveSource: () => Promise<void>;
+  onSaveSource: (contentOverride?: string) => Promise<void>;
   onRevertToHead?: () => Promise<void>;
   onAcceptAgentEdits?: () => void;
   onOpenPreviewSplit?: () => void;
+  onJumpToFile?: (relPath: string, line?: number) => void;
+  onForwardSyncTex?: (fileLabel: string, line: number) => void;
   onAddComment?: (source: string, location: string, quote: string, comment: string) => Promise<void>;
   registerInsertSnippet: (fn: (snippet: string) => void) => void;
 }
@@ -107,12 +131,18 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   dirty = false,
   readOnly = false,
   commentsMd = '',
+  compileResult = null,
+  compilingPdf = false,
+  autoCompile = false,
+  onToggleAutoCompile,
   jumpToLine = null,
   onChangeSource,
   onSaveSource,
   onRevertToHead,
   onAcceptAgentEdits,
   onOpenPreviewSplit,
+  onJumpToFile,
+  onForwardSyncTex,
   onAddComment,
   registerInsertSnippet,
 }) => {
@@ -129,6 +159,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   onSaveRef.current = onSaveSource;
 
   const isMarkdown = fileLabel.endsWith('.md');
+  const isTex = fileLabel.endsWith('.tex');
   const [diffEnabled, setDiffEnabled] = useState<boolean>(false);
   const [mdViewMode, setMdViewMode] = useState<'preview' | 'split' | 'raw'>(
     isMarkdown ? (readOnly ? 'preview' : 'raw') : 'raw',
@@ -139,11 +170,25 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
   const [commentLocation, setCommentLocation] = useState('');
   const [commentText, setCommentText] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
+  const [dismissedBannerVersion, setDismissedBannerVersion] = useState<string>('');
 
   const fileCommentAnchors = useMemo(
     () => resolveCommentAnchors(commentsMd, fileLabel, source),
     [commentsMd, fileLabel, source],
   );
+
+  const structuralDiagnostics = useMemo(
+    () => (isTex && !readOnly ? checkLatexStructure(source, fileLabel) : []),
+    [isTex, readOnly, source, fileLabel],
+  );
+
+  const fileDiagnostics = useMemo(() => {
+    if (!isTex) {
+      return [];
+    }
+    const compilerDiags = matchDiagnosticsForFile(compileResult, fileLabel);
+    return [...compilerDiags, ...structuralDiagnostics];
+  }, [isTex, compileResult, fileLabel, structuralDiagnostics]);
 
   const openCommentDrawer = () => {
     const view = editorViewRef.current;
@@ -216,6 +261,11 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
 
     const extensions: Extension[] = [
       lineNumbers(),
+      highlightActiveLineGutter(),
+      highlightActiveLine(),
+      bracketMatching(),
+      closeBrackets(),
+      ...latexDiagnosticExtensions,
       ...commentMarkerExtensions,
       history(),
       search(),
@@ -225,9 +275,9 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
         ...searchKeymap,
         {
           key: 'Mod-s',
-          run: () => {
+          run: (view) => {
             if (!readOnly) {
-              void onSaveRef.current();
+              void onSaveRef.current(view.state.doc.toString());
             }
             return true;
           },
@@ -285,8 +335,17 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       );
     }
 
+    const cachedViewport = editorViewportCache.get(fileLabel);
+    const initialAnchor = cachedViewport
+      ? Math.min(cachedViewport.anchor, source.length)
+      : 0;
+    const initialHead = cachedViewport
+      ? Math.min(cachedViewport.head, source.length)
+      : 0;
+
     const state = EditorState.create({
       doc: source,
+      selection: { anchor: initialAnchor, head: initialHead },
       extensions,
     });
 
@@ -296,9 +355,20 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     });
     editorViewRef.current = view;
 
+    if (cachedViewport && cachedViewport.scrollTop > 0) {
+      window.requestAnimationFrame(() => {
+        view.scrollDOM.scrollTop = cachedViewport.scrollTop;
+      });
+    }
+
     if (fileCommentAnchors.length > 0) {
       view.dispatch({
         effects: setCommentAnchorsEffect.of(fileCommentAnchors),
+      });
+    }
+    if (fileDiagnostics.length > 0) {
+      view.dispatch({
+        effects: setLatexDiagnosticsEffect.of(fileDiagnostics),
       });
     }
 
@@ -322,6 +392,12 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     });
 
     return () => {
+      const sel = view.state.selection.main;
+      editorViewportCache.set(fileLabel, {
+        anchor: sel.anchor,
+        head: sel.head,
+        scrollTop: view.scrollDOM.scrollTop,
+      });
       view.destroy();
       editorViewRef.current = null;
     };
@@ -335,8 +411,19 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     }
     const currentText = view.state.doc.toString();
     if (currentText !== source) {
+      const prevSel = view.state.selection.main;
+      const prevScrollTop = view.scrollDOM.scrollTop;
       view.dispatch({
         changes: { from: 0, to: currentText.length, insert: source },
+        selection: {
+          anchor: Math.min(prevSel.anchor, source.length),
+          head: Math.min(prevSel.head, source.length),
+        },
+      });
+      window.requestAnimationFrame(() => {
+        if (editorViewRef.current === view) {
+          view.scrollDOM.scrollTop = prevScrollTop;
+        }
       });
     }
   }, [source]);
@@ -350,6 +437,16 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       effects: setCommentAnchorsEffect.of(fileCommentAnchors),
     });
   }, [fileCommentAnchors]);
+
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view) {
+      return;
+    }
+    view.dispatch({
+      effects: setLatexDiagnosticsEffect.of(fileDiagnostics),
+    });
+  }, [fileDiagnostics]);
 
   useEffect(() => {
     if (!jumpToLine || jumpToLine.line < 1) {
@@ -474,6 +571,22 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
               ◫ Open Preview
             </button>
           )}
+          {isTex && onForwardSyncTex && (
+            <button
+              type="button"
+              className="btn-tiny"
+              onClick={() => {
+                const view = editorViewRef.current;
+                const line = view
+                  ? view.state.doc.lineAt(view.state.selection.main.head).number
+                  : 1;
+                onForwardSyncTex(fileLabel, line);
+              }}
+              title="Locate current LaTeX line in the compiled PDF (Forward SyncTeX)"
+            >
+              📍 To PDF
+            </button>
+          )}
           <button
             type="button"
             className="btn-tiny"
@@ -521,21 +634,115 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
               >
                 {saving ? '↻ Auto-saving…' : dirty ? '● Unsaved…' : '✓ Auto-saved'}
               </span>
+              {isTex && onToggleAutoCompile && (
+                <button
+                  type="button"
+                  className={`btn-tiny ${autoCompile ? 'active-btn' : ''}`}
+                  onClick={onToggleAutoCompile}
+                  title="Automatically recompile PDF ~2.5s after you pause typing"
+                >
+                  {autoCompile ? '⚡ Auto: ON' : '⚡ Auto: OFF'}
+                </button>
+              )}
               {!isMarkdown && (
                 <button
                   type="button"
                   className="btn-primary btn-tiny"
-                  disabled={saving}
-                  onClick={() => void onSaveSource()}
+                  disabled={saving || compilingPdf}
+                  onClick={() => {
+                    const liveText = editorViewRef.current?.state.doc.toString();
+                    void onSaveSource(liveText);
+                  }}
                   title="Save and recompile LaTeX PDF (Ctrl+S)"
                 >
-                  ⟳ Compile PDF
+                  {compilingPdf ? '↻ Compiling…' : '⟳ Compile PDF'}
                 </button>
               )}
             </>
           )}
         </div>
       </div>
+
+      {isTex &&
+        (() => {
+          const compilerErrs = compileResult?.errors || [];
+          const hasCompilerFailure = Boolean(
+            compileResult && (!compileResult.success || compilerErrs.length > 0),
+          );
+          const allBannerErrors =
+            compilerErrs.length > 0 ? compilerErrs : structuralDiagnostics;
+          if (!hasCompilerFailure && structuralDiagnostics.length === 0) {
+            return null;
+          }
+          const isCompilerFault = compileResult?.failure_kind === 'compiler';
+          const bannerSig = `${compileResult?.duration_ms || 0}:${allBannerErrors
+            .map((e) => `${e.file}:${e.line || 0}:${e.message}`)
+            .join('|')}`;
+          if (dismissedBannerVersion === bannerSig) {
+            return null;
+          }
+          return (
+            <div
+              className={`tex-diag-banner ${isCompilerFault ? 'compiler' : 'latex-code'}`}
+            >
+              <div className="tex-diag-banner-head">
+                <strong>
+                  {isCompilerFault
+                    ? '⚙ Compiler / Server Issue (not your LaTeX syntax)'
+                    : compilerErrs.length > 0
+                      ? `✕ LaTeX Code Error (${compilerErrs.length})`
+                      : `✕ LaTeX Syntax Check (${structuralDiagnostics.length})`}
+                </strong>
+                <button
+                  type="button"
+                  className="btn-tiny"
+                  onClick={() => setDismissedBannerVersion(bannerSig)}
+                >
+                  Dismiss
+                </button>
+              </div>
+              <div className="tex-diag-banner-list">
+                {allBannerErrors.slice(0, 4).map((errItem, idx) => {
+                  const targetRel =
+                    normalizeDiagnosticRelPath(errItem.file) || fileLabel;
+                  return (
+                    <button
+                      key={`banner-err-${idx}`}
+                      type="button"
+                      className="tex-diag-chip"
+                      onClick={() => {
+                        if (targetRel === fileLabel && editorViewRef.current) {
+                          const ln = Math.min(
+                            Math.max(1, errItem.line || 1),
+                            editorViewRef.current.state.doc.lines,
+                          );
+                          const info = editorViewRef.current.state.doc.line(ln);
+                          editorViewRef.current.dispatch({
+                            selection: { anchor: info.from, head: info.to },
+                            effects: EditorView.scrollIntoView(info.from, { y: 'center' }),
+                          });
+                          editorViewRef.current.focus();
+                        } else if (onJumpToFile) {
+                          onJumpToFile(targetRel, errItem.line);
+                        }
+                      }}
+                      title="Click to jump directly to this line"
+                    >
+                      <code>
+                        {targetRel}
+                        {errItem.line ? `:${errItem.line}` : ''}
+                      </code>{' '}
+                      <span>{errItem.message}</span>
+                      {errItem.context && (
+                        <code className="tex-diag-chip-ctx">{errItem.context}</code>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
       {showCommentsList && fileCommentAnchors.length > 0 && (
         <div className="inline-bib-drawer">

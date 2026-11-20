@@ -176,6 +176,21 @@ export const App: React.FC = () => {
   const [activeEditorPath, setActiveEditorPath] = useState<string>('paper/main.tex');
   const [savingSource, setSavingSource] = useState(false);
   const autoSaveTimersRef = useRef<Record<string, number>>({});
+  const autoCompileTimersRef = useRef<Record<string, number>>({});
+  const dirtyBuffersRef = useRef<Set<string>>(new Set());
+  const hasCompiledPdfOnDiskRef = useRef(false);
+  const lastPullAtRef = useRef<number>(0);
+  const pdfPageSizePtRef = useRef<{ width: number; height: number }>({
+    width: 612,
+    height: 792,
+  });
+  const [autoCompile, setAutoCompile] = useState(false);
+  const [forwardSyncTarget, setForwardSyncTarget] = useState<{
+    page: number;
+    x: number;
+    y: number;
+    seq: number;
+  } | null>(null);
   const [jumpTargets, setJumpTargets] = useState<
     Record<string, { line: number; seq: number }>
   >({});
@@ -321,6 +336,28 @@ export const App: React.FC = () => {
     if (res.cited_keys) {
       setProjectCitedKeys(res.cited_keys);
     }
+    hasCompiledPdfOnDiskRef.current = Boolean(res.compiled_pdf?.available);
+    if (res.compiled_pdf?.available) {
+      const meta = res.compiled_pdf;
+      setCompileResult((prev) => {
+        if (prev && prev.duration_ms > 0 && prev.root_tex === meta.root_tex) {
+          return prev;
+        }
+        return {
+          success: true,
+          failure_kind: 'none',
+          root_tex: meta.root_tex,
+          pdf_available: true,
+          duration_ms: 0,
+          errors: [],
+          warnings: [],
+          raw_log: '',
+        };
+      });
+      if (meta.version) {
+        setPdfVersion(meta.version);
+      }
+    }
     saveWorkspaceSnapshot({ projectTree: res.files });
     if (res.files.some((f) => f.path === 'notes/comments.md')) {
       void api
@@ -352,18 +389,37 @@ export const App: React.FC = () => {
         setCompileResult(res);
         setPdfVersion((v) => v + 1);
         if (!res.success || res.errors.length > 0) {
-          setStatusMessage(
-            `LaTeX compile finished with ${res.errors.length} error(s) — check Logs tab.`,
-          );
+          const prefix =
+            res.failure_kind === 'compiler'
+              ? 'Compiler / server issue'
+              : `LaTeX code error (${res.errors.length})`;
+          setStatusMessage(`${prefix} — check editor banner or Logs tab.`);
         } else {
           setStatusMessage(
             `Compiled ${res.root_tex} (${(res.duration_ms / 1000).toFixed(1)}s, ${res.warnings.length} warnings).`,
           );
         }
       } catch (err) {
-        setStatusMessage(
-          `Compiler call failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        const msg = err instanceof Error ? err.message : String(err);
+        setCompileResult((prev) => ({
+          success: false,
+          failure_kind: 'compiler',
+          root_tex: prev?.root_tex || targetTex || 'paper/main.tex',
+          pdf_available: prev?.pdf_available ?? false,
+          duration_ms: 0,
+          errors: [
+            {
+              level: 'error',
+              file: targetTex || prev?.root_tex || 'paper/main.tex',
+              message: `Compiler request failed: ${msg}`,
+              source: 'compiler',
+              category: 'system',
+            },
+          ],
+          warnings: prev?.warnings ?? [],
+          raw_log: msg,
+        }));
+        setStatusMessage(`Compiler call failed: ${msg}`);
       } finally {
         setCompilingPdf(false);
       }
@@ -461,7 +517,9 @@ export const App: React.FC = () => {
         }
       }
 
-      void triggerProjectCompile(chosenId, preferredTex?.path);
+      if (!hasCompiledPdfOnDiskRef.current) {
+        void triggerProjectCompile(chosenId, preferredTex?.path);
+      }
     }
   }, [activeProjectId, refreshProjectTree, triggerProjectCompile]);
 
@@ -470,6 +528,34 @@ export const App: React.FC = () => {
   }, [loadPapers, loadProjects]);
 
   useEffect(() => {
+    const hydrateFromCache = () => {
+      const cached = loadWorkspaceSnapshot();
+      if (!cached.user || !getStoredToken()) {
+        return false;
+      }
+      setUser(cached.user);
+      if (cached.papers) {
+        setPapers(cached.papers);
+      }
+      if (cached.projects && cached.projects.length > 0) {
+        setProjects(cached.projects);
+        setActiveProjectId((prev) => prev || cached.projects![0].id);
+      }
+      if (cached.projectTree) {
+        setProjectTree(cached.projectTree);
+      }
+      if (cached.fileBuffers) {
+        setFileBuffers((prev) => ({ ...prev, ...cached.fileBuffers }));
+      }
+      setAuthChecking(false);
+      return true;
+    };
+
+    const hydratedEarly = hydrateFromCache();
+    if (hydratedEarly) {
+      setStatusMessage('Loaded cached workspace — syncing with server…');
+    }
+
     const checkServer = async () => {
       try {
         const h = await api.health();
@@ -488,7 +574,7 @@ export const App: React.FC = () => {
     };
 
     void checkServer();
-    const interval = window.setInterval(() => void checkServer(), 15000);
+    const interval = window.setInterval(() => void checkServer(), 20000);
 
     api
       .me()
@@ -496,27 +582,38 @@ export const App: React.FC = () => {
         setUser(u);
         saveWorkspaceSnapshot({ user: u });
         await loadInitialWorkspace();
+        setStatusMessage('Synced with server.');
       })
-      .catch(() => {
+      .catch((err) => {
+        const errMsg = err instanceof Error ? err.message.toLowerCase() : '';
+        const isUnauthorized =
+          errMsg.includes('unauthorized') || errMsg.includes('401') || errMsg.includes('invalid token');
+        if (isUnauthorized) {
+          setStoredToken(null);
+          setUser(null);
+          return;
+        }
         const cached = loadWorkspaceSnapshot();
         if (cached.user) {
           setServerOnline(false);
-          setUser(cached.user);
-          if (cached.papers) {
-            setPapers(cached.papers);
-          }
-          if (cached.projects && cached.projects.length > 0) {
-            setProjects(cached.projects);
-            setActiveProjectId(cached.projects[0].id);
-          }
-          if (cached.projectTree) {
-            setProjectTree(cached.projectTree);
-          }
-          if (cached.fileBuffers) {
-            setFileBuffers((prev) => ({ ...prev, ...cached.fileBuffers }));
+          if (!hydratedEarly) {
+            setUser(cached.user);
+            if (cached.papers) {
+              setPapers(cached.papers);
+            }
+            if (cached.projects && cached.projects.length > 0) {
+              setProjects(cached.projects);
+              setActiveProjectId(cached.projects[0].id);
+            }
+            if (cached.projectTree) {
+              setProjectTree(cached.projectTree);
+            }
+            if (cached.fileBuffers) {
+              setFileBuffers((prev) => ({ ...prev, ...cached.fileBuffers }));
+            }
           }
           setStatusMessage(
-            'Home server unreachable — loaded cached workspace (Wi-Fi / Direct Git mode active).',
+            'Slow or offline connection — running from local workspace cache.',
           );
           return;
         }
@@ -664,6 +761,79 @@ export const App: React.FC = () => {
         }));
       }
     }
+
+    const openTargetTabs = () => {
+      if (jumpLine && jumpLine >= 1) {
+        setJumpTargets((prev) => ({
+          ...prev,
+          [file.path]: { line: jumpLine, seq: (prev[file.path]?.seq || 0) + 1 },
+        }));
+      }
+
+      if (file.kind === 'tex') {
+        setActiveEditorPath(file.path);
+        const docTab: StudioTab = {
+          id: `file:${file.path}`,
+          title: file.path,
+          kind: file.kind,
+          filePath: file.path,
+        };
+        const previewTab: StudioTab = {
+          id: 'preview:compiled',
+          title: 'Compiled Paper.pdf',
+          kind: 'preview',
+        };
+        if (inSplit) {
+          openTabInGroup(docTab, 1);
+        } else {
+          openTabInGroup(docTab, 0);
+          openTabInGroup(previewTab, 1);
+        }
+        return;
+      }
+
+      if (file.kind === 'markdown') {
+        const mdTab: StudioTab = {
+          id: `file:${file.path}`,
+          title: file.path,
+          kind: 'markdown',
+          filePath: file.path,
+        };
+        openTabInGroup(mdTab, inSplit ? 1 : 0);
+        return;
+      }
+
+      if (file.kind === 'diagram') {
+        const stem = file.path
+          .replace(/^(diagrams|paper\/figures)\//, '')
+          .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
+        if (!diagramsXmlByStem[stem]) {
+          setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: DEFAULT_DRAWIO_XML }));
+        }
+        const diagTab: StudioTab = {
+          id: `file:${file.path}`,
+          title: `diagrams/${stem}.svg`,
+          kind: 'diagram',
+          filePath: stem,
+        };
+        openTabInGroup(diagTab, inSplit ? 1 : 0);
+        return;
+      }
+
+      const genericTab: StudioTab = {
+        id: `file:${file.path}`,
+        title: file.path,
+        kind: file.kind,
+        filePath: file.path,
+      };
+      openTabInGroup(genericTab, inSplit ? 1 : 0);
+    };
+
+    const hasCachedBuffer = fileBuffers[file.path] !== undefined;
+    if (hasCachedBuffer) {
+      openTargetTabs();
+    }
+
     if (projId) {
       try {
         const res = await api.readProjectFile(projId, file.path);
@@ -700,8 +870,17 @@ export const App: React.FC = () => {
           const diskDiffersFromHead = Boolean(
             res.head_content && res.head_content !== res.content,
           );
-          setFileBuffers((prev) => ({ ...prev, [res.path]: res.content }));
-          setSavedBuffers((prev) => ({ ...prev, [res.path]: res.content }));
+          if (!dirtyBuffersRef.current.has(res.path)) {
+            setFileBuffers((prev) => {
+              if (prev[res.path] === res.content) {
+                return prev;
+              }
+              const next = { ...prev, [res.path]: res.content };
+              saveWorkspaceSnapshot({ fileBuffers: next });
+              return next;
+            });
+            setSavedBuffers((prev) => ({ ...prev, [res.path]: res.content }));
+          }
           setHeadBuffers((prev) => ({ ...prev, [res.path]: res.head_content }));
           setExternalAgentEdits((prev) => ({
             ...prev,
@@ -719,70 +898,9 @@ export const App: React.FC = () => {
       }
     }
 
-    if (jumpLine && jumpLine >= 1) {
-      setJumpTargets((prev) => ({
-        ...prev,
-        [file.path]: { line: jumpLine, seq: (prev[file.path]?.seq || 0) + 1 },
-      }));
+    if (!hasCachedBuffer) {
+      openTargetTabs();
     }
-
-    if (file.kind === 'tex') {
-      setActiveEditorPath(file.path);
-      const docTab: StudioTab = {
-        id: `file:${file.path}`,
-        title: file.path,
-        kind: file.kind,
-        filePath: file.path,
-      };
-      const previewTab: StudioTab = {
-        id: 'preview:compiled',
-        title: 'Compiled Paper.pdf',
-        kind: 'preview',
-      };
-      if (inSplit) {
-        openTabInGroup(docTab, 1);
-      } else {
-        openTabInGroup(docTab, 0);
-        openTabInGroup(previewTab, 1);
-      }
-      return;
-    }
-
-    if (file.kind === 'markdown') {
-      const mdTab: StudioTab = {
-        id: `file:${file.path}`,
-        title: file.path,
-        kind: 'markdown',
-        filePath: file.path,
-      };
-      openTabInGroup(mdTab, inSplit ? 1 : 0);
-      return;
-    }
-
-    if (file.kind === 'diagram') {
-      const stem = file.path
-        .replace(/^(diagrams|paper\/figures)\//, '')
-        .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
-      if (!diagramsXmlByStem[stem]) {
-        setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: DEFAULT_DRAWIO_XML }));
-      }
-      const diagTab: StudioTab = {
-        id: `file:${file.path}`,
-        title: `diagrams/${stem}.svg`,
-        kind: 'diagram',
-        filePath: stem,
-      };
-      openTabInGroup(diagTab, inSplit ? 1 : 0);
-      return;
-    }
-
-    const genericTab: StudioTab = {
-      id: `file:${file.path}`,
-      title: file.path,
-      kind: file.kind,
-      filePath: file.path,
-    };
-    openTabInGroup(genericTab, inSplit ? 1 : 0);
   };
 
   const handleOpenCompiledPreview = (inSplit: boolean) => {
@@ -857,6 +975,9 @@ export const App: React.FC = () => {
     await handleOpenProjectFile({ path: relPath, kind }, false);
   };
 
+  const createProjectFileRef = useRef(handleCreateProjectFile);
+  createProjectFileRef.current = handleCreateProjectFile;
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!activeProject) {
@@ -872,12 +993,12 @@ export const App: React.FC = () => {
       const suggested = `note-${new Date().toISOString().slice(0, 10)}.md`;
       const entered = window.prompt('New note path in notes/ (e.g. ideas/experiment.md):', suggested);
       if (entered && entered.trim()) {
-        void handleCreateProjectFile('markdown', entered.trim());
+        void createProjectFileRef.current('markdown', entered.trim());
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  });
+  }, [activeProject]);
 
   const handleInsertCitation = (bibtexKey: string) => {
     const isMd = activeEditorPath.endsWith('.md');
@@ -913,6 +1034,7 @@ export const App: React.FC = () => {
         if (filePath.startsWith('notes/')) {
           markLocalNoteSynced(filePath, content);
         }
+        dirtyBuffersRef.current.delete(filePath);
         setSavedBuffers((prev) => ({ ...prev, [filePath]: content }));
         setHeadBuffers((prev) => ({ ...prev, [filePath]: res.head_content }));
         setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
@@ -1109,19 +1231,23 @@ export const App: React.FC = () => {
     ],
   );
 
-  // Automatic background Overleaf pull on project open, window focus, and 60s timer
+  // Automatic background Overleaf pull on project open, throttled focus, and 60s timer
   useEffect(() => {
     if (!activeProject?.id || !activeProject.overleaf_remote || !isOnline) {
       return undefined;
     }
-    void handlePullActiveProject(true);
-    const onFocus = () => {
+    const triggerThrottledPull = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastPullAtRef.current < 45000) {
+        return;
+      }
+      lastPullAtRef.current = now;
       void handlePullActiveProject(true);
     };
+    triggerThrottledPull(true);
+    const onFocus = () => triggerThrottledPull(false);
     window.addEventListener('focus', onFocus);
-    const interval = window.setInterval(() => {
-      void handlePullActiveProject(true);
-    }, 60000);
+    const interval = window.setInterval(() => triggerThrottledPull(true), 60000);
     return () => {
       window.removeEventListener('focus', onFocus);
       window.clearInterval(interval);
@@ -1331,6 +1457,35 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleForwardSyncTex = async (fileLabel: string, line: number) => {
+    if (!activeProject) {
+      return;
+    }
+    handleOpenCompiledPreview(true);
+    try {
+      const sizePt = pdfPageSizePtRef.current;
+      const res = await api.resolveSyncTexForward(
+        activeProject.id,
+        fileLabel,
+        line,
+        activeEditorPath,
+        sizePt.width,
+        sizePt.height,
+      );
+      setForwardSyncTarget({
+        page: res.page,
+        x: res.x,
+        y: res.y,
+        seq: Date.now(),
+      });
+      setStatusMessage(`PDF SyncTeX -> page ${res.page} (${fileLabel}:${line})`);
+    } catch (err) {
+      setStatusMessage(
+        `Forward SyncTeX unavailable: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
   const renderTabContent = (tab: StudioTab | null) => {
     if (!tab) {
       return (
@@ -1362,6 +1517,10 @@ export const App: React.FC = () => {
           pdfVersion={pdfVersion}
           compiled={compiled}
           sourceLabel={activeEditorPath}
+          forwardSyncTarget={forwardSyncTarget}
+          onReportPageSize={(wPt, hPt) => {
+            pdfPageSizePtRef.current = { width: wPt, height: hPt };
+          }}
           onTriggerCompile={async () => {
             if (activeProject) {
               await triggerProjectCompile(activeProject.id, activeEditorPath);
@@ -1417,21 +1576,22 @@ export const App: React.FC = () => {
         }
         readOnly={isGeneratedReadOnly}
         commentsMd={commentsMdText}
+        compileResult={compileResult}
+        compilingPdf={compilingPdf}
+        autoCompile={autoCompile}
+        onToggleAutoCompile={() => setAutoCompile((v) => !v)}
         jumpToLine={jumpTargets[filePath] || null}
         onChangeSource={(next) => {
           if (filePath.endsWith('.tex')) {
             setActiveEditorPath(filePath);
           }
+          dirtyBuffersRef.current.add(filePath);
           if (filePath.startsWith('notes/')) {
             // Instant 0ms local persistence in dupe_local_notes_v1 so local note edits can NEVER be lost
             saveLocalNote(filePath, next, true);
           }
           setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
-          setFileBuffers((prev) => {
-            const updated = { ...prev, [filePath]: next };
-            saveWorkspaceSnapshot({ fileBuffers: updated });
-            return updated;
-          });
+          setFileBuffers((prev) => ({ ...prev, [filePath]: next }));
           if (!isGeneratedReadOnly && activeProject) {
             const existingTimer = autoSaveTimersRef.current[filePath];
             if (existingTimer) {
@@ -1439,17 +1599,38 @@ export const App: React.FC = () => {
             }
             autoSaveTimersRef.current[filePath] = window.setTimeout(() => {
               delete autoSaveTimersRef.current[filePath];
+              saveWorkspaceSnapshot({ fileBuffers: { [filePath]: next } });
               void handleSaveProjectFile(filePath, next, false);
             }, 800);
+
+            if (autoCompile && (filePath.endsWith('.tex') || filePath.endsWith('.bib'))) {
+              const existingCompile = autoCompileTimersRef.current[filePath];
+              if (existingCompile) {
+                window.clearTimeout(existingCompile);
+              }
+              autoCompileTimersRef.current[filePath] = window.setTimeout(() => {
+                delete autoCompileTimersRef.current[filePath];
+                if (autoSaveTimersRef.current[filePath]) {
+                  window.clearTimeout(autoSaveTimersRef.current[filePath]);
+                  delete autoSaveTimersRef.current[filePath];
+                }
+                void handleSaveProjectFile(filePath, next, true);
+              }, 2400);
+            }
           }
         }}
-        onSaveSource={() => {
+        onSaveSource={(contentOverride) => {
           const existingTimer = autoSaveTimersRef.current[filePath];
           if (existingTimer) {
             window.clearTimeout(existingTimer);
             delete autoSaveTimersRef.current[filePath];
           }
-          return handleSaveProjectFile(filePath, undefined, true);
+          const existingCompile = autoCompileTimersRef.current[filePath];
+          if (existingCompile) {
+            window.clearTimeout(existingCompile);
+            delete autoCompileTimersRef.current[filePath];
+          }
+          return handleSaveProjectFile(filePath, contentOverride, true);
         }}
         onRevertToHead={() => handleRevertProjectFile(filePath)}
         onAcceptAgentEdits={() => {
@@ -1457,6 +1638,15 @@ export const App: React.FC = () => {
           setExternalAgentEdits((prev) => ({ ...prev, [filePath]: false }));
         }}
         onOpenPreviewSplit={() => handleOpenCompiledPreview(true)}
+        onJumpToFile={(relPath, line) => {
+          void handleOpenProjectFile(
+            { path: relPath, kind: relPath.endsWith('.bib') ? 'bib' : 'tex' },
+            false,
+            undefined,
+            line,
+          );
+        }}
+        onForwardSyncTex={(fLabel, ln) => void handleForwardSyncTex(fLabel, ln)}
         onAddComment={handleAddProjectComment}
         registerInsertSnippet={(fn) => {
           insertSnippetRef.current = fn;

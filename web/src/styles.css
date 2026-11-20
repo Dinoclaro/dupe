@@ -1345,6 +1345,162 @@ textarea:focus {
   color: #86efac;
 }
 
+/* Inline LaTeX compiler/syntax diagnostics & SyncTeX UX */
+.cm-diag-gutter {
+  width: 20px;
+  text-align: center;
+}
+
+.cm-diag-gutter-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
+.cm-diag-gutter-icon.error {
+  color: #f87171;
+}
+
+.cm-diag-gutter-icon.warning {
+  color: #fbbf24;
+}
+
+.cm-tex-error-line {
+  background: rgba(239, 68, 68, 0.14) !important;
+}
+
+.cm-tex-warn-line {
+  background: rgba(245, 158, 11, 0.08) !important;
+}
+
+.cm-tex-error-mark {
+  text-decoration: underline wavy #f87171;
+  text-underline-offset: 3px;
+}
+
+.cm-tex-warn-mark {
+  text-decoration: underline wavy #fbbf24;
+  text-underline-offset: 3px;
+}
+
+.tex-diag-banner {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tex-diag-banner.latex-code {
+  background: rgba(239, 68, 68, 0.12);
+  border-left: 3px solid #ef4444;
+}
+
+.tex-diag-banner.compiler {
+  background: rgba(168, 85, 247, 0.14);
+  border-left: 3px solid #a855f7;
+}
+
+.tex-diag-banner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tex-diag-banner-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tex-diag-chip {
+  appearance: none;
+  background: rgba(15, 23, 42, 0.85);
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.tex-diag-chip:hover {
+  border-color: #f87171;
+  background: rgba(127, 29, 29, 0.45);
+}
+
+.tex-diag-chip-ctx {
+  color: #fde68a;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-card-context {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  color: #fde68a;
+  overflow-x: auto;
+}
+
+.pdf-progress-strip {
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.14);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.35);
+  flex-shrink: 0;
+}
+
+@keyframes synctexPulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.7);
+    opacity: 0.95;
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(1.35);
+    opacity: 0.7;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.6);
+    opacity: 0;
+  }
+}
+
+.synctex-pulse-marker {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: rgba(74, 222, 128, 0.25);
+  border: 2px solid #4ade80;
+  pointer-events: none;
+  animation: synctexPulse 1.8s ease-out forwards;
+}
+
+
 
 
 

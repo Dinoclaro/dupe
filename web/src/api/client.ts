@@ -107,16 +107,27 @@ export interface LatexDiagnostic {
   file: string;
   line?: number;
   message: string;
+  context?: string;
+  source?: 'latex' | 'bibtex' | 'compiler' | 'client';
+  category?: 'syntax' | 'reference' | 'package' | 'typography' | 'system';
 }
 
 export interface CompileProjectResponse {
   success: boolean;
+  failure_kind?: 'none' | 'latex_code' | 'compiler';
   root_tex: string;
   pdf_available: boolean;
   duration_ms: number;
   errors: LatexDiagnostic[];
   warnings: LatexDiagnostic[];
   raw_log: string;
+}
+
+export interface CompiledPdfMeta {
+  available: boolean;
+  root_tex: string;
+  version?: number;
+  size_bytes?: number;
 }
 
 export interface SearchMatchItem {
@@ -556,7 +567,11 @@ export async function pushFilesToGitHubDirect(
   return pushedCount;
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function apiFetch<T>(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs?: number,
+): Promise<T> {
   if (!path.startsWith('/api/')) {
     throw new Error(`API path must be a relative /api/... path: ${path}`);
   }
@@ -569,7 +584,35 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(path, { ...init, headers });
+  const effectiveTimeout =
+    timeoutMs ??
+    (path.endsWith('/compile') ||
+    path.endsWith('/pull') ||
+    path.endsWith('/sync') ||
+    path.endsWith('/upload')
+      ? 90000
+      : 15000);
+
+  const controller = new AbortController();
+  const externalSignal = init.signal;
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else if (externalSignal) {
+    externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+
+  let response: Response;
+  try {
+    response = await fetch(path, { ...init, headers, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.round(effectiveTimeout / 1000)}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (response.status === 204) {
     return undefined as T;
   }
@@ -692,12 +735,18 @@ export const api = {
     });
   },
 
-  async getProjectTree(
-    id: string,
-  ): Promise<{ project: ProjectConfig; files: ProjectTreeEntry[]; cited_keys?: string[] }> {
-    return apiFetch<{ project: ProjectConfig; files: ProjectTreeEntry[]; cited_keys?: string[] }>(
-      `/api/projects/${id}/tree`,
-    );
+  async getProjectTree(id: string): Promise<{
+    project: ProjectConfig;
+    files: ProjectTreeEntry[];
+    cited_keys?: string[];
+    compiled_pdf?: CompiledPdfMeta;
+  }> {
+    return apiFetch<{
+      project: ProjectConfig;
+      files: ProjectTreeEntry[];
+      cited_keys?: string[];
+      compiled_pdf?: CompiledPdfMeta;
+    }>(`/api/projects/${id}/tree`);
   },
 
   async deleteProjectFile(id: string, filePath: string): Promise<void> {
@@ -794,6 +843,8 @@ export const api = {
     x: number,
     y: number,
     target?: string,
+    pageWidthPt?: number,
+    pageHeightPt?: number,
   ): Promise<{ path: string; line: number; page: number }> {
     const params = new URLSearchParams({
       page: String(page),
@@ -803,8 +854,40 @@ export const api = {
     if (target) {
       params.set('target', target);
     }
+    if (pageWidthPt && pageWidthPt > 0) {
+      params.set('w', pageWidthPt.toFixed(2));
+    }
+    if (pageHeightPt && pageHeightPt > 0) {
+      params.set('h', pageHeightPt.toFixed(2));
+    }
     return apiFetch<{ path: string; line: number; page: number }>(
       `/api/projects/${id}/synctex?${params.toString()}`,
+    );
+  },
+
+  async resolveSyncTexForward(
+    id: string,
+    file: string,
+    line: number,
+    target?: string,
+    pageWidthPt?: number,
+    pageHeightPt?: number,
+  ): Promise<{ page: number; x: number; y: number }> {
+    const params = new URLSearchParams({
+      file,
+      line: String(line),
+    });
+    if (target) {
+      params.set('target', target);
+    }
+    if (pageWidthPt && pageWidthPt > 0) {
+      params.set('w', pageWidthPt.toFixed(2));
+    }
+    if (pageHeightPt && pageHeightPt > 0) {
+      params.set('h', pageHeightPt.toFixed(2));
+    }
+    return apiFetch<{ page: number; x: number; y: number }>(
+      `/api/projects/${id}/synctex-forward?${params.toString()}`,
     );
   },
 

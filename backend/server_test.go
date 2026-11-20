@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -584,6 +586,73 @@ func TestSecurityAllowlistRateLimitAndSQLiteSync(t *testing.T) {
 		t.Fatalf("expected PDF blob to exist on hosted server: %v", err)
 	}
 }
+
+func TestParseTectonicDiagnosticsAndGzip(t *testing.T) {
+	rawLog := strings.Join([]string{
+		`(./experiments.tex`,
+		`LaTeX Warning: Citation 'tarasov2022corl' on page 7 undefined on input line 148.`,
+		`warning: experiments:159: Underfull \hbox (badness 4846) in paragraph at lines 158--159`,
+		`! Undefined control sequence.`,
+		`l.165 \undefinedcommandtest`,
+		`error: ./experiments.tex:165: Undefined control sequence`,
+		`error: halted on potentially-recoverable error as specified`,
+		`warning: internal consistency problem when checking if conference_101719.bbl changed`,
+	}, "\n")
+
+	errs, warns := parseTectonicDiagnostics(rawLog, "conference_101719.tex")
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 filtered error, got %d: %+v", len(errs), errs)
+	}
+	if errs[0].File != "experiments.tex" || errs[0].Line != 165 || errs[0].Context != `\undefinedcommandtest` {
+		t.Fatalf("unexpected error diagnostic: %+v", errs[0])
+	}
+	if len(warns) != 2 {
+		t.Fatalf("expected 2 warnings (citation + typography), got %d: %+v", len(warns), warns)
+	}
+	if warns[0].Category != "reference" || warns[0].Line != 148 || warns[0].File != "experiments.tex" {
+		t.Fatalf("expected citation warning on experiments.tex:148, got %+v", warns[0])
+	}
+	if warns[1].Category != "typography" {
+		t.Fatalf("expected typography warning category, got %+v", warns[1])
+	}
+
+	// Verify gzipMiddleware compresses JSON and skips PDFs
+	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/projects/1/compiled.pdf" {
+			w.Header().Set("Content-Type", "application/pdf")
+			_, _ = w.Write([]byte("%PDF-1.4\n..."))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hello":"world","data":"` + strings.Repeat("a", 200) + `"}`))
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/projects/1/tree", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected gzip Content-Encoding on JSON, got %q", rec.Header().Get("Content-Encoding"))
+	}
+	gz, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("gzip.NewReader failed: %v", err)
+	}
+	decoded, _ := io.ReadAll(gz)
+	_ = gz.Close()
+	if !strings.Contains(string(decoded), `"hello":"world"`) {
+		t.Fatalf("unexpected gunzipped body: %s", string(decoded))
+	}
+
+	pdfReq := httptest.NewRequest(http.MethodGet, "/api/projects/1/compiled.pdf", nil)
+	pdfReq.Header.Set("Accept-Encoding", "gzip")
+	pdfRec := httptest.NewRecorder()
+	handler.ServeHTTP(pdfRec, pdfReq)
+	if pdfRec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("expected PDF to bypass gzip, got %q", pdfRec.Header().Get("Content-Encoding"))
+	}
+}
+
 
 
 

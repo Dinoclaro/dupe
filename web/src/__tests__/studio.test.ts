@@ -27,6 +27,10 @@ import {
 import { buildFolderTree } from '../components/Sidebar/ExplorerSidebar';
 import { convertDrawioClipboardToSnippet } from '../components/Editor/LatexEditorPane';
 import {
+  checkLatexStructure,
+  matchDiagnosticsForFile,
+} from '../components/Editor/latexDiagnostics';
+import {
   buildCommentCountMap,
   resolveCommentAnchors,
 } from '../components/Editor/commentMarkers';
@@ -295,5 +299,55 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     expect(anchors[0].comment.open).toBe(true);
     expect(anchors[1].line).toBe(3);
     expect(anchors[1].comment.open).toBe(false);
+  });
+
+  it('detects structural LaTeX syntax mismatches and matches compiler diagnostics to files', () => {
+    const validTex = `% comment with { unmatched brace\n\\begin{equation}\n  x = \\{1, 2\\}\n\\end{equation}\n`;
+    expect(checkLatexStructure(validTex, 'paper/experiments.tex')).toEqual([]);
+
+    const brokenTex = `\\begin{figure}\n  \\caption{Test\n\\end{table}\n`;
+    const syntaxErrs = checkLatexStructure(brokenTex, 'paper/experiments.tex');
+    expect(syntaxErrs.length).toBeGreaterThanOrEqual(2);
+    expect(syntaxErrs.some((d) => d.message.includes('Mismatched \\end{table}'))).toBe(true);
+    expect(syntaxErrs.some((d) => d.message.includes('Unclosed opening brace'))).toBe(true);
+
+    const matched = matchDiagnosticsForFile(
+      {
+        success: false,
+        failure_kind: 'latex_code',
+        root_tex: 'paper/conference_101719.tex',
+        pdf_available: false,
+        duration_ms: 1200,
+        errors: [
+          {
+            level: 'error',
+            file: './experiments.tex',
+            line: 42,
+            message: 'Undefined control sequence',
+          },
+        ],
+        warnings: [
+          {
+            level: 'warning',
+            file: 'experiments.tex',
+            line: 10,
+            message: 'Underfull \\hbox',
+            category: 'typography',
+          },
+          {
+            level: 'warning',
+            file: 'experiments.tex',
+            line: 22,
+            message: "Citation 'foo' undefined",
+            category: 'reference',
+          },
+        ],
+        raw_log: '',
+      },
+      'paper/experiments.tex',
+    );
+    expect(matched).toHaveLength(2);
+    expect(matched[0].line).toBe(42);
+    expect(matched[1].category).toBe('reference');
   });
 });
