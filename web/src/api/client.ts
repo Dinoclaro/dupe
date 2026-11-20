@@ -130,6 +130,31 @@ export interface CompiledPdfMeta {
   size_bytes?: number;
 }
 
+export interface LocalStatus {
+  mode: string;
+  projects_dir: string;
+  storage_dir: string;
+  home_dir: string;
+  tectonic_available: boolean;
+  python_available: boolean;
+  sync_remote_url: string;
+}
+
+export interface LocalBrowseDir {
+  name: string;
+  path: string;
+  is_dupe_project: boolean;
+  has_tex: boolean;
+  has_git: boolean;
+}
+
+export interface LocalBrowseResponse {
+  current_path: string;
+  parent_path: string;
+  home_dir: string;
+  dirs: LocalBrowseDir[];
+}
+
 export interface SearchMatchItem {
   category: 'pdf' | 'latex' | 'notes' | 'code';
   path: string;
@@ -990,5 +1015,53 @@ export const api = {
 
   async deleteDoc(id: string): Promise<void> {
     return apiFetch<void>(`/api/docs/${id}`, { method: 'DELETE' });
+  },
+
+  localBundleUrl(): string {
+    const token = getStoredToken();
+    return token
+      ? `/api/local/bundle.tar.gz?token=${encodeURIComponent(token)}`
+      : '/api/local/bundle.tar.gz';
+  },
+
+  localSetupUrl(opts: { projects?: string; autostart?: boolean; sync?: boolean }): string {
+    const params = new URLSearchParams();
+    if (opts.projects) {
+      params.set('projects', opts.projects);
+    }
+    if (opts.autostart !== undefined) {
+      params.set('autostart', opts.autostart ? '1' : '0');
+    }
+    if (opts.sync !== undefined) {
+      params.set('sync', opts.sync ? '1' : '0');
+    }
+    return `/api/local/setup.sh?${params.toString()}`;
+  },
+
+  async localStatus(): Promise<LocalStatus> {
+    return apiFetch<LocalStatus>('/api/local/status');
+  },
+
+  async localBrowse(path?: string): Promise<LocalBrowseResponse> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : '';
+    return apiFetch<LocalBrowseResponse>(`/api/local/browse${query}`);
+  },
+
+  async setLocalProjectsRoot(projectsDir: string): Promise<{ projects_dir: string }> {
+    return apiFetch<{ projects_dir: string }>('/api/local/projects-root', {
+      method: 'POST',
+      body: JSON.stringify({ projects_dir: projectsDir }),
+    });
+  },
+
+  async linkLocalFolder(input: {
+    name: string;
+    source_path: string;
+    link_mode: 'symlink_paper' | 'symlink_project';
+  }): Promise<ProjectConfig> {
+    return apiFetch<ProjectConfig>('/api/local/link-folder', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
   },
 };

@@ -35,6 +35,7 @@ type Server struct {
 	db            pgxQuerier
 	jwtSecret     []byte
 	storageDir    string
+	projectsMu    sync.RWMutex
 	projectsDir   string
 	mode          string
 	pythonBin     string
@@ -78,6 +79,15 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if s.mode == "local" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	var one int
 	if err := s.db.QueryRow(r.Context(), "SELECT 1").Scan(&one); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "database unavailable")
@@ -97,6 +107,13 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("OPTIONS /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/local/bundle.tar.gz", s.requireAuth(s.handleLocalBundle))
+	mux.HandleFunc("GET /api/local/setup.sh", s.requireAuth(s.handleLocalSetupScript))
+	mux.HandleFunc("GET /api/local/status", s.requireAuth(s.handleLocalStatus))
+	mux.HandleFunc("GET /api/local/browse", s.requireAuth(s.handleLocalBrowse))
+	mux.HandleFunc("POST /api/local/projects-root", s.requireAuth(s.handleSetLocalProjectsRoot))
+	mux.HandleFunc("POST /api/local/link-folder", s.requireAuth(s.handleLinkLocalFolder))
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("POST /api/auth/password", s.requireAuth(s.handleChangePassword))
@@ -367,8 +384,18 @@ func main() {
 
 	projectsDir := strings.TrimSpace(*projectsFlag)
 	if projectsDir == "" {
-		projectsDir = envOrDefault("PROJECTS_DIR", filepath.Join(storageDir, "projects"))
+		projectsDir = strings.TrimSpace(os.Getenv("PROJECTS_DIR"))
 	}
+	if projectsDir == "" && mode == "local" {
+		tmpSrv := &Server{storageDir: storageDir}
+		if lc := tmpSrv.loadLocalConfig(); lc.ProjectsDir != "" {
+			projectsDir = lc.ProjectsDir
+		}
+	}
+	if projectsDir == "" {
+		projectsDir = filepath.Join(storageDir, "projects")
+	}
+	projectsDir = expandUserHome(projectsDir)
 	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
 		slog.Error("failed to initialize projects directory", "error", err)
 		os.Exit(1)

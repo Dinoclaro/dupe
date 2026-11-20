@@ -82,7 +82,7 @@ func normalizeOverleafRemote(rawRemote, gitToken string) string {
 
 func (s *Server) userProjectsRoot(userID int) string {
 	if s.mode == "local" {
-		return s.projectsDir
+		return s.getProjectsDir()
 	}
 	return filepath.Join(s.storageDir, "projects", fmt.Sprintf("user_%d", userID))
 }

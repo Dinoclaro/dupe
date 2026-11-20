@@ -653,6 +653,116 @@ func TestParseTectonicDiagnosticsAndGzip(t *testing.T) {
 	}
 }
 
+func TestLocalModeFolderWizardAndSymlink(t *testing.T) {
+	ctx := context.Background()
+	hostedDir := t.TempDir()
+	hostedDB, err := initSQLiteDB(ctx, filepath.Join(hostedDir, "hosted.db"))
+	if err != nil {
+		t.Fatalf("initSQLiteDB hosted: %v", err)
+	}
+	defer hostedDB.Close()
+
+	hostedSrv := &Server{
+		db:          hostedDB,
+		jwtSecret:   []byte("test-secret-at-least-16-bytes-long"),
+		storageDir:  hostedDir,
+		projectsDir: filepath.Join(hostedDir, "projects"),
+		mode:        "hosted",
+	}
+	hostedHandler := hostedSrv.routes()
+	token, _ := issueToken(hostedSrv.jwtSecret, 1, "dino", time.Now().UTC())
+
+	// Hosted mode MUST reject local filesystem browse
+	browseHostedReq := httptest.NewRequest(http.MethodGet, "/api/local/browse", nil)
+	browseHostedReq.Header.Set("Authorization", "Bearer "+token)
+	browseHostedRec := httptest.NewRecorder()
+	hostedHandler.ServeHTTP(browseHostedRec, browseHostedReq)
+	if browseHostedRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for hosted /api/local/browse, got %d", browseHostedRec.Code)
+	}
+
+	// Hosted mode generates personalized setup.sh
+	setupReq := httptest.NewRequest(http.MethodGet, "/api/local/setup.sh?projects=~/mimic_projects&autostart=1", nil)
+	setupReq.Header.Set("Authorization", "Bearer "+token)
+	setupReq.Host = "dupe.ing"
+	setupRec := httptest.NewRecorder()
+	hostedHandler.ServeHTTP(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for setup.sh, got %d", setupRec.Code)
+	}
+	setupBody := setupRec.Body.String()
+	if !strings.Contains(setupBody, "$HOME/mimic_projects") || !strings.Contains(setupBody, "bundle.tar.gz") {
+		t.Fatalf("unexpected setup.sh content: %s", setupBody)
+	}
+
+	// Local mode supports browse, set projects-root, and symlink linking
+	localDir := t.TempDir()
+	localDB, err := initSQLiteDB(ctx, filepath.Join(localDir, "local.db"))
+	if err != nil {
+		t.Fatalf("initSQLiteDB local: %v", err)
+	}
+	defer localDB.Close()
+	_ = createOrUpdateUser(ctx, localDB, "local", "local-mode-implicit-user", "#FFEB3B")
+
+	localSrv := &Server{
+		db:          localDB,
+		jwtSecret:   []byte("test-secret-at-least-16-bytes-long"),
+		storageDir:  localDir,
+		projectsDir: filepath.Join(localDir, "initial_projects"),
+		mode:        "local",
+	}
+	localHandler := localSrv.routes()
+
+	chosenRoot := filepath.Join(t.TempDir(), "mimic_workspace")
+	rootReq := httptest.NewRequest(http.MethodPost, "/api/local/projects-root", strings.NewReader(`{"projects_dir":"`+chosenRoot+`"}`))
+	rootReq.Header.Set("Content-Type", "application/json")
+	rootRec := httptest.NewRecorder()
+	localHandler.ServeHTTP(rootRec, rootReq)
+	if rootRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for projects-root, got %d: %s", rootRec.Code, rootRec.Body.String())
+	}
+	if localSrv.getProjectsDir() != chosenRoot {
+		t.Fatalf("expected projectsDir=%q, got %q", chosenRoot, localSrv.getProjectsDir())
+	}
+
+	// Existing LaTeX folder on disk gets symlinked into paper/ without moving source files
+	existingTexDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(existingTexDir, "mimic.tex"), []byte(`\documentclass{article}\begin{document}Mimic\end{document}`), 0o644)
+
+	linkPayload, _ := json.Marshal(map[string]string{
+		"name":        "dinoMimic",
+		"source_path": existingTexDir,
+		"link_mode":   "symlink_paper",
+	})
+	linkReq := httptest.NewRequest(http.MethodPost, "/api/local/link-folder", bytes.NewReader(linkPayload))
+	linkReq.Header.Set("Content-Type", "application/json")
+	linkRec := httptest.NewRecorder()
+	localHandler.ServeHTTP(linkRec, linkReq)
+	if linkRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for link-folder, got %d: %s", linkRec.Code, linkRec.Body.String())
+	}
+
+	linkedPaperPath := filepath.Join(chosenRoot, "dinomimic", "paper")
+	fi, lErr := os.Lstat(linkedPaperPath)
+	if lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected %s to be a symlink, err=%v", linkedPaperPath, lErr)
+	}
+	tree, treeErr := collectProjectTree(ctx, filepath.Join(chosenRoot, "dinomimic"))
+	if treeErr != nil {
+		t.Fatalf("collectProjectTree failed: %v", treeErr)
+	}
+	foundMimic := false
+	for _, e := range tree {
+		if e.Path == "paper/mimic.tex" {
+			foundMimic = true
+		}
+	}
+	if !foundMimic {
+		t.Fatalf("expected paper/mimic.tex in symlinked tree, got %+v", tree)
+	}
+}
+
+
 
 
 
