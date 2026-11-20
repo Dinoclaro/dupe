@@ -567,6 +567,16 @@ export async function pushFilesToGitHubDirect(
   return pushedCount;
 }
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
@@ -619,11 +629,18 @@ async function apiFetch<T>(
 
   const contentType = response.headers.get('Content-Type') || '';
   if (!response.ok) {
+    let errMsg = `Request failed (${response.status})`;
     if (contentType.includes('application/json')) {
       const errPayload = (await response.json()) as { error?: string };
-      throw new Error(errPayload.error || `Request failed (${response.status})`);
+      errMsg = errPayload.error || errMsg;
     }
-    throw new Error(`Request failed (${response.status})`);
+    if (response.status === 401 && path !== '/api/auth/login') {
+      setStoredToken(null);
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('dupe:unauthorized', { detail: errMsg }));
+      }
+    }
+    throw new ApiError(errMsg, response.status);
   }
 
   if (contentType.includes('application/json')) {

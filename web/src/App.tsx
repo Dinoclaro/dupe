@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ApiError,
   CompileProjectResponse,
   Paper,
   ProjectConfig,
@@ -576,10 +577,22 @@ export const App: React.FC = () => {
     void checkServer();
     const interval = window.setInterval(() => void checkServer(), 20000);
 
+    const onUnauthorized = (ev: Event) => {
+      const detail = (ev as CustomEvent<string>).detail;
+      setStoredToken(null);
+      setUser(null);
+      setAuthChecking(false);
+      setAuthError(
+        detail ? `Session expired (${detail}) — please sign in again.` : 'Session expired — please sign in again.',
+      );
+    };
+    window.addEventListener('dupe:unauthorized', onUnauthorized);
+
     api
       .me()
       .then(async (u) => {
         setUser(u);
+        setAuthError(null);
         saveWorkspaceSnapshot({ user: u });
         await loadInitialWorkspace();
         setStatusMessage('Synced with server.');
@@ -587,10 +600,14 @@ export const App: React.FC = () => {
       .catch((err) => {
         const errMsg = err instanceof Error ? err.message.toLowerCase() : '';
         const isUnauthorized =
-          errMsg.includes('unauthorized') || errMsg.includes('401') || errMsg.includes('invalid token');
+          (err instanceof ApiError && err.status === 401) ||
+          errMsg.includes('unauthorized') ||
+          errMsg.includes('401') ||
+          errMsg.includes('token');
         if (isUnauthorized) {
           setStoredToken(null);
           setUser(null);
+          setAuthError('Session expired — please sign in again.');
           return;
         }
         const cached = loadWorkspaceSnapshot();
@@ -623,7 +640,10 @@ export const App: React.FC = () => {
       })
       .finally(() => setAuthChecking(false));
 
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('dupe:unauthorized', onUnauthorized);
+    };
   }, [loadInitialWorkspace]);
 
   const handleSelectProject = async (projectId: string) => {
