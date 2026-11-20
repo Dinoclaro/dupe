@@ -1,0 +1,258 @@
+{
+  "name": "dupe-studio",
+  "displayName": "dupe Research Studio",
+  "description": "Paper library, citation intelligence, PDF reader, and Overleaf sync backed by the local dupe daemon.",
+  "version": "0.1.0",
+  "publisher": "dinoclaro",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "test": "vitest run"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "dupe Research Studio",
+      "properties": {
+        "dupe.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8080",
+          "description": "Base URL of the local dupe daemon (or hosted dupe server)."
+        },
+        "dupe.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token when connecting to a hosted dupe server."
+        },
+        "dupe.openPdfOnCompile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open or refresh the compiled PDF preview tab after compiling LaTeX."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dupe",
+          "title": "dupe",
+          "icon": "media/dupe-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dupe": [
+        {
+          "id": "dupe.projectView",
+          "name": "Project & Sync"
+        },
+        {
+          "id": "dupe.papersView",
+          "name": "Paper Library"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dupe.refresh",
+        "title": "dupe: Refresh Library & Project",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dupe.searchPapers",
+        "title": "dupe: Search Papers",
+        "icon": "$(search)"
+      },
+      {
+        "command": "dupe.clearPaperFilter",
+        "title": "dupe: Clear Paper Filter",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "dupe.uploadPdf",
+        "title": "dupe: Upload PDF to Library",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "dupe.syncLibrary",
+        "title": "dupe: Sync Paper Library with Hosted Server",
+        "icon": "$(repo-sync)"
+      },
+      {
+        "command": "dupe.openPaperPdf",
+        "title": "dupe: Open Paper PDF",
+        "icon": "$(file-pdf)"
+      },
+      {
+        "command": "dupe.openPaperByKey",
+        "title": "dupe: Open Paper PDF by BibTeX Key"
+      },
+      {
+        "command": "dupe.insertCitation",
+        "title": "dupe: Insert Citation at Cursor",
+        "icon": "$(quote)"
+      },
+      {
+        "command": "dupe.copyBibtex",
+        "title": "dupe: Copy BibTeX Entry",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "dupe.toggleLinkPaper",
+        "title": "dupe: Link / Unlink Paper in Project",
+        "icon": "$(link)"
+      },
+      {
+        "command": "dupe.deletePaper",
+        "title": "dupe: Delete Paper from Library",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dupe.compileLatex",
+        "title": "dupe: Compile Project LaTeX",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dupe.openCompiledPdf",
+        "title": "dupe: Open Compiled Paper PDF",
+        "icon": "$(file-pdf)"
+      },
+      {
+        "command": "dupe.pullProject",
+        "title": "dupe: Pull Overleaf Remote",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "dupe.syncProject",
+        "title": "dupe: Commit & Push Project (Overleaf Sync)",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "dupe.gatherContext",
+        "title": "dupe: Regenerate AGENTS.md & BibTeX",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "dupe.createProject",
+        "title": "dupe: New Project",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "dupe.switchProjectsRoot",
+        "title": "dupe: Switch Projects Parent Folder",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "dupe.openProjectFolder",
+        "title": "dupe: Open Another Project Folder",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "dupe.linkLocalFolder",
+        "title": "dupe: Link Local Folder (code/ or paper/)",
+        "icon": "$(file-symlink-directory)"
+      },
+      {
+        "command": "dupe.newNote",
+        "title": "dupe: New Note in notes/",
+        "icon": "$(note)"
+      },
+      {
+        "command": "dupe.newDiagram",
+        "title": "dupe: New Diagram in diagrams/",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "dupe.openWebUI",
+        "title": "dupe: Open Web UI in Browser",
+        "icon": "$(globe)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "dupe.searchPapers",
+          "when": "view == dupe.papersView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.uploadPdf",
+          "when": "view == dupe.papersView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.syncLibrary",
+          "when": "view == dupe.papersView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.clearPaperFilter",
+          "when": "view == dupe.papersView && dupe.hasPaperFilter",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.compileLatex",
+          "when": "view == dupe.projectView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.syncProject",
+          "when": "view == dupe.projectView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.refresh",
+          "when": "view == dupe.projectView || view == dupe.papersView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dupe.insertCitation",
+          "when": "view == dupe.papersView && viewItem =~ /^paper/",
+          "group": "inline@1"
+        },
+        {
+          "command": "dupe.openPaperPdf",
+          "when": "view == dupe.papersView && viewItem =~ /^paper/",
+          "group": "inline@2"
+        },
+        {
+          "command": "dupe.toggleLinkPaper",
+          "when": "view == dupe.papersView && viewItem =~ /^paper/",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "dupe.copyBibtex",
+          "when": "view == dupe.papersView && viewItem =~ /^paper/",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "dupe.deletePaper",
+          "when": "view == dupe.papersView && viewItem =~ /^paper/",
+          "group": "2_danger@1"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.8.69"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.19",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}
