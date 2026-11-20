@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -139,6 +140,18 @@ func (s *Server) handleMCPRequest(ctx context.Context, userID int, username stri
 								"folder": map[string]any{"type": "string", "description": "Target folder name (empty string to unfile)"},
 							},
 							"required": []string{"key", "folder"},
+						},
+					},
+					{
+						"name":        "update_project_summary",
+						"description": "Save a concise agent-authored project summary to .dupe/summary.md and regenerate AGENTS.md.",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"summary":    map[string]any{"type": "string", "description": "3-5 sentence summary of project goals, recent progress, and active focus"},
+								"project_id": map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+							"required": []string{"summary"},
 						},
 					},
 				},
@@ -320,6 +333,30 @@ func (s *Server) executeMCPTool(ctx context.Context, userID int, username, toolN
 			return fmt.Sprintf("Failed to update paper folder: %v", err), true
 		}
 		return fmt.Sprintf("Assigned @%s (%s) to folder %q.", targetPaper.BibtexKey, targetPaper.Title, folder), false
+
+	case "update_project_summary":
+		summary := strings.TrimSpace(strArg("summary"))
+		if summary == "" {
+			return "summary is required", true
+		}
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		cfg, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		if err := os.MkdirAll(filepath.Join(projDir, ".dupe"), 0o755); err != nil {
+			return fmt.Sprintf("Failed to create .dupe directory: %v", err), true
+		}
+		if err := os.WriteFile(filepath.Join(projDir, ".dupe", "summary.md"), []byte(summary+"\n"), 0o644); err != nil {
+			return fmt.Sprintf("Failed to write .dupe/summary.md: %v", err), true
+		}
+		if err := s.regenerateProjectArtifacts(ctx, projDir, userID, cfg); err != nil {
+			return fmt.Sprintf("Failed to regenerate AGENTS.md: %v", err), true
+		}
+		return fmt.Sprintf("Updated .dupe/summary.md and regenerated AGENTS.md for project %s.", cfg.Name), false
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", toolName), true

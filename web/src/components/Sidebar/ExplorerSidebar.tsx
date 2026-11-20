@@ -98,6 +98,7 @@ interface ExplorerSidebarProps {
   papers: Paper[];
   citedBibKeys?: string[];
   commentCountsByFile?: Record<string, { open: number; addressed: number }>;
+  hasLatexOrPreviewOpen?: boolean;
   projects: ProjectConfig[];
   activeProject: ProjectConfig | null;
   projectFiles: ProjectTreeEntry[];
@@ -194,6 +195,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   papers,
   citedBibKeys = [],
   commentCountsByFile = {},
+  hasLatexOrPreviewOpen = false,
   projects,
   activeProject,
   projectFiles,
@@ -1381,24 +1383,28 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
               >
                 Context
               </button>
-              <button
-                type="button"
-                className="btn-tiny"
-                disabled={syncingGit || !activeProject?.overleaf_remote}
-                onClick={() => void handleTriggerPull()}
-                title="Fetch & pull latest changes from Overleaf into paper/"
-              >
-                {syncingGit ? '…' : '↓ Pull'}
-              </button>
-              <button
-                type="button"
-                className="btn-primary btn-tiny"
-                disabled={syncingGit || !activeProject}
-                onClick={() => void handleTriggerSync()}
-                title="Regenerate AGENTS.md & dupe_references.bib, commit, pull, and push paper/ to Overleaf"
-              >
-                {syncingGit ? 'Syncing…' : '↑ Push'}
-              </button>
+              {hasLatexOrPreviewOpen && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-tiny"
+                    disabled={syncingGit || !activeProject?.overleaf_remote}
+                    onClick={() => void handleTriggerPull()}
+                    title="Fetch & pull latest changes from Overleaf into paper/"
+                  >
+                    {syncingGit ? '…' : '↓ Pull'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary btn-tiny"
+                    disabled={syncingGit || !activeProject}
+                    onClick={() => void handleTriggerSync()}
+                    title="Regenerate AGENTS.md & dupe_references.bib, commit, pull, and push paper/ to Overleaf"
+                  >
+                    {syncingGit ? 'Syncing…' : '↑ Push'}
+                  </button>
+                </>
+              )}
             </div>
 
             {showNewProjectForm && (

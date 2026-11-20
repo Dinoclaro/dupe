@@ -195,22 +195,18 @@ export const App: React.FC = () => {
   // VS Code Editor Groups (Left = Group 0, Right = Group 1)
   const [leftTabs, setLeftTabs] = useState<StudioTab[]>([
     {
-      id: 'file:paper/main.tex',
-      title: 'paper/main.tex',
-      kind: 'tex',
-      filePath: 'paper/main.tex',
+      id: 'file:AGENTS.md',
+      title: 'AGENTS.md',
+      kind: 'markdown',
+      filePath: 'AGENTS.md',
     },
   ]);
   const [activeLeftTabId, setActiveLeftTabId] = useState<string | null>(
-    'file:paper/main.tex',
+    'file:AGENTS.md',
   );
 
-  const [rightTabs, setRightTabs] = useState<StudioTab[]>([
-    { id: 'preview:compiled', title: 'Compiled Paper.pdf', kind: 'preview' },
-  ]);
-  const [activeRightTabId, setActiveRightTabId] = useState<string | null>(
-    'preview:compiled',
-  );
+  const [rightTabs, setRightTabs] = useState<StudioTab[]>([]);
+  const [activeRightTabId, setActiveRightTabId] = useState<string | null>(null);
   const [focusedGroup, setFocusedGroup] = useState<0 | 1>(0);
   const [splitRatio, setSplitRatio] = useState(0.5);
 
@@ -398,18 +394,9 @@ export const App: React.FC = () => {
         files.find((f) => f.kind === 'tex');
 
       if (preferredTex) {
+        setActiveEditorPath(preferredTex.path);
         try {
           const payload = await api.readProjectFile(chosenId, preferredTex.path);
-          setActiveEditorPath(payload.path);
-          setLeftTabs([
-            {
-              id: `file:${payload.path}`,
-              title: payload.path,
-              kind: 'tex',
-              filePath: payload.path,
-            },
-          ]);
-          setActiveLeftTabId(`file:${payload.path}`);
           setFileBuffers((prev) => {
             const next = { ...prev, [payload.path]: payload.content };
             saveWorkspaceSnapshot({ fileBuffers: next });
@@ -419,6 +406,43 @@ export const App: React.FC = () => {
         } catch {
           // keep fallback buffer
         }
+      }
+
+      // Default landing screen: AGENTS.md project note (with project summary & current context)
+      const agentsEntry = files.find((f) => f.path === 'AGENTS.md');
+      if (agentsEntry) {
+        try {
+          const agentsPayload = await api.readProjectFile(chosenId, 'AGENTS.md');
+          setFileBuffers((prev) => {
+            const next = { ...prev, 'AGENTS.md': agentsPayload.content };
+            saveWorkspaceSnapshot({ fileBuffers: next });
+            return next;
+          });
+          setSavedBuffers((prev) => ({ ...prev, 'AGENTS.md': agentsPayload.content }));
+          setLeftTabs([
+            {
+              id: 'file:AGENTS.md',
+              title: 'AGENTS.md',
+              kind: 'markdown',
+              filePath: 'AGENTS.md',
+            },
+          ]);
+          setActiveLeftTabId('file:AGENTS.md');
+          setRightTabs([]);
+          setActiveRightTabId(null);
+        } catch {
+          // keep fallback
+        }
+      } else if (preferredTex) {
+        setLeftTabs([
+          {
+            id: `file:${preferredTex.path}`,
+            title: preferredTex.path,
+            kind: 'tex',
+            filePath: preferredTex.path,
+          },
+        ]);
+        setActiveLeftTabId(`file:${preferredTex.path}`);
       }
 
       // Sync any dirty or richer local notes to the server automatically (Local Notes Always Win)
@@ -508,9 +532,19 @@ export const App: React.FC = () => {
   const handleSelectProject = async (projectId: string) => {
     setActiveProjectId(projectId);
     const files = await refreshProjectTree(projectId);
-    const mainEntry = files.find((f) => f.path === 'paper/main.tex') || files[0];
-    if (mainEntry) {
-      await handleOpenProjectFile(mainEntry, false, projectId);
+    const preferredTex =
+      files.find((f) => f.kind === 'tex' && f.path.startsWith('paper/')) || files[0];
+    if (preferredTex && preferredTex.kind === 'tex') {
+      setActiveEditorPath(preferredTex.path);
+    }
+    const landingEntry =
+      files.find((f) => f.path === 'AGENTS.md') ||
+      files.find((f) => f.path === 'paper/main.tex') ||
+      files[0];
+    setRightTabs([]);
+    setActiveRightTabId(null);
+    if (landingEntry) {
+      await handleOpenProjectFile(landingEntry, false, projectId);
     }
   };
 
@@ -1496,6 +1530,13 @@ export const App: React.FC = () => {
   const hasRightSplit = rightTabs.length > 0;
   const currentHighlightedTabId =
     focusedGroup === 0 ? activeLeftTab?.id || null : activeRightTab?.id || null;
+  const hasLatexOrPreviewOpen = useMemo(
+    () =>
+      [...leftTabs, ...rightTabs].some(
+        (t) => t.kind === 'tex' || t.kind === 'bib' || t.kind === 'preview',
+      ),
+    [leftTabs, rightTabs],
+  );
 
   return (
     <div className="vscode-shell">
@@ -1619,6 +1660,7 @@ export const App: React.FC = () => {
             papers={papers}
             citedBibKeys={Array.from(new Set([...projectCitedKeys, ...compiled.citedKeys]))}
             commentCountsByFile={commentCountsByFile}
+            hasLatexOrPreviewOpen={hasLatexOrPreviewOpen}
             projects={projects}
             activeProject={activeProject}
             projectFiles={projectTree}
