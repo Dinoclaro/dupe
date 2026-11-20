@@ -851,22 +851,32 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                       ? 'MD'
                       : file.kind === 'diagram'
                         ? 'FIG'
-                        : file.path.endsWith('.py')
-                          ? 'PY'
-                          : 'FILE';
-              const cleanStem = shortName.replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
+                        : file.kind === 'asset'
+                          ? file.path.toLowerCase().endsWith('.pdf')
+                            ? 'FIG'
+                            : 'IMG'
+                          : file.path.endsWith('.py')
+                            ? 'PY'
+                            : 'FILE';
+              const cleanStem = shortName.replace(/\.(drawio\.svg|drawio|excalidraw|svg|pdf|png|jpg|jpeg|gif|webp)$/i, '');
               const svgRelPath = `figures/${cleanStem}.svg`;
+              const paperRelAsset = file.path.replace(/^paper\//, '');
               return (
                 <div
                   key={file.path}
                   className={`tree-row ${isSelected ? 'active' : ''}`}
                   style={{ paddingLeft: `${indentPx + 14}px` }}
-                  draggable={file.kind === 'diagram'}
+                  draggable={file.kind === 'diagram' || file.kind === 'asset'}
                   onDragStart={(e) => {
                     if (file.kind === 'diagram') {
                       e.dataTransfer.setData(
                         'text/plain',
                         `\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{${svgRelPath}}\n  \\caption{${cleanStem.replace(/_/g, ' ')}}\n  \\label{fig:${cleanStem}}\n\\end{figure}`,
+                      );
+                    } else if (file.kind === 'asset') {
+                      e.dataTransfer.setData(
+                        'text/plain',
+                        `\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.9\\linewidth]{${paperRelAsset}}\n  \\caption{${cleanStem.replace(/_/g, ' ')}}\n  \\label{fig:${cleanStem}}\n\\end{figure}`,
                       );
                     }
                   }}

@@ -66,7 +66,7 @@ export interface ProjectConfig {
 
 export interface ProjectTreeEntry {
   path: string;
-  kind: 'tex' | 'bib' | 'markdown' | 'diagram' | 'json' | 'other';
+  kind: 'tex' | 'bib' | 'markdown' | 'diagram' | 'asset' | 'json' | 'other';
   git_status?: 'M' | 'U' | '';
 }
 
@@ -923,6 +923,15 @@ export const api = {
     return `/api/projects/${id}/compiled.pdf?${params.toString()}`;
   },
 
+  projectAssetUrl(id: string, filePath: string): string {
+    const params = new URLSearchParams({ path: filePath });
+    const token = getStoredToken();
+    if (token) {
+      params.set('token', token);
+    }
+    return `/api/projects/${id}/asset?${params.toString()}`;
+  },
+
   async flushOutbox(): Promise<number> {
     const queue = getOutboxQueue();
     if (queue.length === 0) {
@@ -931,6 +940,12 @@ export const api = {
     let flushed = 0;
     for (const item of queue) {
       if (item.kind === 'project_file' && item.projectId && item.path && item.content !== undefined) {
+        if (
+          (item.path.endsWith('.tex') || item.path.endsWith('.bib')) &&
+          item.content.trim().length === 0
+        ) {
+          continue;
+        }
         await this.writeProjectFile(item.projectId, item.path, item.content, false);
         flushed++;
       } else if (item.kind === 'paper_patch' && item.paperPatch) {

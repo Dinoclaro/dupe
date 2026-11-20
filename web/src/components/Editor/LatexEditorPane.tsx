@@ -148,6 +148,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
 }) => {
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
+  const isApplyingSyncRef = useRef<boolean>(false);
   const pendingOpenFindRef = useRef<boolean>(false);
   const papersRef = useRef<Paper[]>(papers);
   papersRef.current = papers;
@@ -317,7 +318,7 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
         },
       }),
       EditorView.updateListener.of((update) => {
-        if (update.docChanged) {
+        if (update.docChanged && !isApplyingSyncRef.current) {
           onChangeRef.current(update.state.doc.toString());
         }
       }),
@@ -413,13 +414,18 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
     if (currentText !== source) {
       const prevSel = view.state.selection.main;
       const prevScrollTop = view.scrollDOM.scrollTop;
-      view.dispatch({
-        changes: { from: 0, to: currentText.length, insert: source },
-        selection: {
-          anchor: Math.min(prevSel.anchor, source.length),
-          head: Math.min(prevSel.head, source.length),
-        },
-      });
+      isApplyingSyncRef.current = true;
+      try {
+        view.dispatch({
+          changes: { from: 0, to: currentText.length, insert: source },
+          selection: {
+            anchor: Math.min(prevSel.anchor, source.length),
+            head: Math.min(prevSel.head, source.length),
+          },
+        });
+      } finally {
+        isApplyingSyncRef.current = false;
+      }
       window.requestAnimationFrame(() => {
         if (editorViewRef.current === view) {
           view.scrollDOM.scrollTop = prevScrollTop;

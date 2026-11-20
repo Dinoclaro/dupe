@@ -130,6 +130,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/projects/{id}", s.requireAuth(s.handleUpdateProject))
 	mux.HandleFunc("GET /api/projects/{id}/tree", s.requireAuth(s.handleGetProjectTree))
 	mux.HandleFunc("GET /api/projects/{id}/file", s.requireAuth(s.handleReadProjectFile))
+	mux.HandleFunc("GET /api/projects/{id}/asset", s.requireAuth(s.handleReadProjectAsset))
 	mux.HandleFunc("PUT /api/projects/{id}/file", s.requireAuth(s.handleWriteProjectFile))
 	mux.HandleFunc("DELETE /api/projects/{id}/file", s.requireAuth(s.handleDeleteProjectFile))
 	mux.HandleFunc("POST /api/projects/{id}/rename", s.requireAuth(s.handleRenameProjectFile))

@@ -127,7 +127,7 @@ const INITIAL_DIAGRAM_ELEMENTS: DiagramElement[] = [
 export interface StudioTab {
   id: string;
   title: string;
-  kind: 'pdf' | 'tex' | 'bib' | 'markdown' | 'preview' | 'diagram' | 'json' | 'other';
+  kind: 'pdf' | 'tex' | 'bib' | 'markdown' | 'preview' | 'diagram' | 'asset' | 'json' | 'other';
   paperId?: string;
   filePath?: string;
 }
@@ -850,6 +850,10 @@ export const App: React.FC = () => {
     };
 
     const hasCachedBuffer = fileBuffers[file.path] !== undefined;
+    if (file.kind === 'asset') {
+      openTargetTabs();
+      return;
+    }
     if (hasCachedBuffer) {
       openTargetTabs();
     }
@@ -1045,6 +1049,14 @@ export const App: React.FC = () => {
         return;
       }
       const content = contentOverride ?? fileBuffers[filePath] ?? '';
+      if (
+        (filePath.endsWith('.tex') || filePath.endsWith('.bib')) &&
+        content.trim().length === 0 &&
+        savedBuffers[filePath] === undefined
+      ) {
+        setStatusMessage(`Skipped saving empty unloaded buffer for ${filePath}.`);
+        return;
+      }
       if (filePath.startsWith('notes/')) {
         saveLocalNote(filePath, content, true);
       }
@@ -1065,7 +1077,10 @@ export const App: React.FC = () => {
         } else {
           setStatusMessage(`Auto-saved ${filePath}.`);
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          return;
+        }
         const q = enqueueOutboxEntry({
           id: `file:${activeProject.id}:${filePath}`,
           kind: 'project_file',
@@ -1080,7 +1095,7 @@ export const App: React.FC = () => {
         setSavingSource(false);
       }
     },
-    [activeProject, fileBuffers, refreshProjectTree, triggerProjectCompile],
+    [activeProject, fileBuffers, savedBuffers, refreshProjectTree, triggerProjectCompile],
   );
 
   const handleRevertProjectFile = async (filePath: string) => {
@@ -1569,6 +1584,50 @@ export const App: React.FC = () => {
           hasActiveRepo={Boolean(activeProject?.overleaf_remote)}
           onSaveDiagram={handleExportFigure}
         />
+      );
+    }
+
+    if (tab.kind === 'asset') {
+      const assetPath = tab.filePath || '';
+      const assetUrl = activeProject ? api.projectAssetUrl(activeProject.id, assetPath) : '';
+      const isPdfAsset = assetPath.toLowerCase().endsWith('.pdf');
+      const relInclude = assetPath.replace(/^paper\//, '');
+      return (
+        <div key={tab.id} className="editor-pane">
+          <div className="editor-toolbar">
+            <div className="editor-file-badge">
+              <code>{assetPath}</code>
+              <span className="muted-hint">Overleaf / Project Figure</span>
+            </div>
+            <div className="editor-actions">
+              <button
+                type="button"
+                className="btn-tiny"
+                onClick={() => {
+                  const snippet = `\\includegraphics[width=\\linewidth]{${relInclude}}`;
+                  void navigator.clipboard?.writeText(snippet);
+                  setStatusMessage(`Copied ${snippet}`);
+                }}
+              >
+                📋 Copy \includegraphics
+              </button>
+              {assetUrl && (
+                <a href={assetUrl} target="_blank" rel="noreferrer" className="btn-tiny">
+                  ↗ Open Raw
+                </a>
+              )}
+            </div>
+          </div>
+          {isPdfAsset ? (
+            <div className="reader-native-stage">
+              <iframe title={assetPath} src={assetUrl} className="reader-native-iframe" />
+            </div>
+          ) : (
+            <div className="asset-preview-stage">
+              <img src={assetUrl} alt={assetPath} className="asset-preview-img" />
+            </div>
+          )}
+        </div>
       );
     }
 

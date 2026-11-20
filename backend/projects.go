@@ -861,16 +861,19 @@ func parseGitStatusMap(ctx context.Context, repoDir, prefix string) map[string]s
 }
 
 func classifyProjectFileKind(relSlash string) string {
+	lower := strings.ToLower(relSlash)
 	switch {
-	case strings.HasSuffix(relSlash, ".tex"):
+	case strings.HasSuffix(lower, ".tex"):
 		return "tex"
-	case strings.HasSuffix(relSlash, ".bib"):
+	case strings.HasSuffix(lower, ".bib"):
 		return "bib"
-	case strings.HasSuffix(relSlash, ".md"):
+	case strings.HasSuffix(lower, ".md"):
 		return "markdown"
-	case strings.HasSuffix(relSlash, ".drawio") || strings.HasSuffix(relSlash, ".excalidraw") || strings.HasSuffix(relSlash, ".svg"):
+	case strings.HasSuffix(lower, ".drawio") || strings.HasSuffix(lower, ".excalidraw") || strings.HasSuffix(lower, ".svg"):
 		return "diagram"
-	case strings.HasSuffix(relSlash, ".json"):
+	case strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg") || strings.HasSuffix(lower, ".gif") || strings.HasSuffix(lower, ".webp") || strings.HasSuffix(lower, ".pdf"):
+		return "asset"
+	case strings.HasSuffix(lower, ".json"):
 		return "json"
 	default:
 		return "other"
@@ -889,16 +892,29 @@ func isIgnoredProjectDirName(name string) bool {
 func isBinaryAssetExt(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	switch ext {
-	case ".pt", ".pth", ".onnx", ".ckpt", ".npz", ".npy", ".pkl", ".usd", ".urdf", ".dae", ".stl", ".obj", ".mp4", ".mov", ".avi", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".pyc", ".so":
+	case ".pt", ".pth", ".onnx", ".ckpt", ".npz", ".npy", ".pkl", ".usd", ".urdf", ".dae", ".stl", ".obj", ".mp4", ".mov", ".avi", ".pyc", ".so":
 		return true
 	default:
 		return false
 	}
 }
 
+func isVisibleProjectAsset(relSlash string) bool {
+	ext := strings.ToLower(filepath.Ext(relSlash))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf":
+		return strings.HasPrefix(relSlash, "paper/") || strings.HasPrefix(relSlash, "diagrams/") || strings.HasPrefix(relSlash, "notes/")
+	default:
+		return true
+	}
+}
+
 func collectProjectTree(ctx context.Context, projectDir string) ([]ProjectTreeEntry, error) {
 	rootStatus := parseGitStatusMap(ctx, projectDir, "")
-	paperStatus := parseGitStatusMap(ctx, filepath.Join(projectDir, "paper"), "paper")
+	paperDir := filepath.Join(projectDir, "paper")
+	paperStatus := parseGitStatusMap(ctx, paperDir, "paper")
+	rootTexName := findProjectRootTex(paperDir, "")
+	compiledRootPDFRel := "paper/" + strings.TrimSuffix(rootTexName, filepath.Ext(rootTexName)) + ".pdf"
 
 	entries := make([]ProjectTreeEntry, 0)
 	var walkFolder func(absRoot, relPrefix string, depth int) error
@@ -931,7 +947,7 @@ func collectProjectTree(ctx context.Context, projectDir string) ([]ProjectTreeEn
 				}
 				continue
 			}
-			if isBinaryAssetExt(name) {
+			if isBinaryAssetExt(name) || !isVisibleProjectAsset(relSlash) || relSlash == compiledRootPDFRel {
 				continue
 			}
 			status := paperStatus[relSlash]
@@ -1319,6 +1335,58 @@ func (s *Server) handleReadProjectFile(w http.ResponseWriter, r *http.Request) {
 		"content":      string(contentBytes),
 		"head_content": headContent,
 	})
+}
+
+func (s *Server) handleReadProjectAsset(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("id")
+	_, projDir, err := s.lookupProjectDir(r.Context(), claims.UserID, projectID, claims.Username)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	relFile := strings.TrimSpace(r.URL.Query().Get("path"))
+	targetPath, err := safeJoin(projDir, relFile)
+	if err != nil || strings.Contains(filepath.ToSlash(relFile), ".git/") {
+		writeError(w, http.StatusBadRequest, "invalid asset path")
+		return
+	}
+
+	f, err := os.Open(targetPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	stat, err := f.Stat()
+	if err != nil || stat.IsDir() {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
+
+	switch strings.ToLower(filepath.Ext(targetPath)) {
+	case ".pdf":
+		w.Header().Set("Content-Type", "application/pdf")
+	case ".svg":
+		w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	case ".png":
+		w.Header().Set("Content-Type", "image/png")
+	case ".jpg", ".jpeg":
+		w.Header().Set("Content-Type", "image/jpeg")
+	case ".gif":
+		w.Header().Set("Content-Type", "image/gif")
+	case ".webp":
+		w.Header().Set("Content-Type", "image/webp")
+	}
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(targetPath)))
+	http.ServeContent(w, r, filepath.Base(targetPath), stat.ModTime(), f)
 }
 
 func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) {
@@ -2137,27 +2205,37 @@ func writeTectonicFontBridges(paperDir string) func() {
 \DeclareFontShape{TU}{ptm}{bx}{n}{<-> "[texgyretermes-bold.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{ptm}{bx}{it}{<-> "[texgyretermes-bolditalic.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{ptm}{bx}{sl}{<-> "[texgyretermes-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{ptm}{bx}{sc}{<-> "[texgyretermes-bold.otf]:mapping=tex-text;+smcp"}{}
 \DeclareFontShape{TU}{ptm}{b}{n}{<-> ssub * ptm/bx/n}{}
 \DeclareFontShape{TU}{ptm}{b}{it}{<-> ssub * ptm/bx/it}{}
 \DeclareFontShape{TU}{ptm}{b}{sl}{<-> ssub * ptm/bx/sl}{}
+\DeclareFontShape{TU}{ptm}{b}{sc}{<-> ssub * ptm/bx/sc}{}
+\DeclareFontShape{TU}{ptm}{l}{n}{<-> ssub * ptm/m/n}{}
+\DeclareFontShape{TU}{ptm}{c}{n}{<-> ssub * ptm/m/n}{}
 `,
 		"TUphv.fd": `\ProvidesFile{TUphv.fd}[2020/01/01 TU Helvetica font definitions for IEEEtran]
 \DeclareFontFamily{TU}{phv}{}
 \DeclareFontShape{TU}{phv}{m}{n}{<-> "[texgyreheros-regular.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{phv}{m}{it}{<-> "[texgyreheros-italic.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{phv}{m}{sl}{<-> "[texgyreheros-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{m}{sc}{<-> "[texgyreheros-regular.otf]:mapping=tex-text;+smcp"}{}
 \DeclareFontShape{TU}{phv}{bx}{n}{<-> "[texgyreheros-bold.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{phv}{bx}{it}{<-> "[texgyreheros-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{bx}{sl}{<-> "[texgyreheros-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{bx}{sc}{<-> "[texgyreheros-bold.otf]:mapping=tex-text;+smcp"}{}
 \DeclareFontShape{TU}{phv}{b}{n}{<-> "[texgyreheros-bold.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{phv}{b}{it}{<-> "[texgyreheros-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{phv}{b}{sl}{<-> "[texgyreheros-bolditalic.otf]:mapping=tex-text;"}{}
 `,
 		"TUpcr.fd": `\ProvidesFile{TUpcr.fd}[2020/01/01 TU Courier font definitions for IEEEtran]
 \DeclareFontFamily{TU}{pcr}{}
 \DeclareFontShape{TU}{pcr}{m}{n}{<-> "[texgyrecursor-regular.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{pcr}{m}{it}{<-> "[texgyrecursor-italic.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{pcr}{m}{sl}{<-> "[texgyrecursor-italic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{m}{sc}{<-> "[texgyrecursor-regular.otf]:mapping=tex-text;+smcp"}{}
 \DeclareFontShape{TU}{pcr}{bx}{n}{<-> "[texgyrecursor-bold.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{pcr}{bx}{it}{<-> "[texgyrecursor-bolditalic.otf]:mapping=tex-text;"}{}
+\DeclareFontShape{TU}{pcr}{bx}{sl}{<-> "[texgyrecursor-bolditalic.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{pcr}{b}{n}{<-> "[texgyrecursor-bold.otf]:mapping=tex-text;"}{}
 \DeclareFontShape{TU}{pcr}{b}{it}{<-> "[texgyrecursor-bolditalic.otf]:mapping=tex-text;"}{}
 `,
@@ -2413,7 +2491,7 @@ func (s *Server) handleSearchProject(w http.ResponseWriter, r *http.Request) {
 	// 2. Search across Project Files (LaTeX in paper/, Notes in notes/, Code in code/, and PDF text in refs/text/)
 	treeEntries, _ := collectProjectTree(r.Context(), projDir)
 	for _, entry := range treeEntries {
-		if entry.Path == "refs/index.json" {
+		if entry.Path == "refs/index.json" || entry.Kind == "asset" {
 			continue
 		}
 		isRefText := strings.HasPrefix(entry.Path, "refs/text/") && strings.HasSuffix(entry.Path, ".md")

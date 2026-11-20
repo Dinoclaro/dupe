@@ -98,7 +98,7 @@ const CompiledPdfPageCanvas: React.FC<CompiledPdfPageCanvasProps> = ({
           onPageMeasured(unitViewport.width, unitViewport.height);
         }
 
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const dpr = Math.max(window.devicePixelRatio || 1, 2);
         const cssViewport = page.getViewport({ scale });
         const hiViewport = page.getViewport({ scale: scale * dpr });
         const canvas = canvasRef.current;
