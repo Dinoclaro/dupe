@@ -19,7 +19,24 @@ import (
 )
 
 type localRuntimeConfig struct {
-	ProjectsDir string `json:"projects_dir"`
+	ProjectsDir        string   `json:"projects_dir"`
+	RecentProjectsDirs []string `json:"recent_projects_dirs,omitempty"`
+}
+
+func appendUniqueDir(list []string, dir string) []string {
+	if strings.TrimSpace(dir) == "" {
+		return list
+	}
+	out := []string{dir}
+	for _, item := range list {
+		if item != dir && strings.TrimSpace(item) != "" {
+			out = append(out, item)
+		}
+		if len(out) >= 6 {
+			break
+		}
+	}
+	return out
 }
 
 func (s *Server) localConfigPath() string {
@@ -202,6 +219,10 @@ func (s *Server) handleLocalSetupScript(w http.ResponseWriter, r *http.Request) 
 	if enableAutostart {
 		autostartFlag = "1"
 	}
+	storageSuffix := sanitizeProjectFolderName(claims.Username)
+	if !enableSync {
+		storageSuffix = "local"
+	}
 
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
@@ -210,7 +231,7 @@ BASE_URL=%q
 TOKEN=%q
 PROJECTS_DIR="%s"
 INSTALL_DIR="$HOME/.local/share/dupe"
-STORAGE_DIR="$INSTALL_DIR/storage"
+STORAGE_DIR="$INSTALL_DIR/storage_%s"
 BIN_DIR="$HOME/.local/bin"
 AUTOSTART=%s
 
@@ -270,7 +291,7 @@ echo "==> Starting dupe in local mode on http://127.0.0.1:8080 ..."
 cd "$INSTALL_DIR/backend"
 STORAGE_DIR="$STORAGE_DIR" WEB_DIST_DIR="$INSTALL_DIR/web/dist" EXTRACT_SCRIPT="$INSTALL_DIR/scripts/extract_meta.py" \
   exec "$INSTALL_DIR/backend/server" serve --mode local --projects "$PROJECTS_DIR" %s
-`, baseURL, rawToken, rawProjects, autostartFlag, syncFlags, syncFlags)
+`, baseURL, rawToken, rawProjects, storageSuffix, autostartFlag, syncFlags, syncFlags)
 
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -293,14 +314,17 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	pythonReady := pyPathErr == nil || pyStatErr == nil
 
 	syncCfg := s.loadRemoteSyncConfig()
+	lc := s.loadLocalConfig()
+	recentDirs := appendUniqueDir(lc.RecentProjectsDirs, s.getProjectsDir())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":               s.mode,
-		"projects_dir":       s.getProjectsDir(),
-		"storage_dir":        s.storageDir,
-		"home_dir":           homeDir,
-		"tectonic_available": tectonicReady,
-		"python_available":   pythonReady,
-		"sync_remote_url":    syncCfg.RemoteURL,
+		"mode":                 s.mode,
+		"projects_dir":         s.getProjectsDir(),
+		"recent_projects_dirs": recentDirs,
+		"storage_dir":          s.storageDir,
+		"home_dir":             homeDir,
+		"tectonic_available":   tectonicReady,
+		"python_available":     pythonReady,
+		"sync_remote_url":      syncCfg.RemoteURL,
 	})
 }
 
@@ -445,11 +469,18 @@ func (s *Server) handleSetLocalProjectsRoot(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot create directory: %v", err))
 		return
 	}
+	prevRoot := s.getProjectsDir()
 	s.setProjectsDir(cleanDir)
-	_ = s.saveLocalConfig(localRuntimeConfig{ProjectsDir: cleanDir})
+	lc := s.loadLocalConfig()
+	recent := appendUniqueDir(appendUniqueDir(lc.RecentProjectsDirs, prevRoot), cleanDir)
+	_ = s.saveLocalConfig(localRuntimeConfig{
+		ProjectsDir:        cleanDir,
+		RecentProjectsDirs: recent,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"projects_dir": cleanDir,
+		"projects_dir":         cleanDir,
+		"recent_projects_dirs": recent,
 	})
 }
 

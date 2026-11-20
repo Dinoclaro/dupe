@@ -133,6 +133,7 @@ export interface CompiledPdfMeta {
 export interface LocalStatus {
   mode: string;
   projects_dir: string;
+  recent_projects_dirs?: string[];
   storage_dir: string;
   home_dir: string;
   tectonic_available: boolean;

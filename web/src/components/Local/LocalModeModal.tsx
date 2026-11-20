@@ -334,6 +334,25 @@ export const LocalModeModal: React.FC<LocalModeModalProps> = ({
               </div>
             )}
 
+            {localStatus?.recent_projects_dirs && localStatus.recent_projects_dirs.length > 0 && (
+              <div className="wizard-step-card">
+                <div className="wizard-step-title">Quick Switch Projects Parent Folder</div>
+                <div className="row-gap" style={{ flexWrap: 'wrap' }}>
+                  {localStatus.recent_projects_dirs.map((dir) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      className={`tag-pill ${localStatus.projects_dir === dir ? 'active' : ''}`}
+                      disabled={submittingAction || localStatus.projects_dir === dir}
+                      onClick={() => void handleSetRoot(dir)}
+                    >
+                      📁 {dir}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {browseError && <div className="auth-error">{browseError}</div>}
 
             <div className="wizard-step-card">
