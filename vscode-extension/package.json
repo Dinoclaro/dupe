@@ -1,8 +1,8 @@
 {
   "name": "dupe-studio",
   "displayName": "dupe Research Studio",
-  "description": "Paper library, citation intelligence, PDF reader, and Overleaf sync backed by the local dupe daemon.",
-  "version": "0.1.0",
+  "description": "Paper library, Obsidian-style notes, citation intelligence, SyncTeX PDF reader, and Overleaf sync backed by the local dupe daemon.",
+  "version": "0.2.0",
   "publisher": "dinoclaro",
   "engines": {
     "vscode": "^1.90.0"
@@ -38,6 +38,11 @@
           "type": "boolean",
           "default": true,
           "description": "Open or refresh the compiled PDF preview tab after compiling LaTeX."
+        },
+        "dupe.compileOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically recompile project LaTeX when saving a .tex file inside paper/."
         }
       }
     },
@@ -53,12 +58,16 @@
     "views": {
       "dupe": [
         {
-          "id": "dupe.projectView",
-          "name": "Project & Sync"
+          "id": "dupe.notesView",
+          "name": "Notes & Backlinks"
         },
         {
           "id": "dupe.papersView",
           "name": "Paper Library"
+        },
+        {
+          "id": "dupe.projectView",
+          "name": "Project & Sync"
         }
       ]
     },
@@ -67,6 +76,61 @@
         "command": "dupe.refresh",
         "title": "dupe: Refresh Library & Project",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "dupe.quickOpenNote",
+        "title": "dupe: Quick Switcher (Notes, Diagrams & LaTeX)",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "dupe.dailyNote",
+        "title": "dupe: Open Today's Daily Note",
+        "icon": "$(calendar)"
+      },
+      {
+        "command": "dupe.newNote",
+        "title": "dupe: New Note in notes/",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "dupe.renameNote",
+        "title": "dupe: Rename Note",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dupe.deleteNote",
+        "title": "dupe: Delete Note",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dupe.newDiagram",
+        "title": "dupe: New Diagram in diagrams/",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "dupe.toggleCheckbox",
+        "title": "dupe: Toggle Markdown Checkbox"
+      },
+      {
+        "command": "dupe.quickInsertLink",
+        "title": "dupe: Insert Wikilink / Citation"
+      },
+      {
+        "command": "dupe.formatBold",
+        "title": "dupe: Toggle Bold (** / \\textbf)"
+      },
+      {
+        "command": "dupe.formatItalic",
+        "title": "dupe: Toggle Italic (* / \\textit)"
+      },
+      {
+        "command": "dupe.searchByTag",
+        "title": "dupe: Browse Notes by #tag",
+        "icon": "$(tag)"
+      },
+      {
+        "command": "dupe.openOrCreateWikiLink",
+        "title": "dupe: Open or Create Wiki Link"
       },
       {
         "command": "dupe.searchPapers",
@@ -128,6 +192,11 @@
         "icon": "$(file-pdf)"
       },
       {
+        "command": "dupe.syncTexForward",
+        "title": "dupe: Jump from Cursor to PDF (SyncTeX Forward)",
+        "icon": "$(arrow-right)"
+      },
+      {
         "command": "dupe.pullProject",
         "title": "dupe: Pull Overleaf Remote",
         "icon": "$(cloud-download)"
@@ -154,8 +223,13 @@
       },
       {
         "command": "dupe.openProjectFolder",
-        "title": "dupe: Open Another Project Folder",
+        "title": "dupe: Open Project in New Window",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "dupe.switchProjectWindow",
+        "title": "dupe: Open Any Project in New Window",
+        "icon": "$(window)"
       },
       {
         "command": "dupe.linkLocalFolder",
@@ -163,23 +237,81 @@
         "icon": "$(file-symlink-directory)"
       },
       {
-        "command": "dupe.newNote",
-        "title": "dupe: New Note in notes/",
-        "icon": "$(note)"
-      },
-      {
-        "command": "dupe.newDiagram",
-        "title": "dupe: New Diagram in diagrams/",
-        "icon": "$(type-hierarchy-sub)"
-      },
-      {
         "command": "dupe.openWebUI",
         "title": "dupe: Open Web UI in Browser",
         "icon": "$(globe)"
       }
     ],
+    "keybindings": [
+      {
+        "command": "dupe.quickOpenNote",
+        "key": "alt+o"
+      },
+      {
+        "command": "dupe.newNote",
+        "key": "alt+n"
+      },
+      {
+        "command": "dupe.dailyNote",
+        "key": "alt+d"
+      },
+      {
+        "command": "dupe.searchByTag",
+        "key": "alt+t"
+      },
+      {
+        "command": "dupe.toggleCheckbox",
+        "key": "ctrl+enter",
+        "when": "editorTextFocus && editorLangId == markdown"
+      },
+      {
+        "command": "dupe.quickInsertLink",
+        "key": "alt+l",
+        "when": "editorTextFocus && (editorLangId == markdown || editorLangId == latex || editorLangId == tex)"
+      },
+      {
+        "command": "dupe.formatBold",
+        "key": "alt+b",
+        "when": "editorTextFocus && (editorLangId == markdown || editorLangId == latex || editorLangId == tex)"
+      },
+      {
+        "command": "dupe.formatItalic",
+        "key": "alt+i",
+        "when": "editorTextFocus && (editorLangId == markdown || editorLangId == latex || editorLangId == tex)"
+      },
+      {
+        "command": "dupe.syncTexForward",
+        "key": "alt+j",
+        "when": "editorTextFocus && (editorLangId == latex || editorLangId == tex)"
+      },
+      {
+        "command": "dupe.compileLatex",
+        "key": "alt+c",
+        "when": "editorTextFocus && (editorLangId == latex || editorLangId == tex)"
+      }
+    ],
     "menus": {
       "view/title": [
+        {
+          "command": "dupe.quickOpenNote",
+          "when": "view == dupe.notesView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.newNote",
+          "when": "view == dupe.notesView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.dailyNote",
+          "when": "view == dupe.notesView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.searchByTag",
+          "when": "view == dupe.notesView",
+          "group": "navigation"
+        },
         {
           "command": "dupe.searchPapers",
           "when": "view == dupe.papersView",
@@ -212,11 +344,21 @@
         },
         {
           "command": "dupe.refresh",
-          "when": "view == dupe.projectView || view == dupe.papersView",
+          "when": "view == dupe.projectView || view == dupe.papersView || view == dupe.notesView",
           "group": "navigation"
         }
       ],
       "view/item/context": [
+        {
+          "command": "dupe.renameNote",
+          "when": "view == dupe.notesView && viewItem == dupeNote",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "dupe.deleteNote",
+          "when": "view == dupe.notesView && viewItem == dupeNote",
+          "group": "2_danger@1"
+        },
         {
           "command": "dupe.insertCitation",
           "when": "view == dupe.papersView && viewItem =~ /^paper/",
@@ -241,6 +383,23 @@
           "command": "dupe.deletePaper",
           "when": "view == dupe.papersView && viewItem =~ /^paper/",
           "group": "2_danger@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "dupe.syncTexForward",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dupe.compileLatex",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dupe.quickInsertLink",
+          "when": "editorLangId == markdown || editorLangId == latex || editorLangId == tex",
+          "group": "navigation@3"
         }
       ]
     }

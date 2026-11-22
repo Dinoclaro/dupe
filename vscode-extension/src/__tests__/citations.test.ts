@@ -2,12 +2,21 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseBibtexContent } from '../bibParser';
 import {
   detectCitationTrigger,
   filterPapersByQuery,
   findCitationKeysInLine,
   formatCitationSnippet,
 } from '../citations';
+import {
+  NotesIndex,
+  extractMarkdownTags,
+  extractWikiLinksInLine,
+  normalizeNoteRelPath,
+  toggleCheckboxLine,
+  toggleWrappedFormat,
+} from '../notesIndex';
 import {
   discoverProjectsInWorkspace,
   findDupeProjectRoot,
@@ -49,7 +58,7 @@ const SAMPLE_PAPERS: Paper[] = [
 ];
 
 describe('dupe VS Code extension helpers', () => {
-  it('detects LaTeX \\cite and Markdown [[paper: completion triggers', () => {
+  it('detects LaTeX \\cite and Obsidian [[ / [[paper: / #tag triggers', () => {
     expect(detectCitationTrigger('As shown in \\cite{chi', 'latex')).toEqual({
       kind: 'latex',
       query: 'chi',
@@ -63,9 +72,21 @@ describe('dupe VS Code extension helpers', () => {
     });
 
     expect(detectCitationTrigger('Notes on [[paper:zhao', 'markdown')).toEqual({
-      kind: 'markdown',
+      kind: 'markdown_paper',
       query: 'zhao',
       replaceStartOffset: 17,
+    });
+
+    expect(detectCitationTrigger('Linked to [[SRE', 'markdown')).toEqual({
+      kind: 'markdown_wiki',
+      query: 'SRE',
+      replaceStartOffset: 12,
+    });
+
+    expect(detectCitationTrigger('Topic #ablat', 'markdown')).toEqual({
+      kind: 'markdown_tag',
+      query: 'ablat',
+      replaceStartOffset: 7,
     });
 
     expect(detectCitationTrigger('plain sentence', 'latex')).toBeNull();
@@ -91,13 +112,53 @@ describe('dupe VS Code extension helpers', () => {
     expect(formatCitationSnippet('chi2023diffusion', 'markdown')).toBe('[[paper:chi2023diffusion]]');
   });
 
-  it('discovers dupe projects from subdirectories and reads refs/index.json', () => {
+  it('parses .bib files with nested braces cleanly', () => {
+    const bib = `
+@article{yasaOverviewSoftRobotics2023,
+  title = {An {Overview} of Soft Robotics},
+  author = {Yasa, Oncay and Toshimitsu, Yasunori},
+  year = {2023},
+  doi = {10.1146/annurev}
+}
+`;
+    const entries = parseBibtexContent(bib);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].key).toBe('yasaOverviewSoftRobotics2023');
+    expect(entries[0].title).toBe('An Overview of Soft Robotics');
+    expect(entries[0].year).toBe('2023');
+  });
+
+  it('extracts Obsidian wikilinks, tags, checkbox toggles, and note paths', () => {
+    const links = extractWikiLinksInLine('Compare [[SRE Ideas|ideas]] with [[paper:chi2023diffusion]] and ![[arch.drawio.svg]]');
+    expect(links.map((l) => [l.kind, l.target])).toEqual([
+      ['note', 'SRE Ideas'],
+      ['paper', 'chi2023diffusion'],
+      ['diagram', 'arch.drawio.svg'],
+    ]);
+
+    expect(extractMarkdownTags('# Title\nText #experiment and #todo/urgent\n```\n#ignored\n```')).toEqual([
+      'experiment',
+      'todo/urgent',
+    ]);
+
+    expect(toggleCheckboxLine('- [ ] Run ablation')).toBe('- [x] Run ablation');
+    expect(toggleCheckboxLine('- [x] Run ablation')).toBe('- [ ] Run ablation');
+    expect(toggleCheckboxLine('- Plain item')).toBe('- [ ] Plain item');
+    expect(toggleWrappedFormat('focus', '**', '**')).toBe('**focus**');
+    expect(toggleWrappedFormat('**focus**', '**', '**')).toBe('focus');
+    expect(normalizeNoteRelPath('daily/2026-11-22')).toBe('notes/daily/2026-11-22.md');
+  });
+
+  it('indexes notes, diagrams, and backlinks inside a dupe project', () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dupe-vscode-test-'));
     try {
       const projDir = path.join(tmpRoot, 'mimic');
       fs.mkdirSync(path.join(projDir, '.dupe'), { recursive: true });
       fs.mkdirSync(path.join(projDir, 'paper', 'sections'), { recursive: true });
+      fs.mkdirSync(path.join(projDir, 'notes', 'daily'), { recursive: true });
+      fs.mkdirSync(path.join(projDir, 'diagrams'), { recursive: true });
       fs.mkdirSync(path.join(projDir, 'refs'), { recursive: true });
+
       fs.writeFileSync(
         path.join(projDir, '.dupe', 'project.json'),
         JSON.stringify({ id: 'p-1', name: 'mimic', linked_paper_ids: [], link_all_papers: true }),
@@ -106,16 +167,25 @@ describe('dupe VS Code extension helpers', () => {
         path.join(projDir, 'refs', 'index.json'),
         JSON.stringify([{ paper_id: '111', bibtex_key: 'chi2023diffusion', title: 'Diffusion', authors: 'Chi', publication_year: 2023, doi: '', tags: [] }]),
       );
+      fs.writeFileSync(path.join(projDir, 'notes', 'ideas.md'), '# Ideas\n\nTarget note #core\n');
+      fs.writeFileSync(path.join(projDir, 'notes', 'daily', '2026-11-22.md'), 'See [[ideas]] and [[paper:chi2023diffusion]]\n');
+      fs.writeFileSync(path.join(projDir, 'diagrams', 'arch.drawio.svg'), '<svg/>');
 
       expect(findDupeProjectRoot(path.join(projDir, 'paper', 'sections'))).toBe(projDir);
+      expect(discoverProjectsInWorkspace([tmpRoot])).toHaveLength(1);
+      expect(readLocalRefsIndex(projDir)).toHaveLength(1);
 
-      const fromParent = discoverProjectsInWorkspace([tmpRoot]);
-      expect(fromParent).toHaveLength(1);
-      expect(fromParent[0].config.id).toBe('p-1');
+      const idx = new NotesIndex();
+      idx.rebuild(projDir);
+      expect(idx.getNotes()).toHaveLength(2);
+      expect(idx.getDiagrams()).toHaveLength(1);
 
-      const refs = readLocalRefsIndex(projDir);
-      expect(refs).toHaveLength(1);
-      expect(refs[0].bibtex_key).toBe('chi2023diffusion');
+      const targetNote = idx.resolveNoteTarget('ideas')!;
+      expect(targetNote.relPath).toBe('notes/ideas.md');
+      const backlinks = idx.getBacklinksForNote(targetNote.absPath);
+      expect(backlinks).toHaveLength(1);
+      expect(backlinks[0].sourceRelPath).toBe('notes/daily/2026-11-22.md');
+      expect(idx.getBacklinksForPaper('chi2023diffusion')).toHaveLength(1);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }

@@ -1,6 +1,6 @@
 import { LocalRefIndexEntry, Paper } from './types';
 
-export type CitationContextKind = 'latex' | 'markdown';
+export type CitationContextKind = 'latex' | 'markdown_paper' | 'markdown_wiki' | 'markdown_tag';
 
 export interface CitationTriggerMatch {
   kind: CitationContextKind;
@@ -9,14 +9,16 @@ export interface CitationTriggerMatch {
 }
 
 export interface CitationKeyOccurrence {
-  kind: CitationContextKind;
+  kind: 'latex' | 'markdown';
   key: string;
   startOffset: number;
   endOffset: number;
 }
 
 const LATEX_CITE_TRIGGER_RE = /\\cite[a-zA-Z*]*\{(?:[^}]*,\s*)?([a-zA-Z0-9_:-]*)$/;
-const MARKDOWN_CITE_TRIGGER_RE = /\[\[paper:([a-zA-Z0-9_:-]*)$/;
+const MARKDOWN_PAPER_TRIGGER_RE = /\[\[paper:([a-zA-Z0-9_:-]*)$/;
+const MARKDOWN_WIKI_TRIGGER_RE = /(!?)\[\[([^\]\n]*)$/;
+const MARKDOWN_TAG_TRIGGER_RE = /(?:^|[\s,(])#([a-zA-Z0-9_/-]*)$/;
 const LATEX_CITE_BLOCK_RE = /\\cite[a-zA-Z*]*\{([^}]+)\}/g;
 const MARKDOWN_PAPER_LINK_RE = /\[\[paper:([a-zA-Z0-9_:-]+)\]\]/g;
 
@@ -25,12 +27,30 @@ export function detectCitationTrigger(
   languageId: string,
 ): CitationTriggerMatch | null {
   if (languageId === 'markdown') {
-    const mdMatch = linePrefix.match(MARKDOWN_CITE_TRIGGER_RE);
-    if (mdMatch) {
+    const paperMatch = linePrefix.match(MARKDOWN_PAPER_TRIGGER_RE);
+    if (paperMatch) {
       return {
-        kind: 'markdown',
-        query: mdMatch[1],
-        replaceStartOffset: linePrefix.length - mdMatch[1].length,
+        kind: 'markdown_paper',
+        query: paperMatch[1],
+        replaceStartOffset: linePrefix.length - paperMatch[1].length,
+      };
+    }
+
+    const wikiMatch = linePrefix.match(MARKDOWN_WIKI_TRIGGER_RE);
+    if (wikiMatch) {
+      return {
+        kind: 'markdown_wiki',
+        query: wikiMatch[2],
+        replaceStartOffset: linePrefix.length - wikiMatch[2].length,
+      };
+    }
+
+    const tagMatch = linePrefix.match(MARKDOWN_TAG_TRIGGER_RE);
+    if (tagMatch) {
+      return {
+        kind: 'markdown_tag',
+        query: tagMatch[1],
+        replaceStartOffset: linePrefix.length - tagMatch[1].length,
       };
     }
   }

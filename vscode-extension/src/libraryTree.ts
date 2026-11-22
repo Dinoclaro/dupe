@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { filterPapersByQuery } from './citations';
-import { LocalStatus, Paper, ProjectConfig, RemoteSyncStatus } from './types';
+import { NotesIndex } from './notesIndex';
+import { BacklinkHit, DiagramEntry, LocalStatus, NoteEntry, Paper, ProjectConfig, RemoteSyncStatus } from './types';
 
 export class PaperTreeItem extends vscode.TreeItem {
   constructor(
@@ -56,6 +57,66 @@ export class InfoTreeItem extends vscode.TreeItem {
   }
 }
 
+export class SectionTreeItem extends vscode.TreeItem {
+  constructor(
+    label: string,
+    public readonly sectionKind: 'backlinks' | 'notes' | 'diagrams',
+    iconId: string,
+    description = '',
+  ) {
+    super(label, vscode.TreeItemCollapsibleState.Expanded);
+    this.description = description;
+    this.iconPath = new vscode.ThemeIcon(iconId);
+    this.contextValue = `section_${sectionKind}`;
+  }
+}
+
+export class NoteTreeItem extends vscode.TreeItem {
+  constructor(public readonly note: NoteEntry) {
+    super(note.slug, vscode.TreeItemCollapsibleState.None);
+    this.description = note.tags.length > 0 ? note.tags.map((t) => `#${t}`).join(' ') : '';
+    this.iconPath = new vscode.ThemeIcon('note');
+    this.tooltip = note.relPath;
+    this.contextValue = 'dupeNote';
+    this.command = {
+      command: 'vscode.open',
+      title: 'Open Note',
+      arguments: [vscode.Uri.file(note.absPath)],
+    };
+  }
+}
+
+export class DiagramTreeItem extends vscode.TreeItem {
+  constructor(public readonly diagram: DiagramEntry) {
+    super(diagram.name, vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon('type-hierarchy-sub');
+    this.tooltip = diagram.relPath;
+    this.contextValue = 'dupeDiagram';
+    this.command = {
+      command: 'vscode.open',
+      title: 'Open Diagram',
+      arguments: [vscode.Uri.file(diagram.absPath)],
+    };
+  }
+}
+
+export class BacklinkTreeItem extends vscode.TreeItem {
+  constructor(public readonly hit: BacklinkHit) {
+    super(hit.sourceRelPath, vscode.TreeItemCollapsibleState.None);
+    this.description = `:${hit.line} ${hit.preview}`;
+    this.iconPath = new vscode.ThemeIcon('references');
+    this.tooltip = `${hit.sourceRelPath}:${hit.line}\n${hit.preview}`;
+    this.command = {
+      command: 'vscode.open',
+      title: 'Open Backlink',
+      arguments: [
+        vscode.Uri.file(hit.sourceAbsPath),
+        { selection: new vscode.Range(hit.line - 1, 0, hit.line - 1, 0) },
+      ],
+    };
+  }
+}
+
 export class PaperLibraryProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
   private readonly onDidChangeEmitter = new vscode.EventEmitter<vscode.TreeItem | undefined>();
   readonly onDidChangeTreeData = this.onDidChangeEmitter.event;
@@ -65,11 +126,7 @@ export class PaperLibraryProvider implements vscode.TreeDataProvider<vscode.Tree
   private filterQuery = '';
   private daemonError: string | null = null;
 
-  update(
-    papers: Paper[],
-    activeProject: ProjectConfig | null,
-    daemonError: string | null,
-  ): void {
+  update(papers: Paper[], activeProject: ProjectConfig | null, daemonError: string | null): void {
     this.papers = papers;
     this.activeProject = activeProject;
     this.daemonError = daemonError;
@@ -123,6 +180,75 @@ export class PaperLibraryProvider implements vscode.TreeDataProvider<vscode.Tree
   }
 }
 
+export class NotesAndBacklinksProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
+  private readonly onDidChangeEmitter = new vscode.EventEmitter<vscode.TreeItem | undefined>();
+  readonly onDidChangeTreeData = this.onDidChangeEmitter.event;
+
+  private activeFilePath: string | null = null;
+
+  constructor(private readonly notesIndex: NotesIndex) {}
+
+  refresh(activeFilePath?: string | null): void {
+    if (activeFilePath !== undefined) {
+      this.activeFilePath = activeFilePath;
+    }
+    this.onDidChangeEmitter.fire(undefined);
+  }
+
+  getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
+    return element;
+  }
+
+  getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
+    if (!element) {
+      const notes = this.notesIndex.getNotes();
+      const diagrams = this.notesIndex.getDiagrams();
+      const backlinks = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
+      return [
+        new SectionTreeItem('Backlinks to Active Note', 'backlinks', 'references', String(backlinks.length)),
+        new SectionTreeItem('Notes (Alt+O / Alt+N / Alt+D)', 'notes', 'notebook', String(notes.length)),
+        new SectionTreeItem('Diagrams', 'diagrams', 'type-hierarchy-sub', String(diagrams.length)),
+      ];
+    }
+
+    if (element instanceof SectionTreeItem) {
+      if (element.sectionKind === 'backlinks') {
+        const hits = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
+        if (hits.length === 0) {
+          return [new InfoTreeItem('No incoming [[links]] yet', 'Link with [[note-name]]', 'circle-outline')];
+        }
+        return hits.map((h) => new BacklinkTreeItem(h));
+      }
+      if (element.sectionKind === 'notes') {
+        const notes = this.notesIndex.getNotes();
+        if (notes.length === 0) {
+          return [
+            new InfoTreeItem('No notes yet', 'Press Alt+N or Alt+D', 'add', {
+              command: 'dupe.newNote',
+              title: 'New Note',
+            }),
+          ];
+        }
+        return notes.map((n) => new NoteTreeItem(n));
+      }
+      if (element.sectionKind === 'diagrams') {
+        const diagrams = this.notesIndex.getDiagrams();
+        if (diagrams.length === 0) {
+          return [
+            new InfoTreeItem('No diagrams yet', 'Click to create .drawio.svg', 'add', {
+              command: 'dupe.newDiagram',
+              title: 'New Diagram',
+            }),
+          ];
+        }
+        return diagrams.map((d) => new DiagramTreeItem(d));
+      }
+    }
+
+    return [];
+  }
+}
+
 export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
   private readonly onDidChangeEmitter = new vscode.EventEmitter<vscode.TreeItem | undefined>();
   readonly onDidChangeTreeData = this.onDidChangeEmitter.event;
@@ -170,9 +296,9 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
     items.push(
       new InfoTreeItem(
         proj ? proj.name : 'No active project',
-        proj ? `${proj.folder_name}/` : 'Click to open or create a project',
+        proj ? `${proj.folder_name}/ (click to open in new window)` : 'Click to open a project',
         'folder-active',
-        { command: 'dupe.openProjectFolder', title: 'Switch Project Folder' },
+        { command: 'dupe.openProjectFolder', title: 'Open Project in New Window' },
       ),
     );
 
@@ -203,7 +329,7 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
       items.push(
         new InfoTreeItem(
           'Overleaf Remote',
-          proj.overleaf_remote ? (proj.pending_push ? 'Linked (push queued)' : 'Linked') : 'Not linked',
+          proj.overleaf_remote ? (proj.pending_push ? 'Linked (push queued)' : 'Linked (click to pull)') : 'Not linked',
           proj.overleaf_remote ? 'git-branch' : 'circle-slash',
           { command: proj.overleaf_remote ? 'dupe.pullProject' : 'dupe.linkLocalFolder', title: 'Overleaf' },
         ),
@@ -222,8 +348,8 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
 
       items.push(
         new InfoTreeItem(
-          'Compile LaTeX & View PDF',
-          this.localStatus?.tectonic_available ? 'tectonic ready' : 'browser fallback',
+          'Compile LaTeX & View PDF (Alt+C)',
+          this.localStatus?.tectonic_available ? 'tectonic + SyncTeX ready' : 'check tectonic',
           'play',
           { command: 'dupe.compileLatex', title: 'Compile LaTeX' },
         ),
@@ -239,22 +365,16 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
           'sparkle',
           { command: 'dupe.gatherContext', title: 'Regenerate Context' },
         ),
-        new InfoTreeItem(
-          'New Note (notes/*.md)',
-          'Create Markdown note',
-          'note',
-          { command: 'dupe.newNote', title: 'New Note' },
-        ),
-        new InfoTreeItem(
-          'New Diagram (diagrams/*.drawio.svg)',
-          'Create Draw.io diagram',
-          'type-hierarchy-sub',
-          { command: 'dupe.newDiagram', title: 'New Diagram' },
-        ),
       );
     }
 
     items.push(
+      new InfoTreeItem(
+        'Open Another Project (New Window)',
+        'Opens isolated VS Code window',
+        'window',
+        { command: 'dupe.switchProjectWindow', title: 'Open Project in New Window' },
+      ),
       new InfoTreeItem(
         'New Project',
         'Scaffold paper/, code/, notes/, refs/',

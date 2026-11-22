@@ -1,26 +1,79 @@
-import fs from 'node:fs/promises';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { DupeApiClient } from './api';
+import { loadProjectBibMetadata } from './bibParser';
 import { DupeCitationFeatures } from './citationFeatures';
 import { formatCitationSnippet, paperFromLocalRefIndex } from './citations';
-import { PaperLibraryProvider, PaperTreeItem, ProjectSyncProvider } from './libraryTree';
+import {
+  NotesAndBacklinksProvider,
+  NoteTreeItem,
+  PaperLibraryProvider,
+  PaperTreeItem,
+  ProjectSyncProvider,
+} from './libraryTree';
+import {
+  NotesIndex,
+  normalizeNoteRelPath,
+  toggleCheckboxLine,
+  toggleWrappedFormat,
+} from './notesIndex';
 import { DupePdfViewer } from './pdfViewer';
 import {
   discoverProjectsInWorkspace,
   findDupeProjectRoot,
+  readLocalProjectConfig,
   readLocalRefsIndex,
 } from './projectLocator';
-import { LatexDiagnostic, LocalStatus, Paper, ProjectConfig, RemoteSyncStatus } from './types';
+import {
+  BibMetadata,
+  LatexDiagnostic,
+  LocalStatus,
+  Paper,
+  ProjectConfig,
+  RemoteSyncStatus,
+} from './types';
 
 const DEFAULT_DRAWIO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="220" viewBox="0 0 400 220" content="%3Cmxfile%3E%3Cdiagram%20id%3D%22d1%22%20name%3D%22Page-1%22%3E%3CmxGraphModel%3E%3Croot%3E%3CmxCell%20id%3D%220%22%2F%3E%3CmxCell%20id%3D%221%22%20parent%3D%220%22%2F%3E%3C%2Froot%3E%3C%2FmxGraphModel%3E%3C%2Fdiagram%3E%3C%2Fmxfile%3E"><rect width="100%" height="100%" fill="#ffffff"/><text x="200" y="114" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#555">New dupe diagram</text></svg>\n`;
+
+const STARTER_MAIN_TEX = `\\documentclass[conference]{IEEEtran}
+\\usepackage[utf8]{inputenc}
+\\usepackage{amsmath,amssymb,graphicx}
+\\usepackage[hidelinks]{hyperref}
+
+\\title{Untitled Paper}
+\\author{Author Name}
+
+\\begin{document}
+\\maketitle
+
+\\begin{abstract}
+Write your abstract here.
+\\end{abstract}
+
+\\section{Introduction}
+Start writing your introduction here.
+
+\\bibliographystyle{IEEEtran}
+\\bibliography{dupe_references}
+
+\\end{document}
+`;
 
 export function activate(context: vscode.ExtensionContext): void {
   const api = new DupeApiClient();
   const pdfViewer = new DupePdfViewer(context.extensionUri);
+  const notesIndex = new NotesIndex();
   const paperProvider = new PaperLibraryProvider();
+  const notesProvider = new NotesAndBacklinksProvider(notesIndex);
   const projectProvider = new ProjectSyncProvider();
   const diagnostics = vscode.languages.createDiagnosticCollection('dupe-latex');
+
+  const syncTexFlashDeco = vscode.window.createTextEditorDecorationType({
+    backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
+    isWholeLine: true,
+  });
 
   let papers: Paper[] = [];
   let projects: ProjectConfig[] = [];
@@ -30,14 +83,18 @@ export function activate(context: vscode.ExtensionContext): void {
   let syncStatus: RemoteSyncStatus | null = null;
   let codeTarget = '';
   let daemonError: string | null = null;
+  let bibMap = new Map<string, BibMetadata>();
+  let saveCompileTimer: ReturnType<typeof setTimeout> | undefined;
 
   const statusSyncItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   const statusCompileItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
   const statusLibraryItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
+  const statusNoteItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
 
   statusSyncItem.command = 'dupe.syncProject';
   statusCompileItem.command = 'dupe.compileLatex';
   statusLibraryItem.command = 'dupe.searchPapers';
+  statusNoteItem.command = 'dupe.quickOpenNote';
 
   function updateStatusBar(): void {
     if (daemonError) {
@@ -47,6 +104,7 @@ export function activate(context: vscode.ExtensionContext): void {
       statusSyncItem.show();
       statusCompileItem.hide();
       statusLibraryItem.hide();
+      statusNoteItem.hide();
       return;
     }
 
@@ -61,15 +119,20 @@ export function activate(context: vscode.ExtensionContext): void {
       statusSyncItem.tooltip = 'Commit & sync project files (Overleaf + notes + BibTeX)';
       statusSyncItem.show();
 
-      statusCompileItem.text = '$(play) Compile LaTeX';
+      statusCompileItem.text = '$(play) Compile (Alt+C)';
       statusCompileItem.tooltip = 'Compile project LaTeX with tectonic and open PDF';
       statusCompileItem.show();
+
+      statusNoteItem.text = '$(go-to-file) Notes (Alt+O)';
+      statusNoteItem.tooltip = 'Quick Switcher (Alt+O), New Note (Alt+N), Daily Note (Alt+D)';
+      statusNoteItem.show();
     } else {
       statusSyncItem.text = '$(folder) dupe: Ready';
-      statusSyncItem.tooltip = 'Open or create a dupe project';
-      statusSyncItem.command = 'dupe.openProjectFolder';
+      statusSyncItem.tooltip = 'Open a dupe project in a new window';
+      statusSyncItem.command = 'dupe.switchProjectWindow';
       statusSyncItem.show();
       statusCompileItem.hide();
+      statusNoteItem.hide();
     }
 
     statusLibraryItem.text = `$(book) ${papers.length} PDFs`;
@@ -81,34 +144,71 @@ export function activate(context: vscode.ExtensionContext): void {
     return (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath);
   }
 
-  function loadFallbackLocalRefs(): void {
-    const wsRoots = resolveWorkspaceRoots();
-    const discovered = discoverProjectsInWorkspace(wsRoots);
-    if (discovered.length === 0) {
-      return;
+  function getActiveEditorProjectRoot(): string | null {
+    const activeUri = vscode.window.activeTextEditor?.document.uri;
+    if (activeUri?.scheme === 'file') {
+      return findDupeProjectRoot(path.dirname(activeUri.fsPath));
     }
-    const first = discovered[0];
-    activeProject = first.config;
-    activeProjectRoot = first.rootDir;
-    const refs = readLocalRefsIndex(first.rootDir);
-    if (refs.length > 0 && papers.length === 0) {
-      papers = refs.map(paperFromLocalRefIndex);
+    return null;
+  }
+
+  function rebuildLocalIndices(): void {
+    bibMap = loadProjectBibMetadata(activeProjectRoot, papers);
+    notesIndex.rebuild(activeProjectRoot);
+    const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath || null;
+    notesProvider.refresh(activeFsPath);
+  }
+
+  function getSerializableBibMap(): Record<string, BibMetadata> {
+    const out: Record<string, BibMetadata> = {};
+    for (const [k, v] of bibMap.entries()) {
+      out[k] = v;
+    }
+    return out;
+  }
+
+  function loadFallbackLocalRefs(): void {
+    const editorRoot = getActiveEditorProjectRoot();
+    if (editorRoot) {
+      const cfg = readLocalProjectConfig(editorRoot);
+      if (cfg) {
+        activeProject = cfg;
+        activeProjectRoot = editorRoot;
+      }
+    } else {
+      const discovered = discoverProjectsInWorkspace(resolveWorkspaceRoots());
+      if (discovered.length > 0) {
+        activeProject = discovered[0].config;
+        activeProjectRoot = discovered[0].rootDir;
+      }
+    }
+    if (activeProjectRoot) {
+      const refs = readLocalRefsIndex(activeProjectRoot);
+      if (refs.length > 0 && papers.length === 0) {
+        papers = refs.map(paperFromLocalRefIndex);
+      }
     }
   }
 
   async function refreshAll(): Promise<void> {
     try {
       const wsRoots = resolveWorkspaceRoots();
+      const editorRoot = getActiveEditorProjectRoot();
       const discovered = discoverProjectsInWorkspace(wsRoots);
+      const preferredDiscovered = editorRoot
+        ? discovered.find((d) => path.resolve(d.rootDir) === path.resolve(editorRoot)) || {
+            rootDir: editorRoot,
+            config: readLocalProjectConfig(editorRoot),
+          }
+        : discovered.find((d) => d.config.folder_name !== 'default-paper-project') || discovered[0];
 
       localStatus = await api.getLocalStatus().catch(() => null);
       if (
-        discovered.length > 0 &&
+        preferredDiscovered?.rootDir &&
         localStatus?.projects_dir &&
-        path.dirname(discovered[0].rootDir) !== path.resolve(localStatus.projects_dir)
+        path.dirname(preferredDiscovered.rootDir) !== path.resolve(localStatus.projects_dir)
       ) {
-        // Align daemon parent folder with the dupe project open in VS Code
-        localStatus = await api.setLocalProjectsRoot(path.dirname(discovered[0].rootDir));
+        localStatus = await api.setLocalProjectsRoot(path.dirname(preferredDiscovered.rootDir));
       }
 
       const [loadedPapers, loadedProjects, remoteSync] = await Promise.all([
@@ -126,19 +226,19 @@ export function activate(context: vscode.ExtensionContext): void {
       activeProjectRoot = null;
       codeTarget = '';
 
-      if (discovered.length > 0) {
+      if (preferredDiscovered?.config) {
+        const cfg = preferredDiscovered.config;
         const match =
-          projects.find((p) => p.id === discovered[0].config.id) ||
-          projects.find((p) => p.folder_name === discovered[0].config.folder_name) ||
+          projects.find((p) => p.id === cfg.id) ||
+          projects.find((p) => p.folder_name === cfg.folder_name) ||
           null;
         if (match) {
           activeProject = match;
-          activeProjectRoot = discovered[0].rootDir;
+          activeProjectRoot = preferredDiscovered.rootDir;
         }
       }
 
       if (!activeProject && wsRoots.length > 0) {
-        // Also detect when user opened a symlinked code/ repository directly
         for (const proj of projects) {
           try {
             const tree = await api.getProjectTree(proj.id);
@@ -160,9 +260,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       if (!activeProject && projects.length > 0) {
-        activeProject = projects[0];
+        const nonDefault = projects.find((p) => p.folder_name !== 'default-paper-project') || projects[0];
+        activeProject = nonDefault;
         if (localStatus?.projects_dir) {
-          activeProjectRoot = path.join(localStatus.projects_dir, activeProject.folder_name);
+          activeProjectRoot = path.join(localStatus.projects_dir, nonDefault.folder_name);
         }
       }
 
@@ -179,6 +280,7 @@ export function activate(context: vscode.ExtensionContext): void {
       loadFallbackLocalRefs();
     }
 
+    rebuildLocalIndices();
     paperProvider.update(papers, activeProject, daemonError);
     projectProvider.update({
       activeProject,
@@ -224,15 +326,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  async function openPaper(paper: Paper): Promise<void> {
-    await pdfViewer.openPdf({
-      key: `paper:${paper.id}`,
-      title: `${paper.bibtex_key || paper.title}.pdf`,
-      loader: () => api.getPaperPdfBytes(paper.id),
-      viewColumn: vscode.ViewColumn.Beside,
-    });
-  }
-
   async function pickProjectOrWarn(): Promise<ProjectConfig | null> {
     if (activeProject) {
       return activeProject;
@@ -258,8 +351,209 @@ export function activate(context: vscode.ExtensionContext): void {
     return null;
   }
 
-  const citationProvider = new DupeCitationFeatures(() => papers);
+  async function openNoteByRelPath(relPath: string, initialContent?: string): Promise<void> {
+    const proj = await pickProjectOrWarn();
+    if (!proj) {
+      return;
+    }
+    const projRoot = await resolveProjectRoot(proj);
+    if (!projRoot) {
+      return;
+    }
+    const absNote = path.join(projRoot, relPath);
+    await fsp.mkdir(path.dirname(absNote), { recursive: true });
+    let created = false;
+    try {
+      await fsp.access(absNote);
+    } catch {
+      created = true;
+      const heading = path.basename(absNote, '.md');
+      await fsp.writeFile(absNote, initialContent ?? `# ${heading}\n\n`, 'utf8');
+    }
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absNote));
+    const editor = await vscode.window.showTextDocument(doc);
+    if (created) {
+      const lastLine = Math.max(0, doc.lineCount - 1);
+      const pos = new vscode.Position(lastLine, doc.lineAt(lastLine).text.length);
+      editor.selection = new vscode.Selection(pos, pos);
+      rebuildLocalIndices();
+    }
+  }
+
+  async function handleSyncTexReverseForProject(
+    proj: ProjectConfig,
+    projRoot: string | null,
+    params: { page: number; xRatio: number; yRatio: number; widthPt: number; heightPt: number },
+  ): Promise<void> {
+    if (!projRoot) {
+      return;
+    }
+    try {
+      const res = await api.syncTexBackward(proj.id, {
+        page: params.page,
+        x: params.xRatio,
+        y: params.yRatio,
+        w: params.widthPt,
+        h: params.heightPt,
+      });
+      const absTex = path.join(projRoot, res.path);
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absTex));
+      const editor = await vscode.window.showTextDocument(doc, {
+        viewColumn: vscode.ViewColumn.One,
+        preserveFocus: false,
+      });
+      const lineIdx = Math.max(0, Math.min(doc.lineCount - 1, (res.line || 1) - 1));
+      const range = new vscode.Range(lineIdx, 0, lineIdx, doc.lineAt(lineIdx).text.length);
+      editor.selection = new vscode.Selection(range.start, range.start);
+      editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+      editor.setDecorations(syncTexFlashDeco, [range]);
+      setTimeout(() => editor.setDecorations(syncTexFlashDeco, []), 1600);
+    } catch (err) {
+      void vscode.window.showWarningMessage(
+        `SyncTeX jump failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  async function appendQuoteToDailyNote(quote: string, bibtexKey?: string): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    const relPath = `notes/daily/${today}.md`;
+    const proj = await pickProjectOrWarn();
+    if (!proj) {
+      return;
+    }
+    const projRoot = await resolveProjectRoot(proj);
+    if (!projRoot) {
+      return;
+    }
+    const absNote = path.join(projRoot, relPath);
+    await fsp.mkdir(path.dirname(absNote), { recursive: true });
+    let existing = '';
+    try {
+      existing = await fsp.readFile(absNote, 'utf8');
+    } catch {
+      existing = `# ${today}\n\n`;
+    }
+    const citeSuffix = bibtexKey ? ` — [[paper:${bibtexKey}]]` : '';
+    const block = `${existing.endsWith('\n') ? '' : '\n'}> "${quote}"${citeSuffix}\n\n`;
+    await fsp.writeFile(absNote, existing + block, 'utf8');
+    rebuildLocalIndices();
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absNote));
+    await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
+  }
+
+  async function openPaper(paper: Paper): Promise<void> {
+    await pdfViewer.openPdf({
+      key: `paper:${paper.id}`,
+      title: `${paper.bibtex_key || paper.title}.pdf`,
+      loader: () => api.getPaperPdfBytes(paper.id),
+      getBibMap: getSerializableBibMap,
+      paperBibtexKey: paper.bibtex_key,
+      callbacks: {
+        onOpenPaperByKey: async (k) => {
+          await vscode.commands.executeCommand('dupe.openPaperByKey', k);
+        },
+        onQuoteToNote: appendQuoteToDailyNote,
+      },
+      viewColumn: vscode.ViewColumn.Beside,
+    });
+  }
+
+  async function openCompiledPdfForProject(proj: ProjectConfig, preserveFocus = false): Promise<void> {
+    const projRoot = await resolveProjectRoot(proj);
+    await pdfViewer.openPdf({
+      key: `compiled:${proj.id}`,
+      title: `${proj.name}.pdf`,
+      loader: () => api.getCompiledPdfBytes(proj.id),
+      getBibMap: getSerializableBibMap,
+      callbacks: {
+        onSyncTexReverse: (coords) => handleSyncTexReverseForProject(proj, projRoot, coords),
+        onOpenPaperByKey: async (k) => {
+          await vscode.commands.executeCommand('dupe.openPaperByKey', k);
+        },
+        onQuoteToNote: appendQuoteToDailyNote,
+      },
+      viewColumn: vscode.ViewColumn.Beside,
+      preserveFocus,
+    });
+  }
+
+  async function runLatexCompile(proj: ProjectConfig, silentMissingTex = false): Promise<void> {
+    const projRoot = await resolveProjectRoot(proj);
+    if (projRoot) {
+      const paperDir = path.join(projRoot, 'paper');
+      let hasAnyTex = false;
+      try {
+        hasAnyTex = fs.readdirSync(paperDir).some((f) => f.toLowerCase().endsWith('.tex'));
+      } catch {
+        hasAnyTex = false;
+      }
+      if (!hasAnyTex) {
+        if (silentMissingTex) {
+          return;
+        }
+        const pick = await vscode.window.showWarningMessage(
+          `Project "${proj.name}" has no .tex file in paper/.`,
+          'Create paper/main.tex',
+          'Cancel',
+        );
+        if (pick === 'Create paper/main.tex') {
+          await fsp.mkdir(paperDir, { recursive: true });
+          const absMain = path.join(paperDir, 'main.tex');
+          await fsp.writeFile(absMain, STARTER_MAIN_TEX, 'utf8');
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absMain));
+          await vscode.window.showTextDocument(doc);
+          await runLatexCompile(proj, false);
+        }
+        return;
+      }
+    }
+
+    const activeDocPath = vscode.window.activeTextEditor?.document.uri.fsPath;
+    let targetRel = '';
+    if (projRoot && activeDocPath) {
+      const rel = path.relative(path.join(projRoot, 'paper'), activeDocPath);
+      if (!rel.startsWith('..') && rel.endsWith('.tex')) {
+        targetRel = rel.replace(/\\/g, '/');
+      }
+    }
+
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `Compiling ${proj.name} LaTeX...` },
+      async () => {
+        try {
+          const res = await api.compileProject(proj.id, targetRel);
+          applyCompilerDiagnostics(projRoot, res.errors || [], res.warnings || []);
+
+          const openOnCompile = vscode.workspace
+            .getConfiguration('dupe')
+            .get<boolean>('openPdfOnCompile', true);
+          if (res.pdf_available && openOnCompile) {
+            await openCompiledPdfForProject(proj, true);
+          }
+
+          if (res.success) {
+            void vscode.window.setStatusBarMessage(
+              `$(check) Compiled ${res.root_tex} (${(res.duration_ms / 1000).toFixed(1)}s)`,
+              4000,
+            );
+          } else {
+            void vscode.window.showWarningMessage(
+              `LaTeX compile finished with ${(res.errors || []).length} error(s) (${res.failure_kind}). Check Problems panel.`,
+            );
+          }
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `Compile failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      },
+    );
+  }
+
+  const citationProvider = new DupeCitationFeatures(() => bibMap, notesIndex);
   context.subscriptions.push(
+    vscode.window.registerTreeDataProvider('dupe.notesView', notesProvider),
     vscode.window.registerTreeDataProvider('dupe.papersView', paperProvider),
     vscode.window.registerTreeDataProvider('dupe.projectView', projectProvider),
     vscode.languages.registerCompletionItemProvider(
@@ -267,7 +561,9 @@ export function activate(context: vscode.ExtensionContext): void {
       citationProvider,
       '{',
       ',',
+      '[',
       ':',
+      '#',
     ),
     vscode.languages.registerHoverProvider(
       [{ language: 'latex' }, { language: 'markdown' }, { language: 'tex' }],
@@ -277,14 +573,310 @@ export function activate(context: vscode.ExtensionContext): void {
       [{ language: 'latex' }, { language: 'markdown' }, { language: 'tex' }],
       citationProvider,
     ),
+    vscode.languages.registerDefinitionProvider({ language: 'markdown' }, citationProvider),
     diagnostics,
+    syncTexFlashDeco,
     statusSyncItem,
     statusCompileItem,
     statusLibraryItem,
+    statusNoteItem,
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('dupe.refresh', () => refreshAll()),
+
+    // Obsidian-style Quick Switcher (Alt+O)
+    vscode.commands.registerCommand('dupe.quickOpenNote', async () => {
+      const proj = await pickProjectOrWarn();
+      if (!proj) {
+        return;
+      }
+      const projRoot = await resolveProjectRoot(proj);
+      if (!projRoot) {
+        return;
+      }
+      notesIndex.rebuild(projRoot);
+
+      const qp = vscode.window.createQuickPick<
+        vscode.QuickPickItem & { absPath?: string; createNote?: boolean }
+      >();
+      qp.placeholder = 'Jump to note, diagram, or paper/*.tex — or type a name to create a new note';
+      qp.matchOnDescription = true;
+
+      const buildStaticItems = () => {
+        const items: Array<vscode.QuickPickItem & { absPath?: string; createNote?: boolean }> = [];
+        for (const n of notesIndex.getNotes()) {
+          items.push({
+            label: `$(note) ${n.slug}`,
+            description: n.tags.map((t) => `#${t}`).join(' '),
+            detail: n.relPath,
+            absPath: n.absPath,
+          });
+        }
+        for (const d of notesIndex.getDiagrams()) {
+          items.push({
+            label: `$(type-hierarchy-sub) ${d.name}`,
+            detail: d.relPath,
+            absPath: d.absPath,
+          });
+        }
+        const paperDir = path.join(projRoot, 'paper');
+        try {
+          for (const f of fs.readdirSync(paperDir)) {
+            if (f.endsWith('.tex')) {
+              items.push({
+                label: `$(file-code) paper/${f}`,
+                detail: `paper/${f}`,
+                absPath: path.join(paperDir, f),
+              });
+            }
+          }
+        } catch {
+          // ignore missing paper dir
+        }
+        return items;
+      };
+
+      const baseItems = buildStaticItems();
+      qp.items = baseItems;
+      qp.onDidChangeValue((val) => {
+        const trimmed = val.trim();
+        if (!trimmed) {
+          qp.items = baseItems;
+          return;
+        }
+        const exists = baseItems.some((it) => it.label.toLowerCase().includes(trimmed.toLowerCase()));
+        if (exists) {
+          qp.items = baseItems;
+        } else {
+          qp.items = [
+            ...baseItems,
+            {
+              label: `$(add) Create note: ${normalizeNoteRelPath(trimmed)}`,
+              alwaysShow: true,
+              createNote: true,
+            },
+          ];
+        }
+      });
+
+      qp.onDidAccept(async () => {
+        const sel = qp.selectedItems[0];
+        const typed = qp.value.trim();
+        qp.hide();
+        if (sel?.absPath) {
+          await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(sel.absPath));
+        } else if (typed) {
+          await openNoteByRelPath(normalizeNoteRelPath(typed));
+        }
+      });
+      qp.onDidHide(() => qp.dispose());
+      qp.show();
+    }),
+
+    // Daily Note (Alt+D)
+    vscode.commands.registerCommand('dupe.dailyNote', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      await openNoteByRelPath(`notes/daily/${today}.md`, `# ${today}\n\n- [ ] `);
+    }),
+
+    // New Note (Alt+N)
+    vscode.commands.registerCommand('dupe.newNote', async () => {
+      const rawName = await vscode.window.showInputBox({
+        prompt: 'New note name (supports subfolders like experiments/ablation)',
+        placeHolder: 'e.g. experiment-ideas',
+      });
+      if (!rawName?.trim()) {
+        return;
+      }
+      await openNoteByRelPath(normalizeNoteRelPath(rawName));
+    }),
+
+    vscode.commands.registerCommand('dupe.renameNote', async (item?: NoteTreeItem) => {
+      if (!item?.note || !activeProjectRoot) {
+        return;
+      }
+      const nextRaw = await vscode.window.showInputBox({
+        prompt: 'New note name or relative path',
+        value: item.note.slug,
+      });
+      if (!nextRaw?.trim()) {
+        return;
+      }
+      const nextRel = normalizeNoteRelPath(nextRaw);
+      const nextAbs = path.join(activeProjectRoot, nextRel);
+      await fsp.mkdir(path.dirname(nextAbs), { recursive: true });
+      await fsp.rename(item.note.absPath, nextAbs);
+      rebuildLocalIndices();
+      await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(nextAbs));
+    }),
+
+    vscode.commands.registerCommand('dupe.deleteNote', async (item?: NoteTreeItem) => {
+      if (!item?.note) {
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        `Delete ${item.note.relPath}?`,
+        { modal: true },
+        'Delete',
+      );
+      if (confirm !== 'Delete') {
+        return;
+      }
+      await fsp.unlink(item.note.absPath);
+      rebuildLocalIndices();
+    }),
+
+    vscode.commands.registerCommand('dupe.openOrCreateWikiLink', async (target?: string, kind?: string) => {
+      if (!target) {
+        return;
+      }
+      if (kind === 'diagram') {
+        const diag = notesIndex.resolveDiagramTarget(target);
+        if (diag) {
+          await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(diag.absPath));
+        } else if (activeProjectRoot) {
+          const stem = target.replace(/^diagrams\//, '').replace(/(\.drawio\.svg|\.svg)$/, '');
+          const abs = path.join(activeProjectRoot, 'diagrams', `${stem}.drawio.svg`);
+          await fsp.mkdir(path.dirname(abs), { recursive: true });
+          await fsp.writeFile(abs, DEFAULT_DRAWIO_SVG, 'utf8');
+          rebuildLocalIndices();
+          await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(abs));
+        }
+        return;
+      }
+
+      const existing = notesIndex.resolveNoteTarget(target);
+      if (existing) {
+        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(existing.absPath));
+        return;
+      }
+      await openNoteByRelPath(normalizeNoteRelPath(target));
+    }),
+
+    // Obsidian Checkbox Toggle (Ctrl+Enter in Markdown)
+    vscode.commands.registerCommand('dupe.toggleCheckbox', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.languageId !== 'markdown') {
+        return;
+      }
+      await editor.edit((eb) => {
+        const seenLines = new Set<number>();
+        for (const sel of editor.selections) {
+          for (let l = sel.start.line; l <= sel.end.line; l++) {
+            if (seenLines.has(l)) {
+              continue;
+            }
+            seenLines.add(l);
+            const line = editor.document.lineAt(l);
+            eb.replace(line.range, toggleCheckboxLine(line.text));
+          }
+        }
+      });
+    }),
+
+    // Quick Link / Citation (Alt+L)
+    vscode.commands.registerCommand('dupe.quickInsertLink', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
+      const isMd = editor.document.languageId === 'markdown';
+      const items: Array<vscode.QuickPickItem & { insertText: string }> = [];
+
+      if (isMd) {
+        for (const n of notesIndex.getNotes()) {
+          items.push({
+            label: `$(note) [[${n.slug}]]`,
+            description: n.relPath,
+            insertText: `[[${n.slug}]]`,
+          });
+        }
+      }
+      for (const m of bibMap.values()) {
+        items.push({
+          label: `$(book) ${m.key}`,
+          description: m.title,
+          detail: `${m.authors}${m.year ? ` (${m.year})` : ''}`,
+          insertText: isMd ? `[[paper:${m.key}]]` : `\\cite{${m.key}}`,
+        });
+      }
+
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: isMd ? 'Insert [[note]] or [[paper:key]]' : 'Insert \\cite{key}',
+        matchOnDescription: true,
+        matchOnDetail: true,
+      });
+      if (!picked) {
+        return;
+      }
+      await editor.edit((eb) => {
+        for (const sel of editor.selections) {
+          eb.replace(sel, picked.insertText);
+        }
+      });
+    }),
+
+    vscode.commands.registerCommand('dupe.formatBold', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
+      const isMd = editor.document.languageId === 'markdown';
+      const prefix = isMd ? '**' : '\\textbf{';
+      const suffix = isMd ? '**' : '}';
+      await editor.edit((eb) => {
+        for (const sel of editor.selections) {
+          const text = editor.document.getText(sel);
+          eb.replace(sel, toggleWrappedFormat(text, prefix, suffix));
+        }
+      });
+    }),
+
+    vscode.commands.registerCommand('dupe.formatItalic', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
+      const isMd = editor.document.languageId === 'markdown';
+      const prefix = isMd ? '*' : '\\textit{';
+      const suffix = isMd ? '*' : '}';
+      await editor.edit((eb) => {
+        for (const sel of editor.selections) {
+          const text = editor.document.getText(sel);
+          eb.replace(sel, toggleWrappedFormat(text, prefix, suffix));
+        }
+      });
+    }),
+
+    vscode.commands.registerCommand('dupe.searchByTag', async () => {
+      if (activeProjectRoot) {
+        notesIndex.rebuild(activeProjectRoot);
+      }
+      const tagsMap = notesIndex.getTagsMap();
+      if (tagsMap.size === 0) {
+        void vscode.window.showInformationMessage('No #tags found in notes/ yet.');
+        return;
+      }
+      const tagPick = await vscode.window.showQuickPick(
+        Array.from(tagsMap.entries()).map(([tag, list]) => ({
+          label: `#${tag}`,
+          description: `${list.length} note(s)`,
+          notes: list,
+        })),
+        { placeHolder: 'Select #tag to filter notes' },
+      );
+      if (!tagPick) {
+        return;
+      }
+      const notePick = await vscode.window.showQuickPick(
+        tagPick.notes.map((n) => ({ label: n.slug, description: n.relPath, absPath: n.absPath })),
+        { placeHolder: `Notes tagged #${tagPick.label.slice(1)}` },
+      );
+      if (notePick) {
+        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(notePick.absPath));
+      }
+    }),
 
     vscode.commands.registerCommand('dupe.searchPapers', async () => {
       if (papers.length === 0) {
@@ -297,7 +889,11 @@ export function activate(context: vscode.ExtensionContext): void {
           detail: `${p.authors || 'Unknown'}${p.publication_year ? ` (${p.publication_year})` : ''}`,
           paper: p,
         })),
-        { placeHolder: 'Search library papers (select to open PDF or insert citation)', matchOnDescription: true, matchOnDetail: true },
+        {
+          placeHolder: 'Search library papers (select to open PDF or insert citation)',
+          matchOnDescription: true,
+          matchOnDetail: true,
+        },
       );
       if (!picked) {
         return;
@@ -385,7 +981,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const paper = papers.find((p) => p.bibtex_key === bibtexKey);
       if (!paper) {
-        void vscode.window.showWarningMessage(`Paper "${bibtexKey}" not found in library.`);
+        const bibEntry = bibMap.get(bibtexKey);
+        if (bibEntry) {
+          void vscode.window.showInformationMessage(
+            `"${bibEntry.title}" (${bibtexKey}) is in project .bib, not uploaded to your PDF library yet.`,
+          );
+        } else {
+          void vscode.window.showWarningMessage(`Paper "${bibtexKey}" not found in library.`);
+        }
         return;
       }
       await openPaper(paper);
@@ -467,52 +1070,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!proj) {
         return;
       }
-      const projRoot = await resolveProjectRoot(proj);
-      const activeDocPath = vscode.window.activeTextEditor?.document.uri.fsPath;
-      let targetRel = '';
-      if (projRoot && activeDocPath) {
-        const rel = path.relative(path.join(projRoot, 'paper'), activeDocPath);
-        if (!rel.startsWith('..') && rel.endsWith('.tex')) {
-          targetRel = rel.replace(/\\/g, '/');
-        }
-      }
-
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Compiling ${proj.name} LaTeX...` },
-        async () => {
-          try {
-            const res = await api.compileProject(proj.id, targetRel);
-            applyCompilerDiagnostics(projRoot, res.errors || [], res.warnings || []);
-
-            const openOnCompile = vscode.workspace
-              .getConfiguration('dupe')
-              .get<boolean>('openPdfOnCompile', true);
-            if (res.pdf_available && openOnCompile) {
-              await pdfViewer.openPdf({
-                key: `compiled:${proj.id}`,
-                title: `${proj.name}.pdf`,
-                loader: () => api.getCompiledPdfBytes(proj.id),
-                viewColumn: vscode.ViewColumn.Beside,
-                preserveFocus: true,
-              });
-            }
-
-            if (res.success) {
-              void vscode.window.showInformationMessage(
-                `Compiled ${res.root_tex} in ${(res.duration_ms / 1000).toFixed(1)}s (${(res.warnings || []).length} warning(s)).`,
-              );
-            } else {
-              void vscode.window.showWarningMessage(
-                `LaTeX compile finished with ${(res.errors || []).length} error(s) (${res.failure_kind}). Check Problems panel.`,
-              );
-            }
-          } catch (err) {
-            void vscode.window.showErrorMessage(
-              `Compile failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        },
-      );
+      await runLatexCompile(proj, false);
     }),
 
     vscode.commands.registerCommand('dupe.openCompiledPdf', async () => {
@@ -520,12 +1078,37 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!proj) {
         return;
       }
-      await pdfViewer.openPdf({
-        key: `compiled:${proj.id}`,
-        title: `${proj.name}.pdf`,
-        loader: () => api.getCompiledPdfBytes(proj.id),
-        viewColumn: vscode.ViewColumn.Beside,
-      });
+      await openCompiledPdfForProject(proj, false);
+    }),
+
+    // SyncTeX Forward (Alt+J in .tex)
+    vscode.commands.registerCommand('dupe.syncTexForward', async () => {
+      const proj = await pickProjectOrWarn();
+      const editor = vscode.window.activeTextEditor;
+      if (!proj || !editor) {
+        return;
+      }
+      const projRoot = await resolveProjectRoot(proj);
+      if (!projRoot) {
+        return;
+      }
+      const rel = path.relative(projRoot, editor.document.uri.fsPath).replace(/\\/g, '/');
+      if (!rel.startsWith('paper/') || !rel.endsWith('.tex')) {
+        void vscode.window.showInformationMessage('Open a .tex file inside paper/ to SyncTeX forward.');
+        return;
+      }
+      try {
+        const res = await api.syncTexForward(proj.id, {
+          file: rel,
+          line: editor.selection.active.line + 1,
+        });
+        await openCompiledPdfForProject(proj, true);
+        await pdfViewer.jumpToSyncTex(`compiled:${proj.id}`, res);
+      } catch (err) {
+        void vscode.window.showWarningMessage(
+          `SyncTeX forward failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }),
 
     vscode.commands.registerCommand('dupe.pullProject', async () => {
@@ -638,16 +1221,14 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(`Switched dupe projects parent folder to ${nextDir}.`);
     }),
 
+    // Open project in a NEW VS Code window
     vscode.commands.registerCommand('dupe.openProjectFolder', async () => {
       await refreshAll();
-      if (projects.length === 0) {
-        void vscode.window.showInformationMessage('No projects in current parent folder.');
+      if (projects.length === 0 || !localStatus?.projects_dir) {
+        void vscode.window.showInformationMessage('No projects found in current parent folder.');
         return;
       }
-      const rootDir = localStatus?.projects_dir;
-      if (!rootDir) {
-        return;
-      }
+      const rootDir = localStatus.projects_dir;
       const picked = await vscode.window.showQuickPick(
         projects.map((p) => ({
           label: p.name,
@@ -655,12 +1236,54 @@ export function activate(context: vscode.ExtensionContext): void {
           detail: p.overleaf_remote ? 'Overleaf Linked' : 'Local Git',
           folderPath: path.join(rootDir, p.folder_name),
         })),
-        { placeHolder: `Open dupe project from ${rootDir}` },
+        { placeHolder: `Open dupe project in a new window (${rootDir})` },
       );
       if (!picked) {
         return;
       }
-      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(picked.folderPath), false);
+      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(picked.folderPath), true);
+    }),
+
+    // Scan all known recent parent roots (e.g. ~/dupe_mimic & ~/dupe_pele) and open in a NEW window
+    vscode.commands.registerCommand('dupe.switchProjectWindow', async () => {
+      const status = localStatus || (await api.getLocalStatus().catch(() => null));
+      const candidateRoots = Array.from(
+        new Set([...(status?.recent_projects_dirs || []), ...(status?.projects_dir ? [status.projects_dir] : [])]),
+      );
+      const discovered = discoverProjectsInWorkspace(candidateRoots);
+      const picked = await vscode.window.showQuickPick(
+        [
+          ...discovered.map((d) => ({
+            label: `$(folder) ${d.config.name}`,
+            description: d.rootDir,
+            detail: d.config.overleaf_remote ? 'Overleaf Linked' : 'Local Git',
+            folderPath: d.rootDir,
+          })),
+          {
+            label: '$(folder-opened) Browse for any project folder...',
+            description: '',
+            folderPath: '',
+          },
+        ],
+        { placeHolder: 'Open project in a separate VS Code window' },
+      );
+      if (!picked) {
+        return;
+      }
+      let targetDir = picked.folderPath;
+      if (!targetDir) {
+        const chosen = await vscode.window.showOpenDialog({
+          canSelectFolders: true,
+          canSelectFiles: false,
+          canSelectMany: false,
+          openLabel: 'Open in New Window',
+        });
+        if (!chosen || chosen.length === 0) {
+          return;
+        }
+        targetDir = chosen[0].fsPath;
+      }
+      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(targetDir), true);
     }),
 
     vscode.commands.registerCommand('dupe.createProject', async () => {
@@ -694,12 +1317,12 @@ export function activate(context: vscode.ExtensionContext): void {
         : null;
       if (targetRoot) {
         const openNow = await vscode.window.showInformationMessage(
-          `Created project "${created.name}". Open folder in VS Code?`,
-          'Open Folder',
+          `Created project "${created.name}". Open in new VS Code window?`,
+          'Open New Window',
           'Later',
         );
-        if (openNow === 'Open Folder') {
-          await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(targetRoot), false);
+        if (openNow === 'Open New Window') {
+          await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(targetRoot), true);
         }
       }
     }),
@@ -744,35 +1367,6 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
 
-    vscode.commands.registerCommand('dupe.newNote', async () => {
-      const proj = await pickProjectOrWarn();
-      if (!proj) {
-        return;
-      }
-      const projRoot = await resolveProjectRoot(proj);
-      if (!projRoot) {
-        return;
-      }
-      const rawName = await vscode.window.showInputBox({
-        prompt: 'Note filename inside notes/',
-        placeHolder: 'e.g. experiment-ideas',
-      });
-      if (!rawName?.trim()) {
-        return;
-      }
-      const safeName = rawName.trim().endsWith('.md') ? rawName.trim() : `${rawName.trim()}.md`;
-      const absNote = path.join(projRoot, 'notes', safeName);
-      await fs.mkdir(path.dirname(absNote), { recursive: true });
-      try {
-        await fs.access(absNote);
-      } catch {
-        const heading = safeName.replace(/\.md$/, '');
-        await fs.writeFile(absNote, `# ${heading}\n\n`, 'utf8');
-      }
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absNote));
-      await vscode.window.showTextDocument(doc);
-    }),
-
     vscode.commands.registerCommand('dupe.newDiagram', async () => {
       const proj = await pickProjectOrWarn();
       if (!proj) {
@@ -791,12 +1385,13 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const cleanStem = rawName.trim().replace(/(\.drawio\.svg|\.svg)$/, '');
       const absDiagram = path.join(projRoot, 'diagrams', `${cleanStem}.drawio.svg`);
-      await fs.mkdir(path.dirname(absDiagram), { recursive: true });
+      await fsp.mkdir(path.dirname(absDiagram), { recursive: true });
       try {
-        await fs.access(absDiagram);
+        await fsp.access(absDiagram);
       } catch {
-        await fs.writeFile(absDiagram, DEFAULT_DRAWIO_SVG, 'utf8');
+        await fsp.writeFile(absDiagram, DEFAULT_DRAWIO_SVG, 'utf8');
       }
+      rebuildLocalIndices();
       await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(absDiagram));
     }),
 
@@ -814,9 +1409,44 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!editor) {
         return;
       }
-      const hitRoot = findDupeProjectRoot(path.dirname(editor.document.uri.fsPath));
+      const fsPath = editor.document.uri.fsPath;
+      const hitRoot = findDupeProjectRoot(path.dirname(fsPath));
       if (hitRoot && hitRoot !== activeProjectRoot) {
         void refreshAll();
+      } else {
+        notesProvider.refresh(fsPath);
+      }
+    }),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme !== 'file') {
+        return;
+      }
+      const fsPath = doc.uri.fsPath;
+      if (fsPath.endsWith('.md') && activeProjectRoot && fsPath.startsWith(path.join(activeProjectRoot, 'notes'))) {
+        rebuildLocalIndices();
+        return;
+      }
+      if (fsPath.endsWith('.bib')) {
+        bibMap = loadProjectBibMetadata(activeProjectRoot, papers);
+        return;
+      }
+      const compileOnSave = vscode.workspace
+        .getConfiguration('dupe')
+        .get<boolean>('compileOnSave', true);
+      if (
+        compileOnSave &&
+        activeProject &&
+        activeProjectRoot &&
+        fsPath.endsWith('.tex') &&
+        fsPath.startsWith(path.join(activeProjectRoot, 'paper'))
+      ) {
+        if (saveCompileTimer) {
+          clearTimeout(saveCompileTimer);
+        }
+        const targetProj = activeProject;
+        saveCompileTimer = setTimeout(() => {
+          void runLatexCompile(targetProj, true);
+        }, 400);
       }
     }),
   );

@@ -14,6 +14,16 @@ export interface Paper {
   updated_at: string;
 }
 
+export interface BibMetadata {
+  key: string;
+  title: string;
+  authors: string;
+  year: string;
+  doi: string;
+  raw: string;
+  paperId?: string;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
@@ -80,6 +90,18 @@ export interface SyncProjectResponse {
   last_synced_at: string;
 }
 
+export interface SyncTexBackwardResult {
+  path: string;
+  line: number;
+  page: number;
+}
+
+export interface SyncTexForwardResult {
+  page: number;
+  x: number;
+  y: number;
+}
+
 export interface LocalStatus {
   mode: string;
   projects_dir: string;
@@ -116,4 +138,26 @@ export interface LocalRefIndexEntry {
   publication_year: number | null;
   doi: string;
   tags: string[];
+}
+
+export interface NoteEntry {
+  title: string;
+  relPath: string;
+  absPath: string;
+  slug: string;
+  tags: string[];
+  outgoingLinks: string[];
+}
+
+export interface DiagramEntry {
+  name: string;
+  relPath: string;
+  absPath: string;
+}
+
+export interface BacklinkHit {
+  sourceRelPath: string;
+  sourceAbsPath: string;
+  line: number;
+  preview: string;
 }

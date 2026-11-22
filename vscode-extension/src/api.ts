@@ -11,6 +11,8 @@ import {
   PullProjectResponse,
   RemoteSyncStatus,
   SyncProjectResponse,
+  SyncTexBackwardResult,
+  SyncTexForwardResult,
 } from './types';
 
 export class DupeApiError extends Error {
@@ -210,5 +212,38 @@ export class DupeApiClient {
 
   gatherProjectContext(projectId: string): Promise<{ open_count: number; addressed_count: number }> {
     return this.requestJson('POST', `/api/projects/${encodeURIComponent(projectId)}/context`, {});
+  }
+
+  syncTexBackward(
+    projectId: string,
+    params: { page: number; x: number; y: number; w: number; h: number; target?: string },
+  ): Promise<SyncTexBackwardResult> {
+    const q = new URLSearchParams({
+      page: String(params.page),
+      x: String(params.x),
+      y: String(params.y),
+      w: String(params.w),
+      h: String(params.h),
+    });
+    if (params.target) {
+      q.set('target', params.target);
+    }
+    return this.requestJson('GET', `/api/projects/${encodeURIComponent(projectId)}/synctex?${q.toString()}`);
+  }
+
+  syncTexForward(
+    projectId: string,
+    params: { file: string; line: number; w?: number; h?: number; target?: string },
+  ): Promise<SyncTexForwardResult> {
+    const q = new URLSearchParams({
+      file: params.file,
+      line: String(params.line),
+      w: String(params.w ?? 612),
+      h: String(params.h ?? 792),
+    });
+    if (params.target) {
+      q.set('target', params.target);
+    }
+    return this.requestJson('GET', `/api/projects/${encodeURIComponent(projectId)}/synctex-forward?${q.toString()}`);
   }
 }
