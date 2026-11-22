@@ -789,6 +789,124 @@ func TestLocalModeFolderWizardAndSymlink(t *testing.T) {
 	}
 }
 
+func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
+	ctx := context.Background()
+	localDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(localDir, "pdfs"), 0o755)
+	localDB, err := initSQLiteDB(ctx, filepath.Join(localDir, "local.db"))
+	if err != nil {
+		t.Fatalf("initSQLiteDB: %v", err)
+	}
+	defer localDB.Close()
+	_ = createOrUpdateUser(ctx, localDB, "local", "local-mode-implicit-user", "#FFEB3B")
+
+	projectsRoot := filepath.Join(t.TempDir(), "projects")
+	_ = os.MkdirAll(projectsRoot, 0o755)
+
+	srv := &Server{
+		db:          localDB,
+		jwtSecret:   []byte("test-secret-at-least-16-bytes-long"),
+		storageDir:  localDir,
+		projectsDir: projectsRoot,
+		mode:        "local",
+		offlineMeta: true,
+	}
+	handler := srv.routes()
+
+	// 1. Create a project and customize the preserved AGENTS.md user description block
+	cfg, projDir, err := srv.createProjectOnDisk(ctx, 1, "local", "Multi Repo Study", "", "", true)
+	if err != nil {
+		t.Fatalf("createProjectOnDisk: %v", err)
+	}
+	agentsPath := filepath.Join(projDir, "AGENTS.md")
+	initialAgents, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read initial AGENTS.md: %v", err)
+	}
+	customBlock := agentsUserStartMarker + "\nCustom robot hardware & benchmark rules.\n" + agentsUserEndMarker
+	updatedAgents := strings.Replace(
+		string(initialAgents),
+		agentsUserStartMarker+"\nAdd your project description, goals, or custom agent instructions here. `dupe` preserves everything inside these markers across regenerations.\n"+agentsUserEndMarker,
+		customBlock,
+		1,
+	)
+	_ = os.WriteFile(agentsPath, []byte(updatedAgents), 0o644)
+
+	if err := srv.regenerateProjectArtifacts(ctx, projDir, 1, cfg); err != nil {
+		t.Fatalf("regenerateProjectArtifacts: %v", err)
+	}
+	afterAgents, _ := os.ReadFile(agentsPath)
+	if !strings.Contains(string(afterAgents), "Custom robot hardware & benchmark rules.") {
+		t.Fatalf("expected user description block to survive regeneration, got:\n%s", string(afterAgents))
+	}
+
+	// 2. Link multiple code repos and a paper subdir via as_subdir: true
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+	paperSub := t.TempDir()
+	_ = os.WriteFile(filepath.Join(paperSub, "icra.tex"), []byte(`\documentclass{article}\begin{document}ICRA\end{document}`), 0o644)
+
+	for _, body := range []map[string]any{
+		{"name": "firmware", "source_path": repoA, "link_mode": "symlink_code", "target_project_id": cfg.ID, "as_subdir": true},
+		{"name": "policy", "source_path": repoB, "link_mode": "symlink_code", "target_project_id": cfg.ID, "as_subdir": true},
+		{"name": "icra2027", "source_path": paperSub, "link_mode": "symlink_paper", "target_project_id": cfg.ID, "as_subdir": true},
+	} {
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/api/local/link-folder", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("link-folder %v failed: %d %s", body["name"], rec.Code, rec.Body.String())
+		}
+	}
+
+	if gotA, err := os.Readlink(filepath.Join(projDir, "code", "firmware")); err != nil || gotA != repoA {
+		t.Fatalf("expected code/firmware -> %q, got %q (err=%v)", repoA, gotA, err)
+	}
+	if gotB, err := os.Readlink(filepath.Join(projDir, "code", "policy")); err != nil || gotB != repoB {
+		t.Fatalf("expected code/policy -> %q, got %q (err=%v)", repoB, gotB, err)
+	}
+	if gotP, err := os.Readlink(filepath.Join(projDir, "paper", "icra2027")); err != nil || gotP != paperSub {
+		t.Fatalf("expected paper/icra2027 -> %q, got %q (err=%v)", paperSub, gotP, err)
+	}
+	_ = os.Remove(filepath.Join(projDir, "paper", "main.tex"))
+	if foundRoot := findProjectRootTex(filepath.Join(projDir, "paper"), ""); foundRoot != "icra2027/icra.tex" {
+		t.Fatalf("expected findProjectRootTex to find icra2027/icra.tex, got %q", foundRoot)
+	}
+
+	// 3. Import paper from HTML landing page containing citation_pdf_url
+	if got := normalizePaperImportURL("2401.12345"); got != "https://arxiv.org/pdf/2401.12345.pdf" {
+		t.Fatalf("unexpected arxiv normalization: %q", got)
+	}
+	mockSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/paper.pdf" {
+			w.Header().Set("Content-Type", "application/pdf")
+			_, _ = w.Write([]byte("%PDF-1.4\n% mock pdf bytes\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><meta name="citation_pdf_url" content="/paper.pdf"></head></html>`))
+	}))
+	defer mockSite.Close()
+
+	impPayload, _ := json.Marshal(map[string]any{"url": mockSite.URL + "/article", "skip_network": true})
+	impReq := httptest.NewRequest(http.MethodPost, "/api/papers/import-url", bytes.NewReader(impPayload))
+	impReq.Header.Set("Content-Type", "application/json")
+	impRec := httptest.NewRecorder()
+	handler.ServeHTTP(impRec, impReq)
+	if impRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for import-url, got %d: %s", impRec.Code, impRec.Body.String())
+	}
+	var imported Paper
+	if err := json.Unmarshal(impRec.Body.Bytes(), &imported); err != nil {
+		t.Fatalf("decode imported paper: %v", err)
+	}
+	if imported.FileHash == "" {
+		t.Fatalf("expected valid file_hash on imported paper")
+	}
+}
+
 
 
 

@@ -11,6 +11,7 @@ import {
 } from '../citations';
 import {
   NotesIndex,
+  computeMarkdownEnterEdit,
   extractMarkdownTags,
   extractWikiLinksInLine,
   normalizeNoteRelPath,
@@ -147,6 +148,13 @@ describe('dupe VS Code extension helpers', () => {
     expect(toggleWrappedFormat('focus', '**', '**')).toBe('**focus**');
     expect(toggleWrappedFormat('**focus**', '**', '**')).toBe('focus');
     expect(normalizeNoteRelPath('daily/2026-11-22')).toBe('notes/daily/2026-11-22.md');
+
+    expect(computeMarkdownEnterEdit('  - item one', 12)).toEqual({ action: 'insert', text: '\n  - ' });
+    expect(computeMarkdownEnterEdit('2. Second step', 14)).toEqual({ action: 'insert', text: '\n3. ' });
+    expect(computeMarkdownEnterEdit('- [x] Done task', 15)).toEqual({ action: 'insert', text: '\n- [ ] ' });
+    expect(computeMarkdownEnterEdit('3. ', 3)).toEqual({ action: 'clearPrefix' });
+    expect(computeMarkdownEnterEdit('- [ ] ', 6)).toEqual({ action: 'clearPrefix' });
+    expect(computeMarkdownEnterEdit('Regular text', 12)).toEqual({ action: 'default' });
   });
 
   it('indexes notes, diagrams, and backlinks inside a dupe project', () => {

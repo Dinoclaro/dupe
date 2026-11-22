@@ -115,6 +115,51 @@ export function toggleWrappedFormat(text: string, prefix: string, suffix: string
   return `${prefix}${text}${suffix}`;
 }
 
+export type MarkdownEnterResult =
+  | { action: 'insert'; text: string }
+  | { action: 'clearPrefix' }
+  | { action: 'default' };
+
+export function computeMarkdownEnterEdit(lineText: string, cursorCol: number): MarkdownEnterResult {
+  const before = lineText.slice(0, cursorCol);
+  const after = lineText.slice(cursorCol);
+
+  const taskMatch = before.match(/^(\s*)([-*])\s+\[(?: |x|X)\]\s(.*)$/);
+  if (taskMatch) {
+    if (!taskMatch[3].trim() && !after.trim()) {
+      return { action: 'clearPrefix' };
+    }
+    return { action: 'insert', text: `\n${taskMatch[1]}${taskMatch[2]} [ ] ` };
+  }
+
+  const orderedMatch = before.match(/^(\s*)(\d+)([.)])\s(.*)$/);
+  if (orderedMatch) {
+    if (!orderedMatch[4].trim() && !after.trim()) {
+      return { action: 'clearPrefix' };
+    }
+    const nextNum = parseInt(orderedMatch[2], 10) + 1;
+    return { action: 'insert', text: `\n${orderedMatch[1]}${nextNum}${orderedMatch[3]} ` };
+  }
+
+  const bulletMatch = before.match(/^(\s*)([-*+])\s(.*)$/);
+  if (bulletMatch) {
+    if (!bulletMatch[3].trim() && !after.trim()) {
+      return { action: 'clearPrefix' };
+    }
+    return { action: 'insert', text: `\n${bulletMatch[1]}${bulletMatch[2]} ` };
+  }
+
+  const quoteMatch = before.match(/^(\s*>)\s?(.*)$/);
+  if (quoteMatch) {
+    if (!quoteMatch[2].trim() && !after.trim()) {
+      return { action: 'clearPrefix' };
+    }
+    return { action: 'insert', text: `\n${quoteMatch[1]} ` };
+  }
+
+  return { action: 'default' };
+}
+
 export function normalizeNoteRelPath(rawName: string): string {
   let clean = rawName.trim().replace(/\\/g, '/').replace(/^\/+/, '');
   clean = clean.split('#')[0].trim();

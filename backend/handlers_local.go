@@ -519,6 +519,41 @@ func replaceEmptyOrSymlinkSubdir(targetSubdir, sourcePath string) (int, error) {
 	return http.StatusOK, nil
 }
 
+func linkSubdirInsideContainer(containerDir, sourcePath, subName string) (string, int, error) {
+	if lstat, err := os.Lstat(containerDir); err == nil {
+		if lstat.Mode()&os.ModeSymlink != 0 {
+			// Migrate a legacy single-repo top-level symlink into <containerDir>/<oldBase>
+			oldTarget, readErr := os.Readlink(containerDir)
+			if readErr != nil {
+				return "", http.StatusInternalServerError, fmt.Errorf("read existing symlink: %w", readErr)
+			}
+			if rmErr := os.Remove(containerDir); rmErr != nil {
+				return "", http.StatusInternalServerError, fmt.Errorf("remove legacy symlink: %w", rmErr)
+			}
+			if mkErr := os.MkdirAll(containerDir, 0o755); mkErr != nil {
+				return "", http.StatusInternalServerError, mkErr
+			}
+			oldName := sanitizeProjectFolderName(filepath.Base(oldTarget))
+			_ = os.Symlink(oldTarget, filepath.Join(containerDir, oldName))
+		} else if !lstat.IsDir() {
+			return "", http.StatusConflict, fmt.Errorf("%s exists and is not a directory", filepath.Base(containerDir))
+		}
+	} else if mkErr := os.MkdirAll(containerDir, 0o755); mkErr != nil {
+		return "", http.StatusInternalServerError, mkErr
+	}
+
+	slug := sanitizeProjectFolderName(subName)
+	targetPath := filepath.Join(containerDir, slug)
+	if _, statErr := os.Lstat(targetPath); statErr == nil {
+		slug = fmt.Sprintf("%s_%d", slug, time.Now().Unix()%1000)
+		targetPath = filepath.Join(containerDir, slug)
+	}
+	if err := os.Symlink(sourcePath, targetPath); err != nil {
+		return "", http.StatusInternalServerError, fmt.Errorf("symlink failed: %w", err)
+	}
+	return targetPath, http.StatusOK, nil
+}
+
 func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 	if s.mode != "local" {
 		writeError(w, http.StatusForbidden, "only available in local mode")
@@ -535,6 +570,7 @@ func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 		SourcePath      string `json:"source_path"`
 		LinkMode        string `json:"link_mode"` // "symlink_code" | "symlink_paper" | "symlink_project"
 		TargetProjectID string `json:"target_project_id,omitempty"`
+		AsSubdir        bool   `json:"as_subdir,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -585,12 +621,31 @@ func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 		if linkMode == "symlink_code" {
 			subdirName = "code"
 		}
-		if codeStatus, symErr := replaceEmptyOrSymlinkSubdir(filepath.Join(projDir, subdirName), sourcePath); symErr != nil {
-			writeError(w, codeStatus, symErr.Error())
-			return
+		containerDir := filepath.Join(projDir, subdirName)
+		var linkedPath string
+		if req.AsSubdir {
+			var linkStatus int
+			var symErr error
+			linkedPath, linkStatus, symErr = linkSubdirInsideContainer(containerDir, sourcePath, name)
+			if symErr != nil {
+				writeError(w, linkStatus, symErr.Error())
+				return
+			}
+		} else {
+			codeStatus, symErr := replaceEmptyOrSymlinkSubdir(containerDir, sourcePath)
+			if symErr != nil {
+				writeError(w, codeStatus, symErr.Error())
+				return
+			}
+			linkedPath = containerDir
 		}
 		_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
-		writeJSON(w, http.StatusOK, cfg)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"project":     cfg,
+			"linked_path": linkedPath,
+			"source_path": sourcePath,
+			"mode":        linkMode,
+		})
 		return
 	}
 

@@ -15,6 +15,7 @@ import {
 } from './libraryTree';
 import {
   NotesIndex,
+  computeMarkdownEnterEdit,
   normalizeNoteRelPath,
   toggleCheckboxLine,
   toggleWrappedFormat,
@@ -81,7 +82,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let activeProjectRoot: string | null = null;
   let localStatus: LocalStatus | null = null;
   let syncStatus: RemoteSyncStatus | null = null;
-  let codeTarget = '';
+  let codeTargets: string[] = [];
+  let paperTargets: string[] = [];
   let daemonError: string | null = null;
   let bibMap = new Map<string, BibMetadata>();
   let saveCompileTimer: ReturnType<typeof setTimeout> | undefined;
@@ -224,7 +226,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
       activeProject = null;
       activeProjectRoot = null;
-      codeTarget = '';
+      codeTargets = [];
+      paperTargets = [];
 
       if (preferredDiscovered?.config) {
         const cfg = preferredDiscovered.config;
@@ -242,16 +245,19 @@ export function activate(context: vscode.ExtensionContext): void {
         for (const proj of projects) {
           try {
             const tree = await api.getProjectTree(proj.id);
-            if (tree.code_target) {
-              const resolvedTarget = path.resolve(tree.code_target);
-              if (wsRoots.some((ws) => path.resolve(ws) === resolvedTarget)) {
-                activeProject = proj;
-                activeProjectRoot = localStatus?.projects_dir
-                  ? path.join(localStatus.projects_dir, proj.folder_name)
-                  : null;
-                codeTarget = tree.code_target;
-                break;
-              }
+            const rawTargets = tree.code_targets?.length
+              ? tree.code_targets.map((t) => (t.includes(' -> ') ? t.split(' -> ').pop()! : t))
+              : tree.code_target
+                ? [tree.code_target]
+                : [];
+            if (rawTargets.some((t) => wsRoots.some((ws) => path.resolve(ws) === path.resolve(t)))) {
+              activeProject = proj;
+              activeProjectRoot = localStatus?.projects_dir
+                ? path.join(localStatus.projects_dir, proj.folder_name)
+                : null;
+              codeTargets = tree.code_targets || (tree.code_target ? [tree.code_target] : []);
+              paperTargets = tree.paper_targets || [];
+              break;
             }
           } catch {
             // ignore tree lookup errors
@@ -267,12 +273,14 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
 
-      if (activeProject && !codeTarget) {
+      if (activeProject && codeTargets.length === 0) {
         try {
           const tree = await api.getProjectTree(activeProject.id);
-          codeTarget = tree.code_target || '';
+          codeTargets = tree.code_targets || (tree.code_target ? [tree.code_target] : []);
+          paperTargets = tree.paper_targets || [];
         } catch {
-          codeTarget = '';
+          codeTargets = [];
+          paperTargets = [];
         }
       }
     } catch (err) {
@@ -286,7 +294,8 @@ export function activate(context: vscode.ExtensionContext): void {
       activeProject,
       localStatus,
       syncStatus,
-      codeTarget,
+      codeTargets,
+      paperTargets,
       daemonError,
     });
     updateStatusBar();
@@ -484,7 +493,22 @@ export function activate(context: vscode.ExtensionContext): void {
       const paperDir = path.join(projRoot, 'paper');
       let hasAnyTex = false;
       try {
-        hasAnyTex = fs.readdirSync(paperDir).some((f) => f.toLowerCase().endsWith('.tex'));
+        for (const entry of fs.readdirSync(paperDir, { withFileTypes: true })) {
+          if (entry.isFile() && entry.name.toLowerCase().endsWith('.tex')) {
+            hasAnyTex = true;
+            break;
+          }
+          if ((entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith('.')) {
+            try {
+              if (fs.readdirSync(path.join(paperDir, entry.name)).some((f) => f.toLowerCase().endsWith('.tex'))) {
+                hasAnyTex = true;
+                break;
+              }
+            } catch {
+              // ignore unreadable subdir
+            }
+          }
+        }
       } catch {
         hasAnyTex = false;
       }
@@ -754,6 +778,33 @@ export function activate(context: vscode.ExtensionContext): void {
       await openNoteByRelPath(normalizeNoteRelPath(target));
     }),
 
+    // Obsidian List & Numbering Auto-Continuation on Enter
+    vscode.commands.registerCommand('dupe.markdownEnter', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.languageId !== 'markdown' || editor.selections.length !== 1) {
+        await vscode.commands.executeCommand('default:type', { text: '\n' });
+        return;
+      }
+      const sel = editor.selections[0];
+      if (!sel.isEmpty) {
+        await vscode.commands.executeCommand('default:type', { text: '\n' });
+        return;
+      }
+      const line = editor.document.lineAt(sel.active.line);
+      const editAction = computeMarkdownEnterEdit(line.text, sel.active.character);
+      if (editAction.action === 'default') {
+        await vscode.commands.executeCommand('default:type', { text: '\n' });
+        return;
+      }
+      await editor.edit((eb) => {
+        if (editAction.action === 'clearPrefix') {
+          eb.replace(line.range, '');
+        } else {
+          eb.insert(sel.active, editAction.text);
+        }
+      });
+    }),
+
     // Obsidian Checkbox Toggle (Ctrl+Enter in Markdown)
     vscode.commands.registerCommand('dupe.toggleCheckbox', async () => {
       const editor = vscode.window.activeTextEditor;
@@ -923,6 +974,62 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('dupe.clearPaperFilter', () => {
       paperProvider.setFilter('');
+    }),
+
+    vscode.commands.registerCommand('dupe.addPaper', async () => {
+      const pick = await vscode.window.showQuickPick(
+        [
+          {
+            label: '$(link) Import from Web URL / arXiv / DOI',
+            description: 'Paste an article page, arXiv link, DOI, or direct PDF URL',
+            action: 'url',
+          },
+          {
+            label: '$(file-pdf) Upload PDF File(s) from Computer',
+            description: 'Select PDFs from anywhere (e.g. ~/Downloads) — dupe stores & syncs them automatically',
+            action: 'file',
+          },
+        ],
+        { placeHolder: 'How would you like to add a paper to dupe?' },
+      );
+      if (!pick) {
+        return;
+      }
+      if (pick.action === 'url') {
+        await vscode.commands.executeCommand('dupe.importPaperUrl');
+      } else {
+        await vscode.commands.executeCommand('dupe.uploadPdf');
+      }
+    }),
+
+    vscode.commands.registerCommand('dupe.importPaperUrl', async () => {
+      const rawUrl = await vscode.window.showInputBox({
+        prompt: 'Paste paper URL, arXiv ID (e.g. 2401.12345), DOI, or PDF link',
+        placeHolder: 'https://arxiv.org/abs/2401.12345',
+      });
+      if (!rawUrl?.trim()) {
+        return;
+      }
+      await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'Fetching PDF & extracting BibTeX...' },
+        async () => {
+          try {
+            const paper = await api.importPaperFromUrl(rawUrl.trim());
+            await refreshAll();
+            if (activeProject) {
+              await api.gatherProjectContext(activeProject.id).catch(() => {});
+              rebuildLocalIndices();
+            }
+            void vscode.window.showInformationMessage(
+              `Imported "${paper.title}" (${paper.bibtex_key}) into library.`,
+            );
+          } catch (err) {
+            void vscode.window.showErrorMessage(
+              `Import failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        },
+      );
     }),
 
     vscode.commands.registerCommand('dupe.uploadPdf', async () => {
@@ -1331,14 +1438,28 @@ export function activate(context: vscode.ExtensionContext): void {
       const modePick = await vscode.window.showQuickPick(
         [
           {
-            label: 'Link Code Repo into code/',
-            description: 'Symlink an existing code directory into a dupe project without copying files',
+            label: 'Link Code Repo inside code/<name>/',
+            description: 'Symlink a code repo as a subdirectory in code/ (supports multiple repos)',
             mode: 'symlink_code' as const,
+            asSubdir: true,
           },
           {
-            label: 'Link Existing LaTeX / Overleaf Folder as paper/',
-            description: 'Symlink an existing paper repo into a dupe project',
+            label: 'Link LaTeX / Paper Repo inside paper/<name>/',
+            description: 'Symlink a LaTeX folder as a subdirectory in paper/ (supports multiple papers)',
             mode: 'symlink_paper' as const,
+            asSubdir: true,
+          },
+          {
+            label: 'Replace Single code/ Symlink',
+            description: 'Point project code/ directly to one folder',
+            mode: 'symlink_code' as const,
+            asSubdir: false,
+          },
+          {
+            label: 'Replace Single paper/ Symlink',
+            description: 'Point project paper/ directly to one folder',
+            mode: 'symlink_paper' as const,
+            asSubdir: false,
           },
         ],
         { placeHolder: 'How should the local folder be linked?' },
@@ -1346,24 +1467,38 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!modePick) {
         return;
       }
-      const proj = modePick.mode === 'symlink_code' ? await pickProjectOrWarn() : activeProject;
+      const proj = await pickProjectOrWarn();
       const folderPick = await vscode.window.showOpenDialog({
         canSelectFolders: true,
         canSelectFiles: false,
         canSelectMany: false,
-        openLabel: modePick.mode === 'symlink_code' ? 'Link as code/' : 'Link as paper/',
+        openLabel: modePick.mode === 'symlink_code' ? 'Select Code Folder' : 'Select Paper Folder',
       });
       if (!folderPick || folderPick.length === 0) {
         return;
       }
+      const selectedPath = folderPick[0].fsPath;
+      let linkName = path.basename(selectedPath);
+      if (modePick.asSubdir) {
+        const enteredName = await vscode.window.showInputBox({
+          prompt: `Subdirectory name inside ${modePick.mode === 'symlink_code' ? 'code/' : 'paper/'}`,
+          value: linkName,
+        });
+        if (!enteredName?.trim()) {
+          return;
+        }
+        linkName = enteredName.trim();
+      }
       const res = await api.linkLocalFolder({
         mode: modePick.mode,
-        source_path: folderPick[0].fsPath,
+        source_path: selectedPath,
         target_project_id: proj?.id,
+        name: linkName,
+        as_subdir: modePick.asSubdir,
       });
       await refreshAll();
       void vscode.window.showInformationMessage(
-        `Linked ${res.source_path} -> ${res.linked_path} (${res.project.name}).`,
+        `Linked ${res.source_path} -> ${res.linked_path} (${res.project?.name || proj?.name || 'project'}).`,
       );
     }),
 

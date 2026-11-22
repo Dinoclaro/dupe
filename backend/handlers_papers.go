@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,7 +115,7 @@ func (s *Server) runExtractMeta(ctx context.Context, pdfPath, originalFilename s
 	return meta, nil
 }
 
-func (s *Server) saveUploadedPDF(src multipart.File) (string, string, error) {
+func (s *Server) saveUploadedPDF(src io.Reader) (string, string, error) {
 	pdfsDir := filepath.Join(s.storageDir, "pdfs")
 	if err := os.MkdirAll(pdfsDir, 0o755); err != nil {
 		return "", "", fmt.Errorf("create pdfs directory: %w", err)
@@ -165,6 +166,86 @@ func (s *Server) saveUploadedPDF(src multipart.File) (string, string, error) {
 	return relPath, fileHash, nil
 }
 
+func (s *Server) storePaperFromReader(ctx context.Context, userID int, src io.Reader, filename string, isShared, skipNetwork bool) (Paper, error) {
+	relPath, fileHash, saveErr := s.saveUploadedPDF(src)
+	if saveErr != nil {
+		return Paper{}, fmt.Errorf("invalid PDF %s: %w", filename, saveErr)
+	}
+
+	var existing Paper
+	const checkDupQuery = `
+		SELECT id, owner_id, title, authors, publication_year, doi, bibtex_key, bibtex_raw,
+		       file_path, file_hash, is_shared, updated_at
+		FROM papers
+		WHERE owner_id = $1 AND file_hash = $2 AND deleted_at IS NULL
+		LIMIT 1
+	`
+	err := s.db.QueryRow(ctx, checkDupQuery, userID, fileHash).Scan(
+		&existing.ID,
+		&existing.OwnerID,
+		&existing.Title,
+		&existing.Authors,
+		&existing.PublicationYear,
+		&existing.DOI,
+		&existing.BibtexKey,
+		&existing.BibtexRaw,
+		&existing.FilePath,
+		&existing.FileHash,
+		&existing.IsShared,
+		&existing.UpdatedAt,
+	)
+	if err == nil {
+		existing.Tags = []string{}
+		return existing, nil
+	}
+
+	absPath := filepath.Join(s.storageDir, relPath)
+	meta, _ := s.runExtractMeta(ctx, absPath, filename, skipNetwork)
+
+	var created Paper
+	const insertQuery = `
+		INSERT INTO papers (
+			owner_id, title, authors, publication_year, doi,
+			bibtex_key, bibtex_raw, file_path, file_hash, is_shared
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id, owner_id, title, authors, publication_year, doi,
+		          bibtex_key, bibtex_raw, file_path, file_hash, is_shared, updated_at
+	`
+	err = s.db.QueryRow(
+		ctx,
+		insertQuery,
+		userID,
+		meta.Title,
+		meta.Authors,
+		meta.PublicationYear,
+		meta.DOI,
+		meta.BibtexKey,
+		meta.BibtexRaw,
+		relPath,
+		fileHash,
+		isShared,
+	).Scan(
+		&created.ID,
+		&created.OwnerID,
+		&created.Title,
+		&created.Authors,
+		&created.PublicationYear,
+		&created.DOI,
+		&created.BibtexKey,
+		&created.BibtexRaw,
+		&created.FilePath,
+		&created.FileHash,
+		&created.IsShared,
+		&created.UpdatedAt,
+	)
+	if err != nil {
+		return Paper{}, fmt.Errorf("failed to store paper metadata: %w", err)
+	}
+	created.Tags = []string{}
+	return created, nil
+}
+
 func (s *Server) handleUploadPapers(w http.ResponseWriter, r *http.Request) {
 	claims, ok := currentUser(r)
 	if !ok {
@@ -198,87 +279,17 @@ func (s *Server) handleUploadPapers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("open %s: %v", fh.Filename, err))
 			return
 		}
-		relPath, fileHash, saveErr := s.saveUploadedPDF(src)
+		paper, storeErr := s.storePaperFromReader(r.Context(), claims.UserID, src, fh.Filename, isShared, skipNetwork)
 		_ = src.Close()
-		if saveErr != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid PDF %s: %v", fh.Filename, saveErr))
+		if storeErr != nil {
+			status := http.StatusBadRequest
+			if strings.Contains(storeErr.Error(), "store paper metadata") {
+				status = http.StatusInternalServerError
+			}
+			writeError(w, status, storeErr.Error())
 			return
 		}
-
-		var existing Paper
-		const checkDupQuery = `
-			SELECT id, owner_id, title, authors, publication_year, doi, bibtex_key, bibtex_raw,
-			       file_path, file_hash, is_shared, updated_at
-			FROM papers
-			WHERE owner_id = $1 AND file_hash = $2 AND deleted_at IS NULL
-			LIMIT 1
-		`
-		err = s.db.QueryRow(r.Context(), checkDupQuery, claims.UserID, fileHash).Scan(
-			&existing.ID,
-			&existing.OwnerID,
-			&existing.Title,
-			&existing.Authors,
-			&existing.PublicationYear,
-			&existing.DOI,
-			&existing.BibtexKey,
-			&existing.BibtexRaw,
-			&existing.FilePath,
-			&existing.FileHash,
-			&existing.IsShared,
-			&existing.UpdatedAt,
-		)
-		if err == nil {
-			existing.Tags = []string{}
-			uploaded = append(uploaded, existing)
-			continue
-		}
-
-		absPath := filepath.Join(s.storageDir, relPath)
-		meta, _ := s.runExtractMeta(r.Context(), absPath, fh.Filename, skipNetwork)
-
-		var created Paper
-		const insertQuery = `
-			INSERT INTO papers (
-				owner_id, title, authors, publication_year, doi,
-				bibtex_key, bibtex_raw, file_path, file_hash, is_shared
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			RETURNING id, owner_id, title, authors, publication_year, doi,
-			          bibtex_key, bibtex_raw, file_path, file_hash, is_shared, updated_at
-		`
-		err = s.db.QueryRow(
-			r.Context(),
-			insertQuery,
-			claims.UserID,
-			meta.Title,
-			meta.Authors,
-			meta.PublicationYear,
-			meta.DOI,
-			meta.BibtexKey,
-			meta.BibtexRaw,
-			relPath,
-			fileHash,
-			isShared,
-		).Scan(
-			&created.ID,
-			&created.OwnerID,
-			&created.Title,
-			&created.Authors,
-			&created.PublicationYear,
-			&created.DOI,
-			&created.BibtexKey,
-			&created.BibtexRaw,
-			&created.FilePath,
-			&created.FileHash,
-			&created.IsShared,
-			&created.UpdatedAt,
-		)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store paper metadata")
-			return
-		}
-		created.Tags = []string{}
-		uploaded = append(uploaded, created)
+		uploaded = append(uploaded, paper)
 	}
 
 	if len(uploaded) == 1 {
@@ -286,6 +297,146 @@ func (s *Server) handleUploadPapers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"papers": uploaded})
+}
+
+var (
+	bareArxivIDRegex     = regexp.MustCompile(`^(?:arXiv:)?(\d{4}\.\d{4,5}(?:v\d+)?)$`)
+	citationMetaPDFRegex = regexp.MustCompile(`(?is)<meta[^>]+name=["']citation_pdf_url["'][^>]+content=["']([^"']+)["']`)
+	citationMetaAltRegex = regexp.MustCompile(`(?is)<meta[^>]+content=["']([^"']+)["'][^>]+name=["']citation_pdf_url["']`)
+)
+
+func normalizePaperImportURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if m := bareArxivIDRegex.FindStringSubmatch(trimmed); len(m) > 1 {
+		return "https://arxiv.org/pdf/" + m[1] + ".pdf"
+	}
+	if strings.HasPrefix(trimmed, "10.") && strings.Contains(trimmed, "/") {
+		return "https://doi.org/" + trimmed
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return trimmed
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if (host == "arxiv.org" || host == "www.arxiv.org") && strings.HasPrefix(parsed.Path, "/abs/") {
+		idPart := strings.TrimPrefix(parsed.Path, "/abs/")
+		return "https://arxiv.org/pdf/" + strings.TrimSuffix(idPart, ".pdf") + ".pdf"
+	}
+	if host == "openreview.net" && strings.HasPrefix(parsed.Path, "/forum") {
+		parsed.Path = "/pdf"
+		return parsed.String()
+	}
+	return trimmed
+}
+
+func fetchPDFOrCitationURL(ctx context.Context, targetURL string) ([]byte, string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	fetchOnce := func(rawURL string) ([]byte, string, string, error) {
+		parsed, err := url.Parse(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, "", "", fmt.Errorf("invalid URL scheme (expected http or https)")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, "", "", err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; dupe/1.0)")
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, "", "", err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode >= 400 {
+			return nil, "", "", fmt.Errorf("remote returned HTTP %d", resp.StatusCode)
+		}
+		limited := io.LimitReader(resp.Body, 100<<20)
+		data, err := io.ReadAll(limited)
+		if err != nil {
+			return nil, "", "", err
+		}
+		finalName := filepath.Base(resp.Request.URL.Path)
+		if finalName == "" || finalName == "/" || finalName == "." {
+			finalName = "imported.pdf"
+		}
+		if !strings.HasSuffix(strings.ToLower(finalName), ".pdf") {
+			finalName += ".pdf"
+		}
+		return data, resp.Header.Get("Content-Type"), finalName, nil
+	}
+
+	data, _, name, err := fetchOnce(targetURL)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) >= len(pdfMagicHeader) && string(data[:len(pdfMagicHeader)]) == pdfMagicHeader {
+		return data, name, nil
+	}
+
+	htmlSnippet := string(data)
+	if len(htmlSnippet) > 256*1024 {
+		htmlSnippet = htmlSnippet[:256*1024]
+	}
+	pdfLink := ""
+	if m := citationMetaPDFRegex.FindStringSubmatch(htmlSnippet); len(m) > 1 {
+		pdfLink = m[1]
+	} else if m := citationMetaAltRegex.FindStringSubmatch(htmlSnippet); len(m) > 1 {
+		pdfLink = m[1]
+	}
+	if pdfLink == "" {
+		return nil, "", fmt.Errorf("URL did not return a PDF directly (no citation_pdf_url found); download the PDF and upload it from disk")
+	}
+
+	baseParsed, _ := url.Parse(targetURL)
+	relParsed, relErr := url.Parse(strings.TrimSpace(pdfLink))
+	if relErr == nil && baseParsed != nil {
+		pdfLink = baseParsed.ResolveReference(relParsed).String()
+	}
+	pdfData, _, pdfName, err2 := fetchOnce(pdfLink)
+	if err2 != nil {
+		return nil, "", err2
+	}
+	if len(pdfData) < len(pdfMagicHeader) || string(pdfData[:len(pdfMagicHeader)]) != pdfMagicHeader {
+		return nil, "", fmt.Errorf("resolved citation PDF link did not return a valid PDF")
+	}
+	return pdfData, pdfName, nil
+}
+
+func (s *Server) handleImportPaperURL(w http.ResponseWriter, r *http.Request) {
+	claims, ok := currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req struct {
+		URL         string `json:"url"`
+		IsShared    bool   `json:"is_shared"`
+		SkipNetwork bool   `json:"skip_network"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	normalized := normalizePaperImportURL(req.URL)
+	if normalized == "" {
+		writeError(w, http.StatusBadRequest, "url, arXiv ID, or DOI is required")
+		return
+	}
+
+	ctxTimeout, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
+
+	pdfBytes, filename, fetchErr := fetchPDFOrCitationURL(ctxTimeout, normalized)
+	if fetchErr != nil {
+		writeError(w, http.StatusBadGateway, fetchErr.Error())
+		return
+	}
+
+	paper, storeErr := s.storePaperFromReader(r.Context(), claims.UserID, bytes.NewReader(pdfBytes), filename, req.IsShared, req.SkipNetwork)
+	if storeErr != nil {
+		writeError(w, http.StatusInternalServerError, storeErr.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, paper)
 }
 
 func (s *Server) handleListPapers(w http.ResponseWriter, r *http.Request) {

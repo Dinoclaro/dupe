@@ -199,53 +199,19 @@ export class NotesAndBacklinksProvider implements vscode.TreeDataProvider<vscode
     return element;
   }
 
-  getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
-    if (!element) {
-      const notes = this.notesIndex.getNotes();
-      const diagrams = this.notesIndex.getDiagrams();
-      const backlinks = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
+  getChildren(): vscode.TreeItem[] {
+    const hits = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
+    if (hits.length === 0) {
       return [
-        new SectionTreeItem('Backlinks to Active Note', 'backlinks', 'references', String(backlinks.length)),
-        new SectionTreeItem('Notes (Alt+O / Alt+N / Alt+D)', 'notes', 'notebook', String(notes.length)),
-        new SectionTreeItem('Diagrams', 'diagrams', 'type-hierarchy-sub', String(diagrams.length)),
+        new InfoTreeItem(
+          'No backlinks to current file',
+          'Link notes with [[note-name]] · Quick Switcher: Alt+O',
+          'circle-outline',
+          { command: 'dupe.quickOpenNote', title: 'Quick Switcher' },
+        ),
       ];
     }
-
-    if (element instanceof SectionTreeItem) {
-      if (element.sectionKind === 'backlinks') {
-        const hits = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
-        if (hits.length === 0) {
-          return [new InfoTreeItem('No incoming [[links]] yet', 'Link with [[note-name]]', 'circle-outline')];
-        }
-        return hits.map((h) => new BacklinkTreeItem(h));
-      }
-      if (element.sectionKind === 'notes') {
-        const notes = this.notesIndex.getNotes();
-        if (notes.length === 0) {
-          return [
-            new InfoTreeItem('No notes yet', 'Press Alt+N or Alt+D', 'add', {
-              command: 'dupe.newNote',
-              title: 'New Note',
-            }),
-          ];
-        }
-        return notes.map((n) => new NoteTreeItem(n));
-      }
-      if (element.sectionKind === 'diagrams') {
-        const diagrams = this.notesIndex.getDiagrams();
-        if (diagrams.length === 0) {
-          return [
-            new InfoTreeItem('No diagrams yet', 'Click to create .drawio.svg', 'add', {
-              command: 'dupe.newDiagram',
-              title: 'New Diagram',
-            }),
-          ];
-        }
-        return diagrams.map((d) => new DiagramTreeItem(d));
-      }
-    }
-
-    return [];
+    return hits.map((h) => new BacklinkTreeItem(h));
   }
 }
 
@@ -256,20 +222,23 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
   private activeProject: ProjectConfig | null = null;
   private localStatus: LocalStatus | null = null;
   private syncStatus: RemoteSyncStatus | null = null;
-  private codeTarget = '';
+  private codeTargets: string[] = [];
+  private paperTargets: string[] = [];
   private daemonError: string | null = null;
 
   update(params: {
     activeProject: ProjectConfig | null;
     localStatus: LocalStatus | null;
     syncStatus: RemoteSyncStatus | null;
-    codeTarget: string;
+    codeTargets: string[];
+    paperTargets: string[];
     daemonError: string | null;
   }): void {
     this.activeProject = params.activeProject;
     this.localStatus = params.localStatus;
     this.syncStatus = params.syncStatus;
-    this.codeTarget = params.codeTarget;
+    this.codeTargets = params.codeTargets;
+    this.paperTargets = params.paperTargets;
     this.daemonError = params.daemonError;
     this.onDidChangeEmitter.fire(undefined);
   }
@@ -335,13 +304,24 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
         ),
       );
 
-      if (this.codeTarget) {
+      if (this.codeTargets.length > 0) {
         items.push(
           new InfoTreeItem(
-            'Linked Code Folder',
-            this.codeTarget,
+            `Linked Code (${this.codeTargets.length})`,
+            this.codeTargets.join(', '),
             'file-symlink-directory',
-            { command: 'dupe.linkLocalFolder', title: 'Change Linked Folder' },
+            { command: 'dupe.linkLocalFolder', title: 'Link Another Code / Paper Repo' },
+          ),
+        );
+      }
+
+      if (this.paperTargets.length > 0) {
+        items.push(
+          new InfoTreeItem(
+            `Linked Paper Repos (${this.paperTargets.length})`,
+            this.paperTargets.join(', '),
+            'book',
+            { command: 'dupe.linkLocalFolder', title: 'Link Another Code / Paper Repo' },
           ),
         );
       }

@@ -48,6 +48,8 @@ export interface ProjectTreeResponse {
   files: ProjectTreeEntry[];
   cited_keys: string[];
   code_target?: string;
+  code_targets?: string[];
+  paper_targets?: string[];
 }
 
 export interface LatexDiagnostic {

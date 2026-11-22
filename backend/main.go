@@ -120,6 +120,7 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /api/papers", s.requireAuth(s.handleListPapers))
 	mux.HandleFunc("POST /api/papers/upload", s.requireAuth(s.handleUploadPapers))
+	mux.HandleFunc("POST /api/papers/import-url", s.requireAuth(s.handleImportPaperURL))
 	mux.HandleFunc("GET /api/papers/bibtex", s.requireAuth(s.handleExportBibtex))
 	mux.HandleFunc("GET /api/papers/{id}", s.requireAuth(s.handleGetPaper))
 	mux.HandleFunc("PATCH /api/papers/{id}", s.requireAuth(s.handleUpdatePaper))

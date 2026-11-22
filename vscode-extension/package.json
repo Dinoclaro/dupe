@@ -1,8 +1,8 @@
 {
   "name": "dupe-studio",
   "displayName": "dupe Research Studio",
-  "description": "Paper library, Obsidian-style notes, citation intelligence, SyncTeX PDF reader, and Overleaf sync backed by the local dupe daemon.",
-  "version": "0.2.0",
+  "description": "Explorer-integrated paper library, Obsidian-style notes & lists, citation intelligence, SyncTeX PDF reader, and Overleaf sync backed by the local dupe daemon.",
+  "version": "0.3.0",
   "publisher": "dinoclaro",
   "engines": {
     "vscode": "^1.90.0"
@@ -46,28 +46,19 @@
         }
       }
     },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "dupe",
-          "title": "dupe",
-          "icon": "media/dupe-icon.svg"
-        }
-      ]
-    },
     "views": {
-      "dupe": [
+      "explorer": [
         {
           "id": "dupe.notesView",
-          "name": "Notes & Backlinks"
+          "name": "dupe: Backlinks"
         },
         {
           "id": "dupe.papersView",
-          "name": "Paper Library"
+          "name": "dupe: Paper Library"
         },
         {
           "id": "dupe.projectView",
-          "name": "Project & Sync"
+          "name": "dupe: Project & Sync"
         }
       ]
     },
@@ -108,12 +99,17 @@
         "icon": "$(type-hierarchy-sub)"
       },
       {
+        "command": "dupe.markdownEnter",
+        "title": "dupe: Obsidian List Continuation on Enter"
+      },
+      {
         "command": "dupe.toggleCheckbox",
         "title": "dupe: Toggle Markdown Checkbox"
       },
       {
         "command": "dupe.quickInsertLink",
-        "title": "dupe: Insert Wikilink / Citation"
+        "title": "dupe: Insert Wikilink / Citation",
+        "icon": "$(quote)"
       },
       {
         "command": "dupe.formatBold",
@@ -143,8 +139,18 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "dupe.addPaper",
+        "title": "dupe: Add Paper (URL / arXiv / DOI / PDF)",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dupe.importPaperUrl",
+        "title": "dupe: Import Paper from URL / arXiv / DOI",
+        "icon": "$(link)"
+      },
+      {
         "command": "dupe.uploadPdf",
-        "title": "dupe: Upload PDF to Library",
+        "title": "dupe: Upload PDF File(s) from Disk",
         "icon": "$(cloud-upload)"
       },
       {
@@ -233,7 +239,7 @@
       },
       {
         "command": "dupe.linkLocalFolder",
-        "title": "dupe: Link Local Folder (code/ or paper/)",
+        "title": "dupe: Link Code or LaTeX Repo (Subdirectory Symlink)",
         "icon": "$(file-symlink-directory)"
       },
       {
@@ -258,6 +264,11 @@
       {
         "command": "dupe.searchByTag",
         "key": "alt+t"
+      },
+      {
+        "command": "dupe.markdownEnter",
+        "key": "enter",
+        "when": "editorTextFocus && editorLangId == markdown && !suggestWidgetVisible && !inlineSuggestionVisible && !parameterHintsVisible"
       },
       {
         "command": "dupe.toggleCheckbox",
@@ -291,6 +302,70 @@
       }
     ],
     "menus": {
+      "editor/title": [
+        {
+          "command": "dupe.compileLatex",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dupe.openCompiledPdf",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dupe.syncTexForward",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@3"
+        },
+        {
+          "command": "dupe.syncProject",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@4"
+        },
+        {
+          "command": "dupe.quickOpenNote",
+          "when": "editorLangId == markdown",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dupe.newNote",
+          "when": "editorLangId == markdown",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dupe.dailyNote",
+          "when": "editorLangId == markdown",
+          "group": "navigation@3"
+        },
+        {
+          "command": "dupe.quickInsertLink",
+          "when": "editorLangId == markdown",
+          "group": "navigation@4"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "dupe.newNote",
+          "group": "1_dupe@1"
+        },
+        {
+          "command": "dupe.newDiagram",
+          "group": "1_dupe@2"
+        },
+        {
+          "command": "dupe.addPaper",
+          "group": "1_dupe@3"
+        },
+        {
+          "command": "dupe.compileLatex",
+          "group": "1_dupe@4"
+        },
+        {
+          "command": "dupe.syncProject",
+          "group": "1_dupe@5"
+        }
+      ],
       "view/title": [
         {
           "command": "dupe.quickOpenNote",
@@ -318,7 +393,7 @@
           "group": "navigation"
         },
         {
-          "command": "dupe.uploadPdf",
+          "command": "dupe.addPaper",
           "when": "view == dupe.papersView",
           "group": "navigation"
         },
@@ -349,16 +424,6 @@
         }
       ],
       "view/item/context": [
-        {
-          "command": "dupe.renameNote",
-          "when": "view == dupe.notesView && viewItem == dupeNote",
-          "group": "1_actions@1"
-        },
-        {
-          "command": "dupe.deleteNote",
-          "when": "view == dupe.notesView && viewItem == dupeNote",
-          "group": "2_danger@1"
-        },
         {
           "command": "dupe.insertCitation",
           "when": "view == dupe.papersView && viewItem =~ /^paper/",

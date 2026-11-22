@@ -97,9 +97,20 @@ export class DupeApiClient {
     mode: 'symlink_paper' | 'symlink_code';
     source_path: string;
     target_project_id?: string;
-    project_name?: string;
+    name?: string;
+    as_subdir?: boolean;
   }): Promise<{ project: ProjectConfig; linked_path: string; source_path: string; mode: string }> {
-    return this.requestJson('POST', '/api/local/link-folder', payload);
+    return this.requestJson('POST', '/api/local/link-folder', {
+      link_mode: payload.mode,
+      source_path: payload.source_path,
+      target_project_id: payload.target_project_id,
+      name: payload.name,
+      as_subdir: payload.as_subdir,
+    });
+  }
+
+  importPaperFromUrl(url: string): Promise<Paper> {
+    return this.requestJson('POST', '/api/papers/import-url', { url });
   }
 
   listPapers(): Promise<Paper[]> {
