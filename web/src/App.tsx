@@ -29,7 +29,6 @@ import { LatexEditorPane } from './components/Editor/LatexEditorPane';
 import { buildCommentCountMap } from './components/Editor/commentMarkers';
 import { CompiledPreviewPane } from './components/Editor/CompiledPreviewPane';
 import { DiagramPane } from './components/Diagram/DiagramPane';
-import { LocalModeModal } from './components/Local/LocalModeModal';
 import {
   DEFAULT_DRAWIO_XML,
   DiagramElement,
@@ -141,7 +140,6 @@ export const App: React.FC = () => {
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [runtimeMode, setRuntimeMode] = useState<string>('hosted');
-  const [showLocalModal, setShowLocalModal] = useState(false);
 
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true,
@@ -693,6 +691,9 @@ export const App: React.FC = () => {
       setRightTabs((prev) => (prev.some((t) => t.id === tab.id) ? prev : [...prev, tab]));
       setActiveRightTabId(tab.id);
       setFocusedGroup(1);
+    }
+    if (typeof window !== 'undefined' && window.innerWidth <= 820) {
+      setShowSidebar(false);
     }
   };
 
@@ -1780,7 +1781,7 @@ export const App: React.FC = () => {
         <form className="auth-card" onSubmit={handleLogin}>
           <h1>dupe</h1>
           <p className="muted-hint">
-            Dino&apos;s Ultimate Paper Editor — VS Code Academic Studio
+            Notes, Papers &amp; Research Reader
           </p>
           {authError && <div className="auth-error">{authError}</div>}
           <label>
@@ -1808,23 +1809,7 @@ export const App: React.FC = () => {
           <button type="submit" className="btn-primary">
             Sign In
           </button>
-          <button
-            type="button"
-            className="btn-tiny"
-            onClick={() => setShowLocalModal(true)}
-            style={{ marginTop: 4 }}
-          >
-            💻 Want to run dupe locally on your machine? Setup Guide
-          </button>
         </form>
-        <LocalModeModal
-          open={showLocalModal}
-          runtimeMode={runtimeMode}
-          loggedIn={false}
-          onClose={() => setShowLocalModal(false)}
-          onStatusMessage={setStatusMessage}
-          onLocalWorkspaceChanged={loadInitialWorkspace}
-        />
       </div>
     );
   }
@@ -1911,18 +1896,6 @@ export const App: React.FC = () => {
         </div>
 
         <div className="user-group">
-          <button
-            type="button"
-            className="btn-tiny"
-            onClick={() => setShowLocalModal(true)}
-            title={
-              runtimeMode === 'local'
-                ? 'Choose your local projects folder or symlink an existing repo'
-                : 'Download and configure dupe to run locally on your laptop'
-            }
-          >
-            {runtimeMode === 'local' ? '📁 Local Folder / Symlink' : '💻 Run Locally'}
-          </button>
           <span className="user-badge">
             {user.username} ({runtimeMode})
           </span>
@@ -2159,21 +2132,6 @@ export const App: React.FC = () => {
           {activeProject?.overleaf_remote ? 'Overleaf Linked' : 'Local Git'}
         </span>
       </footer>
-
-      <LocalModeModal
-        open={showLocalModal}
-        runtimeMode={runtimeMode}
-        loggedIn={Boolean(user)}
-        activeProject={activeProject}
-        onClose={() => setShowLocalModal(false)}
-        onStatusMessage={setStatusMessage}
-        onLocalWorkspaceChanged={async (selectProjectId) => {
-          await loadProjects();
-          if (selectProjectId) {
-            await handleSelectProject(selectProjectId);
-          }
-        }}
-      />
     </div>
   );
 };

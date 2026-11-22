@@ -99,7 +99,12 @@ export const PdfReaderPane: React.FC<PdfReaderPaneProps> = ({
   onInsertCitation,
   onAddComment,
 }) => {
-  const [viewerMode, setViewerMode] = useState<'native' | 'pdfjs'>('native');
+  const prefersPdfJs =
+    typeof navigator !== 'undefined' &&
+    (navigator.maxTouchPoints > 0 || /iPad|iPhone|Android/i.test(navigator.userAgent));
+  const [viewerMode, setViewerMode] = useState<'native' | 'pdfjs'>(
+    prefersPdfJs ? 'pdfjs' : 'native',
+  );
   const [zoomPercent, setZoomPercent] = useState(110);
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
