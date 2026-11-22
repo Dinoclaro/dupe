@@ -996,8 +996,11 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _, _ = s.ensureDefaultProject(r.Context(), claims.UserID, claims.Username)
 	root := s.userProjectsRoot(claims.UserID)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create projects directory")
+		return
+	}
 	dirEntries, err := os.ReadDir(root)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read projects directory")
