@@ -27,6 +27,7 @@ import {
   readLocalProjectConfig,
   readLocalRefsIndex,
 } from './projectLocator';
+import { DupeSpellProvider } from './spellProvider';
 import {
   BibMetadata,
   LatexDiagnostic,
@@ -576,6 +577,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const citationProvider = new DupeCitationFeatures(() => bibMap, notesIndex);
+  const spellProvider = new DupeSpellProvider(context.extensionUri, () => activeProjectRoot);
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider('dupe.notesView', notesProvider),
     vscode.window.registerTreeDataProvider('dupe.papersView', paperProvider),
@@ -598,6 +600,12 @@ export function activate(context: vscode.ExtensionContext): void {
       citationProvider,
     ),
     vscode.languages.registerDefinitionProvider({ language: 'markdown' }, citationProvider),
+    vscode.languages.registerCodeActionsProvider(
+      [{ language: 'latex' }, { language: 'markdown' }, { language: 'tex' }],
+      spellProvider,
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
+    ),
+    spellProvider,
     diagnostics,
     syncTexFlashDeco,
     statusSyncItem,
@@ -1534,9 +1542,37 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.env.openExternal(vscode.Uri.parse(api.getBaseUrl()));
     }),
 
+    vscode.commands.registerCommand('dupe.toggleSpellCheck', async () => {
+      const cfg = vscode.workspace.getConfiguration('dupe');
+      const next = !cfg.get<boolean>('spellCheck.enabled', true);
+      await cfg.update('spellCheck.enabled', next, vscode.ConfigurationTarget.Global);
+      spellProvider.refreshAllOpenDocuments();
+      void vscode.window.showInformationMessage(`dupe spell check ${next ? 'enabled' : 'disabled'}.`);
+    }),
+
+    vscode.commands.registerCommand(
+      'dupe.addWordToProjectDict',
+      async (word?: string, explicitRoot?: string) => {
+        if (word) {
+          await spellProvider.addToProjectDictionary(word, explicitRoot);
+        }
+      },
+    ),
+
+    vscode.commands.registerCommand('dupe.addWordToUserDict', async (word?: string) => {
+      if (word) {
+        await spellProvider.addToUserDictionary(word);
+      }
+    }),
+
+    vscode.workspace.onDidOpenTextDocument((doc) => spellProvider.checkDocument(doc)),
+    vscode.workspace.onDidChangeTextDocument((ev) => spellProvider.scheduleCheck(ev.document)),
+    vscode.workspace.onDidCloseTextDocument((doc) => spellProvider.clearDocument(doc.uri)),
+
     vscode.workspace.onDidChangeConfiguration((ev) => {
       if (ev.affectsConfiguration('dupe')) {
         void refreshAll();
+        spellProvider.refreshAllOpenDocuments();
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refreshAll()),
@@ -1544,6 +1580,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!editor) {
         return;
       }
+      spellProvider.checkDocument(editor.document);
       const fsPath = editor.document.uri.fsPath;
       const hitRoot = findDupeProjectRoot(path.dirname(fsPath));
       if (hitRoot && hitRoot !== activeProjectRoot) {
@@ -1587,6 +1624,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void refreshAll();
+  spellProvider.refreshAllOpenDocuments();
 }
 
 export function deactivate(): void {

@@ -23,6 +23,12 @@ import {
   findDupeProjectRoot,
   readLocalRefsIndex,
 } from '../projectLocator';
+import {
+  SpellDictionary,
+  appendWordToProjectDictionary,
+  extractSpellableWords,
+  loadProjectDictionaryFile,
+} from '../spellCheck';
 import { Paper } from '../types';
 
 const SAMPLE_PAPERS: Paper[] = [
@@ -196,6 +202,45 @@ describe('dupe VS Code extension helpers', () => {
       expect(idx.getBacklinksForPaper('chi2023diffusion')).toHaveLength(1);
     } finally {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('spell-checks LaTeX and Markdown prose while skipping math, citations, and code', () => {
+    const latex = `% comment with typoo
+\\section{Offline Reinforcement Learnign}
+We evaluate \\cite{chi2023diffusion} on $E = mc^2$ and \\begin{equation}xyzabc = 1\\end{equation}.
+\\textbf{Electrohydraulic} controllerr with HASEL actuators.
+`;
+    const texTokens = extractSpellableWords(latex, 'latex').map((t) => t.word);
+    expect(texTokens).toContain('Learnign');
+    expect(texTokens).toContain('controllerr');
+    expect(texTokens).toContain('Electrohydraulic');
+    expect(texTokens).not.toContain('typoo');
+    expect(texTokens).not.toContain('chi2023diffusion');
+    expect(texTokens).not.toContain('xyzabc');
+    expect(texTokens).not.toContain('HASEL');
+
+    const md = `---\ntitle: Testt\n---\nCheck [[SRE Ideas|seperate note]] and \`inlineTypoo\` #badtag\n\`\`\`\ncodeTypoo\n\`\`\`\nActuall prose.\n`;
+    const mdTokens = extractSpellableWords(md, 'markdown').map((t) => t.word);
+    expect(mdTokens).toContain('seperate');
+    expect(mdTokens).toContain('Actuall');
+    expect(mdTokens).not.toContain('Testt');
+    expect(mdTokens).not.toContain('inlineTypoo');
+    expect(mdTokens).not.toContain('codeTypoo');
+    expect(mdTokens).not.toContain('badtag');
+
+    const dict = new SpellDictionary(['separate', 'learning', 'controller', 'actual', 'actuators', 'evaluate', 'offline', 'reinforcement', 'check', 'note', 'prose', 'with', 'and']);
+    expect(dict.isWordValid('Electrohydraulic')).toBe(true);
+    expect(dict.isWordValid('controllerr')).toBe(false);
+    expect(dict.suggest('controllerr')).toContain('controller');
+    expect(dict.suggest('seperate')).toContain('separate');
+
+    const tmpProj = fs.mkdtempSync(path.join(os.tmpdir(), 'dupe-dict-test-'));
+    try {
+      appendWordToProjectDictionary(tmpProj, 'mycustomterm');
+      expect(loadProjectDictionaryFile(tmpProj)).toEqual(['mycustomterm']);
+    } finally {
+      fs.rmSync(tmpProj, { recursive: true, force: true });
     }
   });
 });

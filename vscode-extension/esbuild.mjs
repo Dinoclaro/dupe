@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 
@@ -19,8 +20,26 @@ function copyPdfJsAssets() {
   }
 }
 
+function buildCompressedDictionaries() {
+  const outDir = path.resolve(__dirname, 'media/dict');
+  fs.mkdirSync(outDir, { recursive: true });
+  const sources = [
+    { src: '/usr/share/dict/american-english', out: path.join(outDir, 'en-US.txt.gz') },
+    { src: '/usr/share/dict/british-english', out: path.join(outDir, 'en-GB.txt.gz') },
+  ];
+  for (const item of sources) {
+    if (fs.existsSync(item.src)) {
+      const raw = fs.readFileSync(item.src);
+      fs.writeFileSync(item.out, zlib.gzipSync(raw, { level: 9 }));
+    } else if (!fs.existsSync(item.out)) {
+      throw new Error(`Missing dictionary file: ${item.out}`);
+    }
+  }
+}
+
 async function main() {
   copyPdfJsAssets();
+  buildCompressedDictionaries();
   const ctx = await esbuild.context({
     entryPoints: ['src/extension.ts'],
     bundle: true,
