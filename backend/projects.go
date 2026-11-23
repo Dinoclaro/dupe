@@ -481,6 +481,117 @@ func summarizeContainerGitContext(ctx context.Context, parentDir, containerName 
 	return out.String()
 }
 
+type codeRepoHint struct {
+	Subdir    string
+	RemoteURL string
+}
+
+func sanitizeRemoteURLForDocs(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	if strings.HasPrefix(cleaned, "https://") || strings.HasPrefix(cleaned, "http://") {
+		if idx := strings.Index(cleaned, "://"); idx != -1 {
+			scheme := cleaned[:idx+3]
+			rest := cleaned[idx+3:]
+			if at := strings.Index(rest, "@"); at != -1 {
+				slash := strings.Index(rest, "/")
+				if slash == -1 || at < slash {
+					return scheme + rest[at+1:]
+				}
+			}
+		}
+	}
+	return cleaned
+}
+
+func collectCodeRepoCloneHints(ctx context.Context, projectDir string, cfg ProjectConfig) []codeRepoHint {
+	seen := make(map[string]bool)
+	var hints []codeRepoHint
+	addHint := func(subdir, remote string) {
+		clean := sanitizeRemoteURLForDocs(remote)
+		if clean == "" || seen[clean] {
+			return
+		}
+		seen[clean] = true
+		hints = append(hints, codeRepoHint{Subdir: subdir, RemoteURL: clean})
+	}
+
+	if strings.TrimSpace(cfg.CodeRemote) != "" {
+		addHint("", cfg.CodeRemote)
+	}
+	codeDir := filepath.Join(projectDir, "code")
+	if out, err := runGitCommand(ctx, codeDir, "remote", "get-url", "origin"); err == nil {
+		addHint("", out)
+	}
+	if entries, err := os.ReadDir(codeDir); err == nil {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			subPath := filepath.Join(codeDir, entry.Name())
+			if info, statErr := os.Stat(subPath); statErr == nil && info.IsDir() {
+				if out, err := runGitCommand(ctx, subPath, "remote", "get-url", "origin"); err == nil {
+					addHint(entry.Name(), out)
+				}
+			}
+		}
+	}
+	return hints
+}
+
+func writeSetupSection(ctx context.Context, b *strings.Builder, projectDir string, cfg ProjectConfig) {
+	projectsDir := filepath.Dir(projectDir)
+	projectsArg := "~/dupe_projects"
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+		if rel, rErr := filepath.Rel(homeDir, projectsDir); rErr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, "..") && !strings.Contains(rel, "dupe/storage/projects") {
+			projectsArg = "~/" + filepath.ToSlash(rel)
+		}
+	}
+	projectRelPath := projectsArg + "/" + cfg.FolderName
+	codeHints := collectCodeRepoCloneHints(ctx, projectDir, cfg)
+
+	b.WriteString("\n## 5. New Laptop Setup\n\n")
+	b.WriteString("Run these commands on a new Linux laptop to pull this project and link the VS Code extension.\n\n")
+	b.WriteString("### 1. Install `dupe` Daemon and Sync Project Data\n\n")
+	b.WriteString("```bash\n")
+	b.WriteString("read -rp \"Username on https://dupe.ing: \" DUPE_USER\n")
+	b.WriteString("read -rsp \"Password for $DUPE_USER: \" DUPE_PASS && echo\n")
+	b.WriteString("TOKEN=$(curl -fsS -X POST https://dupe.ing/api/auth/login \\\n")
+	b.WriteString("  -H 'Content-Type: application/json' \\\n")
+	b.WriteString("  -d \"{\\\"username\\\":\\\"$DUPE_USER\\\",\\\"password\\\":\\\"$DUPE_PASS\\\"}\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['token'])\")\n")
+	b.WriteString("unset DUPE_PASS\n\n")
+	b.WriteString("curl -fsSL -H \"Authorization: Bearer $TOKEN\" \\\n")
+	b.WriteString(fmt.Sprintf("  \"https://dupe.ing/api/local/setup.sh?projects=%s\" | bash\n", projectsArg))
+	b.WriteString("```\n\n")
+	b.WriteString("This script pulls the PDF library, BibTeX entries, `notes/`, and the Overleaf `paper/` repository automatically.\n\n")
+
+	stepNum := 2
+	if len(codeHints) > 0 {
+		b.WriteString(fmt.Sprintf("### %d. Clone Linked Code Repositories\n\n", stepNum))
+		b.WriteString("```bash\n")
+		b.WriteString(fmt.Sprintf("mkdir -p %s/code && cd %s/code\n", projectRelPath, projectRelPath))
+		for _, hint := range codeHints {
+			if hint.Subdir == "" {
+				b.WriteString(fmt.Sprintf("git clone %s .\n", hint.RemoteURL))
+			} else {
+				b.WriteString(fmt.Sprintf("git clone %s %s\n", hint.RemoteURL, hint.Subdir))
+			}
+		}
+		b.WriteString("```\n\n")
+		stepNum++
+	}
+
+	b.WriteString(fmt.Sprintf("### %d. Install VS Code Extension\n\n", stepNum))
+	b.WriteString("```bash\n")
+	b.WriteString("git clone git@github.com:Dinoclaro/dupe.git /tmp/dupe-ext\n")
+	b.WriteString("cd /tmp/dupe-ext/vscode-extension\n")
+	b.WriteString("npm ci && npm run build\n")
+	b.WriteString("npx --yes @vscode/vsce package --allow-missing-repository --no-dependencies -o /tmp/dupe-studio.vsix\n")
+	b.WriteString("code --install-extension /tmp/dupe-studio.vsix --force\n")
+	b.WriteString("rm -rf /tmp/dupe-ext /tmp/dupe-studio.vsix\n")
+	b.WriteString(fmt.Sprintf("code %s\n", projectRelPath))
+	b.WriteString("```\n\n")
+}
+
 func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectConfig, refs []RefIndexEntry, isLocalMode bool) string {
 	openComments, addressedComments := readCommentsWithoutWriting(projectDir)
 	customSummaryBytes, _ := os.ReadFile(filepath.Join(projectDir, ".dupe", "summary.md"))
@@ -596,6 +707,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 			b.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s |\n", r.BibtexKey, yr, r.Title, r.Authors))
 		}
 	}
+	writeSetupSection(ctx, &b, projectDir, cfg)
 	return b.String()
 }
 

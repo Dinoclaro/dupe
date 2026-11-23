@@ -839,6 +839,9 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 	if !strings.Contains(string(afterAgents), "Custom robot hardware & benchmark rules.") {
 		t.Fatalf("expected user description block to survive regeneration, got:\n%s", string(afterAgents))
 	}
+	if !strings.Contains(string(afterAgents), "## 5. New Laptop Setup") || !strings.Contains(string(afterAgents), "/api/local/setup.sh?projects=") {
+		t.Fatalf("expected AGENTS.md to include laptop setup section, got:\n%s", string(afterAgents))
+	}
 
 	// 2. Link multiple code repos and a paper subdir via as_subdir: true
 	repoA := t.TempDir()
