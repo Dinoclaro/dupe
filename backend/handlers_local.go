@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -129,19 +130,71 @@ func addFileToTar(tw *tar.Writer, srcPath, archiveName string, mode int64) error
 	return err
 }
 
+func normalizeBundleOS(raw string) string {
+	clean := strings.ToLower(strings.TrimSpace(raw))
+	if clean == "" {
+		return runtime.GOOS
+	}
+	switch clean {
+	case "linux":
+		return "linux"
+	case "darwin", "macos", "osx":
+		return "darwin"
+	default:
+		return ""
+	}
+}
+
+func normalizeBundleArch(raw string) string {
+	clean := strings.ToLower(strings.TrimSpace(raw))
+	if clean == "" {
+		return runtime.GOARCH
+	}
+	switch clean {
+	case "amd64", "x86_64", "x64":
+		return "amd64"
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return ""
+	}
+}
+
+func resolveBundleExecutable(targetOS, targetArch string) (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, rErr := filepath.EvalSymlinks(exePath); rErr == nil {
+		exePath = resolved
+	}
+	sibling := filepath.Join(filepath.Dir(exePath), fmt.Sprintf("server-%s-%s", targetOS, targetArch))
+	if info, statErr := os.Stat(sibling); statErr == nil && !info.IsDir() {
+		return sibling, nil
+	}
+	if targetOS == runtime.GOOS && targetArch == runtime.GOARCH {
+		return exePath, nil
+	}
+	return "", fmt.Errorf("binary for %s/%s not found", targetOS, targetArch)
+}
+
 func (s *Server) handleLocalBundle(w http.ResponseWriter, r *http.Request) {
 	if _, ok := currentUser(r); !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "server executable unavailable")
+	targetOS := normalizeBundleOS(r.URL.Query().Get("os"))
+	targetArch := normalizeBundleArch(r.URL.Query().Get("arch"))
+	if targetOS == "" || targetArch == "" {
+		writeError(w, http.StatusBadRequest, "unsupported os or arch")
 		return
 	}
-	if resolved, rErr := filepath.EvalSymlinks(exePath); rErr == nil {
-		exePath = resolved
+
+	exePath, err := resolveBundleExecutable(targetOS, targetArch)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/gzip")
@@ -212,8 +265,10 @@ func (s *Server) handleLocalSetupScript(w http.ResponseWriter, r *http.Request) 
 	enableSync := r.URL.Query().Get("sync") != "0" && rawToken != ""
 
 	var syncFlags string
+	var launchdSyncArgs string
 	if enableSync {
 		syncFlags = fmt.Sprintf(`--sync-url %q --sync-token %q`, baseURL, rawToken)
+		launchdSyncArgs = fmt.Sprintf("    <string>--sync-url</string>\n    <string>%s</string>\n    <string>--sync-token</string>\n    <string>%s</string>", baseURL, rawToken)
 	}
 	autostartFlag := "0"
 	if enableAutostart {
@@ -235,27 +290,106 @@ STORAGE_DIR="$INSTALL_DIR/storage_%s"
 BIN_DIR="$HOME/.local/bin"
 AUTOSTART=%s
 
-echo "==> Installing dupe local mode into $INSTALL_DIR"
+OS_RAW="$(uname -s)"
+case "$OS_RAW" in
+  Linux) OS_NAME="linux" ;;
+  Darwin) OS_NAME="darwin" ;;
+  *) echo "Unsupported OS: $OS_RAW" >&2; exit 1 ;;
+esac
+
+ARCH_RAW="$(uname -m)"
+case "$ARCH_RAW" in
+  x86_64|amd64) ARCH_NAME="amd64" ;;
+  arm64|aarch64) ARCH_NAME="arm64" ;;
+  *) echo "Unsupported architecture: $ARCH_RAW" >&2; exit 1 ;;
+esac
+
+echo "==> Installing dupe local mode ($OS_NAME/$ARCH_NAME) into $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR" "$STORAGE_DIR" "$PROJECTS_DIR" "$BIN_DIR"
 
 TMP_TAR="$(mktemp)"
 trap 'rm -f "$TMP_TAR"' EXIT
-curl -fsSL -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/local/bundle.tar.gz" -o "$TMP_TAR"
+curl -fsSL -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/local/bundle.tar.gz?os=$OS_NAME&arch=$ARCH_NAME" -o "$TMP_TAR"
 tar -xzf "$TMP_TAR" -C "$HOME/.local/share"
 chmod +x "$INSTALL_DIR/backend/server"
+if [ "$OS_NAME" = "darwin" ]; then
+  xattr -d com.apple.quarantine "$INSTALL_DIR/backend/server" >/dev/null 2>&1 || true
+fi
 
 if ! command -v tectonic >/dev/null 2>&1 && [ ! -x "$BIN_DIR/tectonic" ]; then
-  if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ]; then
+  TECT_URL=""
+  case "$OS_NAME-$ARCH_NAME" in
+    linux-amd64) TECT_URL="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%%400.15.0/tectonic-0.15.0-x86_64-unknown-linux-gnu.tar.gz" ;;
+    linux-arm64) TECT_URL="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%%400.15.0/tectonic-0.15.0-aarch64-unknown-linux-musl.tar.gz" ;;
+    darwin-arm64) TECT_URL="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%%400.15.0/tectonic-0.15.0-aarch64-apple-darwin.tar.gz" ;;
+    darwin-amd64) TECT_URL="https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%%400.15.0/tectonic-0.15.0-x86_64-apple-darwin.tar.gz" ;;
+  esac
+  if [ -n "$TECT_URL" ]; then
     echo "==> Installing Tectonic LaTeX engine (0.15.0) into $BIN_DIR..."
     TECT_TMP="$(mktemp -d)"
-    if curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%%400.15.0/tectonic-0.15.0-x86_64-unknown-linux-gnu.tar.gz" -o "$TECT_TMP/tectonic.tar.gz"; then
+    if curl -fsSL "$TECT_URL" -o "$TECT_TMP/tectonic.tar.gz"; then
       tar -xzf "$TECT_TMP/tectonic.tar.gz" -C "$TECT_TMP"
       install -m 0755 "$TECT_TMP/tectonic" "$BIN_DIR/tectonic" || true
+      if [ "$OS_NAME" = "darwin" ]; then
+        xattr -d com.apple.quarantine "$BIN_DIR/tectonic" >/dev/null 2>&1 || true
+      fi
     else
       echo "Warning: Could not download tectonic automatically; draft preview still works."
     fi
     rm -rf "$TECT_TMP"
   fi
+fi
+
+if [ "$AUTOSTART" = "1" ] && [ "$OS_NAME" = "darwin" ]; then
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  PLIST_PATH="$HOME/Library/LaunchAgents/io.dupe.local.plist"
+  cat > "$PLIST_PATH" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.dupe.local</string>
+  <key>WorkingDirectory</key>
+  <string>$INSTALL_DIR/backend</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>STORAGE_DIR</key>
+    <string>$STORAGE_DIR</string>
+    <key>PROJECTS_DIR</key>
+    <string>$PROJECTS_DIR</string>
+    <key>WEB_DIST_DIR</key>
+    <string>$INSTALL_DIR/web/dist</string>
+    <key>EXTRACT_SCRIPT</key>
+    <string>$INSTALL_DIR/scripts/extract_meta.py</string>
+    <key>PATH</key>
+    <string>$BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$INSTALL_DIR/backend/server</string>
+    <string>serve</string>
+    <string>--mode</string>
+    <string>local</string>
+    <string>--projects</string>
+    <string>$PROJECTS_DIR</string>
+%s
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$HOME/Library/Logs/dupe-local.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/Library/Logs/dupe-local.log</string>
+</dict>
+</plist>
+PLIST
+  launchctl bootout "gui/$(id -u)" "$PLIST_PATH" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  echo "==> io.dupe.local started! Open http://127.0.0.1:8080 in your browser."
+  exit 0
 fi
 
 if [ "$AUTOSTART" = "1" ] && command -v systemctl >/dev/null 2>&1; then
@@ -291,7 +425,7 @@ echo "==> Starting dupe in local mode on http://127.0.0.1:8080 ..."
 cd "$INSTALL_DIR/backend"
 STORAGE_DIR="$STORAGE_DIR" WEB_DIST_DIR="$INSTALL_DIR/web/dist" EXTRACT_SCRIPT="$INSTALL_DIR/scripts/extract_meta.py" \
   exec "$INSTALL_DIR/backend/server" serve --mode local --projects "$PROJECTS_DIR" %s
-`, baseURL, rawToken, rawProjects, storageSuffix, autostartFlag, syncFlags, syncFlags)
+`, baseURL, rawToken, rawProjects, storageSuffix, autostartFlag, launchdSyncArgs, syncFlags, syncFlags)
 
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

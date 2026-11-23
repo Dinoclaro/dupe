@@ -550,7 +550,7 @@ func writeSetupSection(ctx context.Context, b *strings.Builder, projectDir strin
 	codeHints := collectCodeRepoCloneHints(ctx, projectDir, cfg)
 
 	b.WriteString("\n## 5. New Laptop Setup\n\n")
-	b.WriteString("Run these commands on a new Linux laptop to pull this project and link the VS Code extension.\n\n")
+	b.WriteString("Run these commands on a new Linux or macOS laptop to pull this project and link the VS Code extension.\n\n")
 	b.WriteString("### 1. Install `dupe` Daemon and Sync Project Data\n\n")
 	b.WriteString("```bash\n")
 	b.WriteString("read -rp \"Username on https://dupe.ing: \" DUPE_USER\n")

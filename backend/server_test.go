@@ -908,6 +908,20 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 	if imported.FileHash == "" {
 		t.Fatalf("expected valid file_hash on imported paper")
 	}
+
+	// 4. Verify multi-OS setup script supports macOS (launchd) and Linux (systemd)
+	sReq := httptest.NewRequest(http.MethodGet, "/api/local/setup.sh?projects=~/dupe_pele", nil)
+	sRec := httptest.NewRecorder()
+	handler.ServeHTTP(sRec, sReq)
+	if sRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/local/setup.sh, got %d", sRec.Code)
+	}
+	scriptBody := sRec.Body.String()
+	for _, want := range []string{"darwin-arm64", "io.dupe.local.plist", "tectonic-0.15.0-aarch64-apple-darwin.tar.gz", "dupe-local.service"} {
+		if !strings.Contains(scriptBody, want) {
+			t.Fatalf("expected setup.sh to contain %q", want)
+		}
+	}
 }
 
 func TestTwoWayProjectNotesSyncExcludesDiagrams(t *testing.T) {
