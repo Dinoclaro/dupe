@@ -299,7 +299,7 @@ body,
   color: #fcd34d;
 }
 
-.kind-diagram {
+.kind-code {
   background: rgba(168, 85, 247, 0.2);
   color: #d8b4fe;
 }
@@ -813,17 +813,14 @@ body,
 
 /* Shared Toolbars, Inputs & Buttons */
 .reader-pane,
-.editor-pane,
-.diagram-pane {
+.editor-pane {
   display: flex;
   flex-direction: column;
   height: 100%;
 }
 
 .reader-toolbar,
-.editor-toolbar,
-.diagram-toolbar,
-.diagram-inspector {
+.editor-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1050,20 +1047,6 @@ body,
 
 .md-table tr:nth-child(even) td {
   background: rgba(255, 255, 255, 0.02);
-}
-
-.diagram-canvas-wrap,
-.drawio-iframe-wrap {
-  flex: 1;
-  background: #0d1117;
-  overflow: hidden;
-  display: flex;
-}
-
-.drawio-iframe {
-  width: 100%;
-  height: 100%;
-  border: none;
 }
 
 input[type='text'],

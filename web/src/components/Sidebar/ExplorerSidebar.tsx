@@ -39,7 +39,7 @@ export function buildFolderTree(entries: ProjectTreeEntry[]): FolderTreeNode {
   };
 
   // Ensure standard top-level project folders always appear
-  for (const stdDir of ['paper', 'notes', 'diagrams', 'refs']) {
+  for (const stdDir of ['paper', 'notes', 'refs']) {
     root.childrenDirs.push({
       name: stdDir,
       fullPath: stdDir,
@@ -109,7 +109,7 @@ interface ExplorerSidebarProps {
   onOpenPaper: (paper: Paper, inSplit: boolean) => void;
   onOpenProjectFile: (file: ProjectTreeEntry, inSplit: boolean, line?: number) => void;
   onOpenCompiledPreview: (inSplit: boolean) => void;
-  onCreateProjectFile: (kind: 'tex' | 'markdown' | 'diagram', name: string) => Promise<void>;
+  onCreateProjectFile: (kind: 'tex' | 'markdown', name: string) => Promise<void>;
   onRenameProjectFile?: (oldPath: string, newPath: string) => Promise<void>;
   onDeleteProjectFile?: (filePath: string) => Promise<void>;
   onPullProject: () => Promise<void>;
@@ -265,11 +265,10 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
     };
   }, [contextMenu]);
 
-  // Recursive Project Directory Expanded State (paper, notes, diagrams open by default; code & refs collapsed)
+  // Recursive Project Directory Expanded State (paper and notes open by default; refs collapsed)
   const [expandedProjDirs, setExpandedProjDirs] = useState<Record<string, boolean>>({
     paper: true,
     notes: true,
-    diagrams: true,
   });
 
   const [showNewProjectForm, setShowNewProjectForm] = useState(false);
@@ -285,7 +284,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
   const [syncingGit, setSyncingGit] = useState(false);
 
   const [newFileKind, setNewFileKind] = useState<
-    'tex' | 'markdown' | 'diagram' | 'folder' | null
+    'tex' | 'markdown' | 'folder' | null
   >(null);
   const [newFileName, setNewFileName] = useState('');
 
@@ -851,31 +850,23 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                     ? 'BIB'
                     : file.kind === 'markdown'
                       ? 'MD'
-                      : file.kind === 'diagram'
-                        ? 'FIG'
-                        : file.kind === 'asset'
-                          ? file.path.toLowerCase().endsWith('.pdf')
-                            ? 'FIG'
-                            : 'IMG'
-                          : file.path.endsWith('.py')
-                            ? 'PY'
-                            : 'FILE';
-              const cleanStem = shortName.replace(/\.(drawio\.svg|drawio|excalidraw|svg|pdf|png|jpg|jpeg|gif|webp)$/i, '');
-              const svgRelPath = `figures/${cleanStem}.svg`;
+                      : file.kind === 'asset'
+                        ? file.path.toLowerCase().endsWith('.pdf')
+                          ? 'FIG'
+                          : 'IMG'
+                        : file.path.endsWith('.py')
+                          ? 'PY'
+                          : 'FILE';
+              const cleanStem = shortName.replace(/\.(svg|pdf|png|jpg|jpeg|gif|webp)$/i, '');
               const paperRelAsset = file.path.replace(/^paper\//, '');
               return (
                 <div
                   key={file.path}
                   className={`tree-row ${isSelected ? 'active' : ''}`}
                   style={{ paddingLeft: `${indentPx + 14}px` }}
-                  draggable={file.kind === 'diagram' || file.kind === 'asset'}
+                  draggable={file.kind === 'asset'}
                   onDragStart={(e) => {
-                    if (file.kind === 'diagram') {
-                      e.dataTransfer.setData(
-                        'text/plain',
-                        `\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{${svgRelPath}}\n  \\caption{${cleanStem.replace(/_/g, ' ')}}\n  \\label{fig:${cleanStem}}\n\\end{figure}`,
-                      );
-                    } else if (file.kind === 'asset') {
+                    if (file.kind === 'asset') {
                       e.dataTransfer.setData(
                         'text/plain',
                         `\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.9\\linewidth]{${paperRelAsset}}\n  \\caption{${cleanStem.replace(/_/g, ' ')}}\n  \\label{fig:${cleanStem}}\n\\end{figure}`,
@@ -1071,7 +1062,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                         : hit.category === 'latex'
                           ? 'kind-tex'
                           : hit.category === 'code'
-                            ? 'kind-diagram'
+                            ? 'kind-code'
                             : 'kind-markdown'
                     }`}
                   >
@@ -1340,14 +1331,6 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 >
                   + Note
                 </button>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  title="New Draw.io diagram in diagrams/"
-                  onClick={() => setNewFileKind((v) => (v === 'diagram' ? null : 'diagram'))}
-                >
-                  + Fig
-                </button>
               </div>
             </div>
 
@@ -1515,9 +1498,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                       ? 'notes/experiments'
                       : newFileKind === 'tex'
                         ? 'paper/methods.tex'
-                        : newFileKind === 'markdown'
-                          ? 'notes/ideas.md'
-                          : 'diagrams/system_arch'
+                        : 'notes/ideas.md'
                   }
                   value={newFileName}
                   onChange={(e) => setNewFileName(e.target.value)}
@@ -1552,7 +1533,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 </div>
               </div>
 
-              {/* Recursive Folder Hierarchy (paper/, notes/, diagrams/, refs/) */}
+              {/* Recursive Folder Hierarchy (paper/, notes/, refs/) */}
               {folderTreeRoot.childrenDirs.map((dirNode) =>
                 renderFolderTreeNode(dirNode, 0),
               )}
@@ -1563,7 +1544,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   title={`Linked local code folder: ${codeTarget} (edit code in VS Code; agents read code/ and paper/ together)`}
                   onClick={() => onStatusMessage(`Linked code/ -> ${codeTarget} (edit in VS Code)`)}
                 >
-                  <span className="file-icon kind-diagram">CODE</span>
+                  <span className="file-icon kind-code">CODE</span>
                   <div className="tree-label-col">
                     <span className="tree-primary-text">code/ (linked)</span>
                     <span className="tree-sub-text">→ {codeTarget}</span>
@@ -1674,11 +1655,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   setContextMenu(null);
                   const name = window.prompt(`New file in ${dir}/:`, `${dir}/note.md`);
                   if (name && name.trim()) {
-                    const kind = name.endsWith('.tex')
-                      ? 'tex'
-                      : name.endsWith('.svg') || name.startsWith('diagrams/')
-                        ? 'diagram'
-                        : 'markdown';
+                    const kind = name.endsWith('.tex') ? 'tex' : 'markdown';
                     void onCreateProjectFile(kind, name.trim());
                   }
                 }}
@@ -1686,7 +1663,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                 New File in {contextMenu.dirPath}/…
               </button>
               {onRenameProjectFile &&
-                !['paper', 'notes', 'diagrams', 'refs', 'code'].includes(contextMenu.dirPath) && (
+                !['paper', 'notes', 'refs', 'code'].includes(contextMenu.dirPath) && (
                   <button
                     type="button"
                     className="context-menu-item"
@@ -1703,7 +1680,7 @@ export const ExplorerSidebar: React.FC<ExplorerSidebarProps> = ({
                   </button>
                 )}
               {onDeleteProjectFile &&
-                !['paper', 'notes', 'diagrams', 'refs', 'code'].includes(contextMenu.dirPath) && (
+                !['paper', 'notes', 'refs', 'code'].includes(contextMenu.dirPath) && (
                   <button
                     type="button"
                     className="context-menu-item danger"

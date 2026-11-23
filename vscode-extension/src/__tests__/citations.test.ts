@@ -136,11 +136,11 @@ describe('dupe VS Code extension helpers', () => {
   });
 
   it('extracts Obsidian wikilinks, tags, checkbox toggles, and note paths', () => {
-    const links = extractWikiLinksInLine('Compare [[SRE Ideas|ideas]] with [[paper:chi2023diffusion]] and ![[arch.drawio.svg]]');
+    const links = extractWikiLinksInLine('Compare [[SRE Ideas|ideas]] with [[paper:chi2023diffusion]] and [[daily/2026-11-22]]');
     expect(links.map((l) => [l.kind, l.target])).toEqual([
       ['note', 'SRE Ideas'],
       ['paper', 'chi2023diffusion'],
-      ['diagram', 'arch.drawio.svg'],
+      ['note', 'daily/2026-11-22'],
     ]);
 
     expect(extractMarkdownTags('# Title\nText #experiment and #todo/urgent\n```\n#ignored\n```')).toEqual([
@@ -163,14 +163,13 @@ describe('dupe VS Code extension helpers', () => {
     expect(computeMarkdownEnterEdit('Regular text', 12)).toEqual({ action: 'default' });
   });
 
-  it('indexes notes, diagrams, and backlinks inside a dupe project', () => {
+  it('indexes notes and backlinks inside a dupe project', () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dupe-vscode-test-'));
     try {
       const projDir = path.join(tmpRoot, 'mimic');
       fs.mkdirSync(path.join(projDir, '.dupe'), { recursive: true });
       fs.mkdirSync(path.join(projDir, 'paper', 'sections'), { recursive: true });
       fs.mkdirSync(path.join(projDir, 'notes', 'daily'), { recursive: true });
-      fs.mkdirSync(path.join(projDir, 'diagrams'), { recursive: true });
       fs.mkdirSync(path.join(projDir, 'refs'), { recursive: true });
 
       fs.writeFileSync(
@@ -183,7 +182,6 @@ describe('dupe VS Code extension helpers', () => {
       );
       fs.writeFileSync(path.join(projDir, 'notes', 'ideas.md'), '# Ideas\n\nTarget note #core\n');
       fs.writeFileSync(path.join(projDir, 'notes', 'daily', '2026-11-22.md'), 'See [[ideas]] and [[paper:chi2023diffusion]]\n');
-      fs.writeFileSync(path.join(projDir, 'diagrams', 'arch.drawio.svg'), '<svg/>');
 
       expect(findDupeProjectRoot(path.join(projDir, 'paper', 'sections'))).toBe(projDir);
       expect(discoverProjectsInWorkspace([tmpRoot])).toHaveLength(1);
@@ -192,7 +190,6 @@ describe('dupe VS Code extension helpers', () => {
       const idx = new NotesIndex();
       idx.rebuild(projDir);
       expect(idx.getNotes()).toHaveLength(2);
-      expect(idx.getDiagrams()).toHaveLength(1);
 
       const targetNote = idx.resolveNoteTarget('ideas')!;
       expect(targetNote.relPath).toBe('notes/ideas.md');

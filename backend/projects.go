@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,8 @@ type ProjectTreeEntry struct {
 	Path      string `json:"path"`
 	Kind      string `json:"kind"`
 	GitStatus string `json:"git_status,omitempty"`
+	ModTime   string `json:"mod_time,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
 }
 
 type RefIndexEntry struct {
@@ -532,7 +536,6 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	b.WriteString("- `paper/`: Overleaf-linked LaTeX repository or linked paper subdirectories (`dupe_references.bib`, `figures/`).\n")
 	b.WriteString("- `code/`: Linked code repository or subdirectories (edited in VS Code).\n")
 	b.WriteString("- `notes/`: Markdown research notes (`*.md`) and `notes/comments.md` annotation queue.\n")
-	b.WriteString("- `diagrams/`: Editable Draw.io/Excalidraw diagram sources (`*.drawio.svg`).\n")
 	b.WriteString("- `refs/index.json`: Metadata and BibTeX keys for linked reference papers.\n")
 	b.WriteString("- `refs/text/<bibtex_key>.md`: Extracted full text of each reference paper.\n\n")
 
@@ -572,7 +575,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	b.WriteString("### Recent Git Activity\n\n")
 	paperGit := summarizeContainerGitContext(ctx, filepath.Join(projectDir, "paper"), "paper")
 	codeGit := summarizeContainerGitContext(ctx, filepath.Join(projectDir, "code"), "code")
-	rootGit := summarizeGitRepoContext(ctx, projectDir, "project root (notes & diagrams)")
+	rootGit := summarizeGitRepoContext(ctx, projectDir, "project root (notes)")
 	if paperGit == "" && codeGit == "" && rootGit == "" {
 		b.WriteString("No Git commits recorded yet.\n\n")
 	} else {
@@ -669,10 +672,9 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 	figuresDir := filepath.Join(paperDir, "figures")
 	codeDir := filepath.Join(projectDir, "code")
 	notesDir := filepath.Join(projectDir, "notes")
-	diagramsDir := filepath.Join(projectDir, "diagrams")
 	refsTextDir := filepath.Join(projectDir, "refs", "text")
 
-	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, diagramsDir, refsTextDir} {
+	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, refsTextDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
@@ -797,12 +799,25 @@ func (s *Server) createProjectOnDisk(
 	username, name, overleafRemote, codeRemote string,
 	linkAll bool,
 ) (ProjectConfig, string, error) {
+	return s.createProjectOnDiskWithID(ctx, userID, username, "", "", name, overleafRemote, codeRemote, linkAll)
+}
+
+func (s *Server) createProjectOnDiskWithID(
+	ctx context.Context,
+	userID int,
+	username, explicitID, explicitFolder, name, overleafRemote, codeRemote string,
+	linkAll bool,
+) (ProjectConfig, string, error) {
 	root := s.userProjectsRoot(userID)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return ProjectConfig{}, "", err
 	}
 
 	folderSlug := sanitizeProjectFolderName(name)
+	cleanExplicitFolder := strings.TrimSpace(explicitFolder)
+	if cleanExplicitFolder != "" && !strings.Contains(cleanExplicitFolder, "/") && !strings.Contains(cleanExplicitFolder, "\\") && !strings.Contains(cleanExplicitFolder, "..") && cleanExplicitFolder != "." {
+		folderSlug = cleanExplicitFolder
+	}
 	projDir := filepath.Join(root, folderSlug)
 	for suffix := 2; ; suffix++ {
 		if _, err := os.Stat(projDir); errors.Is(err, os.ErrNotExist) {
@@ -811,9 +826,11 @@ func (s *Server) createProjectOnDisk(
 		projDir = filepath.Join(root, fmt.Sprintf("%s-%d", folderSlug, suffix))
 	}
 
-	var projID string
-	if err := s.db.QueryRow(ctx, "SELECT gen_random_uuid()::text").Scan(&projID); err != nil {
-		projID = fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1000000000000)
+	projID := strings.TrimSpace(explicitID)
+	if projID == "" || !isValidUUID(projID) {
+		if err := s.db.QueryRow(ctx, "SELECT gen_random_uuid()::text").Scan(&projID); err != nil {
+			projID = fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1000000000000)
+		}
 	}
 
 	cfg := ProjectConfig{
@@ -960,9 +977,7 @@ func classifyProjectFileKind(relSlash string) string {
 		return "bib"
 	case strings.HasSuffix(lower, ".md"):
 		return "markdown"
-	case strings.HasSuffix(lower, ".drawio") || strings.HasSuffix(lower, ".excalidraw") || strings.HasSuffix(lower, ".svg"):
-		return "diagram"
-	case strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg") || strings.HasSuffix(lower, ".gif") || strings.HasSuffix(lower, ".webp") || strings.HasSuffix(lower, ".pdf"):
+	case strings.HasSuffix(lower, ".png") || strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg") || strings.HasSuffix(lower, ".gif") || strings.HasSuffix(lower, ".webp") || strings.HasSuffix(lower, ".pdf") || strings.HasSuffix(lower, ".svg"):
 		return "asset"
 	case strings.HasSuffix(lower, ".json"):
 		return "json"
@@ -973,7 +988,7 @@ func classifyProjectFileKind(relSlash string) string {
 
 func isIgnoredProjectDirName(name string) bool {
 	switch name {
-	case ".git", ".dupe", "code", "node_modules", "__pycache__", "wandb", "logs", "results", ".vscode", ".github", "build", "dist", "assets":
+	case ".git", ".dupe", "code", "diagrams", "node_modules", "__pycache__", "wandb", "logs", "results", ".vscode", ".github", "build", "dist", "assets":
 		return true
 	default:
 		return strings.HasSuffix(name, ".egg-info")
@@ -993,11 +1008,24 @@ func isBinaryAssetExt(name string) bool {
 func isVisibleProjectAsset(relSlash string) bool {
 	ext := strings.ToLower(filepath.Ext(relSlash))
 	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf":
-		return strings.HasPrefix(relSlash, "paper/") || strings.HasPrefix(relSlash, "diagrams/") || strings.HasPrefix(relSlash, "notes/")
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".svg":
+		return strings.HasPrefix(relSlash, "paper/") || strings.HasPrefix(relSlash, "notes/")
 	default:
 		return true
 	}
+}
+
+func computeFileSHA256Hex(absPath string) string {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func collectProjectTree(ctx context.Context, projectDir string) ([]ProjectTreeEntry, error) {
@@ -1045,10 +1073,16 @@ func collectProjectTree(ctx context.Context, projectDir string) ([]ProjectTreeEn
 			if status == "" {
 				status = rootStatus[relSlash]
 			}
+			var fileHash string
+			if strings.HasPrefix(relSlash, "notes/") && info.Size() <= 20<<20 {
+				fileHash = computeFileSHA256Hex(fullPath)
+			}
 			entries = append(entries, ProjectTreeEntry{
 				Path:      relSlash,
 				Kind:      classifyProjectFileKind(relSlash),
 				GitStatus: status,
+				ModTime:   info.ModTime().UTC().Format(time.RFC3339Nano),
+				SHA256:    fileHash,
 			})
 		}
 		return nil
@@ -1111,6 +1145,8 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type createProjectRequest struct {
+	ID             string `json:"id,omitempty"`
+	FolderName     string `json:"folder_name,omitempty"`
 	Name           string `json:"name"`
 	OverleafRemote string `json:"overleaf_remote"`
 	CodeRemote     string `json:"code_remote"`
@@ -1133,6 +1169,10 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project name is required")
 		return
 	}
+	if strings.TrimSpace(req.ID) != "" && !isValidUUID(req.ID) {
+		writeError(w, http.StatusBadRequest, "invalid project UUID")
+		return
+	}
 	if strings.TrimSpace(req.OverleafRemote) != "" {
 		if err := validateRemoteURL(req.OverleafRemote); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1150,10 +1190,12 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		linkAll = *req.LinkAllPapers
 	}
 
-	cfg, _, err := s.createProjectOnDisk(
+	cfg, _, err := s.createProjectOnDiskWithID(
 		r.Context(),
 		claims.UserID,
 		claims.Username,
+		req.ID,
+		req.FolderName,
 		req.Name,
 		req.OverleafRemote,
 		req.CodeRemote,
@@ -1538,8 +1580,8 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		if existingBytes, readErr := os.ReadFile(targetPath); readErr == nil {
 			existingTrim := bytes.TrimSpace(existingBytes)
 			incomingTrim := bytes.TrimSpace(data)
-			// Never allow a 1-line '# title' stub to overwrite an existing populated note
-			if len(existingTrim) > 25 && len(incomingTrim) <= 30 && !bytes.Contains(incomingTrim, []byte("\n")) {
+			// Never allow a 1-line '# title' stub to overwrite an existing populated note unless forced
+			if !req.Force && len(existingTrim) > 25 && len(incomingTrim) <= 30 && !bytes.Contains(incomingTrim, []byte("\n")) {
 				headContent := readHeadContentForProjectFile(r.Context(), projDir, relSlash)
 				writeJSON(w, http.StatusOK, map[string]any{
 					"path":         relSlash,
@@ -1578,14 +1620,6 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	if strings.HasPrefix(relSlash, "diagrams/") && strings.HasSuffix(relSlash, ".svg") {
-		baseName := strings.TrimSuffix(filepath.Base(relSlash), ".drawio.svg")
-		baseName = strings.TrimSuffix(baseName, ".svg")
-		paperFigPath := filepath.Join(projDir, "paper", "figures", baseName+".svg")
-		_ = os.MkdirAll(filepath.Dir(paperFigPath), 0o755)
-		_ = os.WriteFile(paperFigPath, data, 0o644)
-	}
-
 	headContent := readHeadContentForProjectFile(r.Context(), projDir, relSlash)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":         relSlash,
@@ -1596,7 +1630,7 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 
 func isProtectedProjectPath(relSlash string) bool {
 	switch relSlash {
-	case "", ".", "paper", "notes", "diagrams", "refs", "code", "AGENTS.md", ".dupe", ".git", "paper/dupe_references.bib":
+	case "", ".", "paper", "notes", "refs", "code", "AGENTS.md", ".dupe", ".git", "paper/dupe_references.bib":
 		return true
 	}
 	return strings.HasPrefix(relSlash, ".git/") ||

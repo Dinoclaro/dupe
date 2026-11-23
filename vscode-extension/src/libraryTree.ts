@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { filterPapersByQuery } from './citations';
 import { NotesIndex } from './notesIndex';
-import { BacklinkHit, DiagramEntry, LocalStatus, NoteEntry, Paper, ProjectConfig, RemoteSyncStatus } from './types';
+import { BacklinkHit, LocalStatus, NoteEntry, Paper, ProjectConfig, RemoteSyncStatus } from './types';
 
 export class PaperTreeItem extends vscode.TreeItem {
   constructor(
@@ -60,7 +60,7 @@ export class InfoTreeItem extends vscode.TreeItem {
 export class SectionTreeItem extends vscode.TreeItem {
   constructor(
     label: string,
-    public readonly sectionKind: 'backlinks' | 'notes' | 'diagrams',
+    public readonly sectionKind: 'backlinks' | 'notes',
     iconId: string,
     description = '',
   ) {
@@ -82,20 +82,6 @@ export class NoteTreeItem extends vscode.TreeItem {
       command: 'vscode.open',
       title: 'Open Note',
       arguments: [vscode.Uri.file(note.absPath)],
-    };
-  }
-}
-
-export class DiagramTreeItem extends vscode.TreeItem {
-  constructor(public readonly diagram: DiagramEntry) {
-    super(diagram.name, vscode.TreeItemCollapsibleState.None);
-    this.iconPath = new vscode.ThemeIcon('type-hierarchy-sub');
-    this.tooltip = diagram.relPath;
-    this.contextValue = 'dupeDiagram';
-    this.command = {
-      command: 'vscode.open',
-      title: 'Open Diagram',
-      arguments: [vscode.Uri.file(diagram.absPath)],
     };
   }
 }

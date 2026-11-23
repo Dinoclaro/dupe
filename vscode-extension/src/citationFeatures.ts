@@ -67,14 +67,6 @@ export class DupeCitationFeatures
         items.push(item);
       }
 
-      for (const diag of this.notesIndex.getDiagrams()) {
-        const item = new vscode.CompletionItem(diag.relPath, vscode.CompletionItemKind.Color);
-        item.detail = 'Diagram';
-        item.insertText = `${diag.relPath}${suffix}`;
-        item.range = replaceRange;
-        items.push(item);
-      }
-
       for (const meta of this.getBibMap().values()) {
         const label = `paper:${meta.key}`;
         const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Reference);
@@ -145,25 +137,20 @@ export class DupeCitationFeatures
       if (wikiHit) {
         const md = new vscode.MarkdownString(undefined, true);
         md.isTrusted = true;
-        if (wikiHit.kind === 'diagram') {
-          const diag = this.notesIndex.resolveDiagramTarget(wikiHit.target);
-          md.appendMarkdown(diag ? `**Diagram:** \`${diag.relPath}\`` : `Diagram \`${wikiHit.target}\` (will create on click)`);
-        } else {
-          const note = this.notesIndex.resolveNoteTarget(wikiHit.target);
-          if (note) {
-            let preview = '';
-            try {
-              preview = fs.readFileSync(note.absPath, 'utf8').split(/\r?\n/).slice(0, 20).join('\n');
-            } catch {
-              preview = '';
-            }
-            md.appendMarkdown(`**${note.relPath}**\n\n`);
-            if (preview) {
-              md.appendMarkdown(preview);
-            }
-          } else {
-            md.appendMarkdown(`Note **${wikiHit.target}** does not exist yet — *Ctrl+Click to create*`);
+        const note = this.notesIndex.resolveNoteTarget(wikiHit.target);
+        if (note) {
+          let preview = '';
+          try {
+            preview = fs.readFileSync(note.absPath, 'utf8').split(/\r?\n/).slice(0, 20).join('\n');
+          } catch {
+            preview = '';
           }
+          md.appendMarkdown(`**${note.relPath}**\n\n`);
+          if (preview) {
+            md.appendMarkdown(preview);
+          }
+        } else {
+          md.appendMarkdown(`Note **${wikiHit.target}** does not exist yet — *Ctrl+Click to create*`);
         }
         return new vscode.Hover(
           md,
@@ -205,7 +192,7 @@ export class DupeCitationFeatures
             range,
             vscode.Uri.parse(`command:dupe.openOrCreateWikiLink?${args}`),
           );
-          link.tooltip = w.kind === 'diagram' ? `Open diagram ${w.target}` : `Open or create note [[${w.target}]]`;
+          link.tooltip = `Open or create note [[${w.target}]]`;
           links.push(link);
         }
       }

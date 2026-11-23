@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -17,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var sha256HexRegex = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
@@ -614,7 +617,7 @@ func (s *Server) runRemoteSyncCycle(ctx context.Context, cfg RemoteSyncConfig) (
 	cfg.LastSyncedAt = nowStr
 	_ = s.saveRemoteSyncConfig(cfg)
 
-	syncedProjects := s.syncRemoteProjectsToLocalDisk(ctx, client, cfg)
+	projStats := s.syncProjectsTwoWay(ctx, client, cfg)
 
 	return map[string]any{
 		"remote_url":      cfg.RemoteURL,
@@ -622,35 +625,191 @@ func (s *Server) runRemoteSyncCycle(ctx context.Context, cfg RemoteSyncConfig) (
 		"downloaded_pdfs": downloadedPDFs,
 		"pushed_papers":   pushedPapers,
 		"uploaded_blobs":  uploadedBlobs,
-		"synced_projects": syncedProjects,
+		"synced_projects": projStats.SyncedProjects,
+		"pushed_notes":    projStats.PushedNotes,
+		"pulled_notes":    projStats.PulledNotes,
+		"deleted_notes":   projStats.DeletedNotes,
 		"last_synced_at":  nowStr,
 	}, nil
 }
 
-func (s *Server) syncRemoteProjectsToLocalDisk(ctx context.Context, client *http.Client, cfg RemoteSyncConfig) int {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.RemoteURL+"/api/projects", nil)
+type projectSyncStats struct {
+	SyncedProjects int
+	PushedNotes    int
+	PulledNotes    int
+	DeletedNotes   int
+}
+
+type localNoteMeta struct {
+	AbsPath string
+	ModTime time.Time
+	SHA256  string
+}
+
+func (s *Server) projectSyncStatePath() string {
+	return filepath.Join(s.storageDir, "project_sync_state.json")
+}
+
+func (s *Server) loadProjectSyncState() map[string]map[string]string {
+	raw, err := os.ReadFile(s.projectSyncStatePath())
 	if err != nil {
-		return 0
+		return map[string]map[string]string{}
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	resp, err := client.Do(req)
+	var state map[string]map[string]string
+	if err := json.Unmarshal(raw, &state); err != nil || state == nil {
+		return map[string]map[string]string{}
+	}
+	return state
+}
+
+func (s *Server) saveProjectSyncState(state map[string]map[string]string) error {
+	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return 0
+		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return 0
+	return os.WriteFile(s.projectSyncStatePath(), append(data, '\n'), 0o600)
+}
+
+func isSyncableNotePath(relSlash string) bool {
+	if !strings.HasPrefix(relSlash, "notes/") {
+		return false
 	}
-	var remoteProjects []ProjectConfig
-	if err := json.NewDecoder(resp.Body).Decode(&remoteProjects); err != nil {
-		return 0
+	if strings.HasSuffix(relSlash, ".bak.md") || strings.Contains(relSlash, "/.") {
+		return false
+	}
+	return true
+}
+
+func collectLocalSyncableNotes(projDir string) map[string]localNoteMeta {
+	notesDir := filepath.Join(projDir, "notes")
+	out := make(map[string]localNoteMeta)
+	_ = filepath.WalkDir(notesDir, func(absPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(projDir, absPath)
+		if err != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		if !isSyncableNotePath(relSlash) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		hash := computeFileSHA256Hex(absPath)
+		if hash == "" {
+			return nil
+		}
+		out[relSlash] = localNoteMeta{
+			AbsPath: absPath,
+			ModTime: info.ModTime().UTC(),
+			SHA256:  hash,
+		}
+		return nil
+	})
+	return out
+}
+
+func parseTreeModTime(raw string) time.Time {
+	if strings.TrimSpace(raw) == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+func backupNoteToHistory(projDir, relSlash string, content []byte) {
+	if len(bytes.TrimSpace(content)) == 0 {
+		return
+	}
+	histDir := filepath.Join(projDir, ".dupe", "notes_history")
+	_ = os.MkdirAll(histDir, 0o755)
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	safeBase := strings.ReplaceAll(strings.TrimPrefix(relSlash, "notes/"), "/", "__")
+	_ = os.WriteFile(filepath.Join(histDir, fmt.Sprintf("%s.%s.bak.md", safeBase, stamp)), content, 0o644)
+}
+
+func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cfg RemoteSyncConfig) projectSyncStats {
+	var stats projectSyncStats
+	remoteProjects, ok := fetchRemoteProjects(ctx, client, cfg)
+	if !ok {
+		return stats
 	}
 
 	root := s.userProjectsRoot(1)
 	_ = os.MkdirAll(root, 0o755)
-	syncedCount := 0
 
+	type matchedProject struct {
+		cfg       ProjectConfig
+		dir       string
+		remoteID  string
+		isNewProj bool
+	}
+
+	remoteByID := make(map[string]ProjectConfig, len(remoteProjects))
+	remoteByFolder := make(map[string]ProjectConfig, len(remoteProjects))
 	for _, rp := range remoteProjects {
+		remoteByID[rp.ID] = rp
+		if rp.FolderName != "" {
+			remoteByFolder[rp.FolderName] = rp
+		}
+	}
+
+	localProjects := make(map[string]string)
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			projDir := filepath.Join(root, entry.Name())
+			if lCfg, cfgErr := readProjectConfig(projDir); cfgErr == nil {
+				localProjects[lCfg.ID] = projDir
+			}
+		}
+	}
+
+	var pairs []matchedProject
+	matchedRemoteIDs := make(map[string]bool)
+
+	// 1. Match or create local projects -> remote
+	for _, lCfg := range s.listLocalProjectConfigs(root) {
+		projDir := localProjects[lCfg.ID]
+		rp, found := remoteByID[lCfg.ID]
+		if !found {
+			rp, found = remoteByFolder[lCfg.FolderName]
+		}
+		if !found {
+			created, cErr := createRemoteProject(ctx, client, cfg, lCfg)
+			if cErr != nil {
+				continue
+			}
+			rp = created
+		}
+		matchedRemoteIDs[rp.ID] = true
+		pairs = append(pairs, matchedProject{
+			cfg:      lCfg,
+			dir:      projDir,
+			remoteID: rp.ID,
+		})
+	}
+
+	// 2. Pull remote-only projects onto local disk (without diagrams/)
+	for _, rp := range remoteProjects {
+		if matchedRemoteIDs[rp.ID] {
+			continue
+		}
 		folderName := sanitizeProjectFolderName(rp.FolderName)
 		if rp.FolderName != "" && !strings.Contains(rp.FolderName, "/") && !strings.Contains(rp.FolderName, "..") {
 			folderName = rp.FolderName
@@ -659,78 +818,362 @@ func (s *Server) syncRemoteProjectsToLocalDisk(ctx context.Context, client *http
 		paperDir := filepath.Join(projDir, "paper")
 		codeDir := filepath.Join(projDir, "code")
 		notesDir := filepath.Join(projDir, "notes")
-		diagramsDir := filepath.Join(projDir, "diagrams")
 		refsTextDir := filepath.Join(projDir, "refs", "text")
-
-		for _, d := range []string{paperDir, filepath.Join(paperDir, "figures"), codeDir, notesDir, diagramsDir, refsTextDir} {
+		for _, d := range []string{paperDir, filepath.Join(paperDir, "figures"), codeDir, notesDir, refsTextDir} {
 			_ = os.MkdirAll(d, 0o755)
 		}
-
-		if _, err := os.Stat(filepath.Join(projDir, ".dupe", "project.json")); errors.Is(err, os.ErrNotExist) {
-			_ = writeProjectConfig(projDir, rp)
-		}
+		_ = writeProjectConfig(projDir, rp)
 		if rp.OverleafRemote != "" {
 			if _, err := os.Stat(filepath.Join(paperDir, ".git")); errors.Is(err, os.ErrNotExist) {
 				_, _ = syncOverleafRemoteIntoPaperDir(ctx, paperDir, rp.OverleafRemote, "dino")
 			}
 		}
-		if rp.CodeRemote != "" {
-			if entries, err := os.ReadDir(codeDir); err == nil && len(entries) == 0 {
-				_, _ = cloneGitRepoIntoDir(ctx, codeDir, rp.CodeRemote, "dino")
-			}
-		}
-
-		// Sync notes/, diagrams/, and AGENTS.md from remote project
-		treeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/projects/%s/tree", cfg.RemoteURL, rp.ID), nil)
-		if err == nil {
-			treeReq.Header.Set("Authorization", "Bearer "+cfg.Token)
-			if treeResp, tErr := client.Do(treeReq); tErr == nil {
-				var treeData struct {
-					Files []ProjectTreeEntry `json:"files"`
-				}
-				_ = json.NewDecoder(treeResp.Body).Decode(&treeData)
-				_ = treeResp.Body.Close()
-
-				for _, entry := range treeData.Files {
-					if !strings.HasPrefix(entry.Path, "notes/") &&
-						!strings.HasPrefix(entry.Path, "diagrams/") &&
-						entry.Path != "AGENTS.md" &&
-						!strings.HasPrefix(entry.Path, "refs/") {
-						continue
-					}
-					localAbs, joinErr := safeJoin(projDir, entry.Path)
-					if joinErr != nil {
-						continue
-					}
-					fileURL := fmt.Sprintf("%s/api/projects/%s/file?path=%s", cfg.RemoteURL, rp.ID, url.QueryEscape(entry.Path))
-					fReq, fErr := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
-					if fErr != nil {
-						continue
-					}
-					fReq.Header.Set("Authorization", "Bearer "+cfg.Token)
-					if fResp, doErr := client.Do(fReq); doErr == nil {
-						var payload struct {
-							Content string `json:"content"`
-						}
-						if fResp.StatusCode == http.StatusOK && json.NewDecoder(fResp.Body).Decode(&payload) == nil {
-							localBytes, lErr := os.ReadFile(localAbs)
-							// Write remote content if file is missing locally or remote is longer/updated (AGENTS.md & refs always update)
-							if errors.Is(lErr, os.ErrNotExist) ||
-								entry.Path == "AGENTS.md" ||
-								strings.HasPrefix(entry.Path, "refs/") ||
-								len(strings.TrimSpace(payload.Content)) >= len(bytes.TrimSpace(localBytes)) {
-								_ = os.MkdirAll(filepath.Dir(localAbs), 0o755)
-								_ = os.WriteFile(localAbs, []byte(payload.Content), 0o644)
-							}
-						}
-						_ = fResp.Body.Close()
-					}
-				}
-			}
-		}
-		syncedCount++
+		pairs = append(pairs, matchedProject{
+			cfg:       rp,
+			dir:       projDir,
+			remoteID:  rp.ID,
+			isNewProj: true,
+		})
 	}
-	return syncedCount
+
+	state := s.loadProjectSyncState()
+	for _, pair := range pairs {
+		remoteEntries, treeOK := fetchRemoteProjectTree(ctx, client, cfg, pair.remoteID)
+		if !treeOK {
+			continue
+		}
+		prevProjState := state[pair.remoteID]
+		if prevProjState == nil {
+			prevProjState = map[string]string{}
+		}
+		pushed, pulled, deleted, nextProjState := reconcileProjectNotesTwoWay(
+			ctx, client, cfg, pair.dir, pair.remoteID, remoteEntries, prevProjState,
+		)
+		state[pair.remoteID] = nextProjState
+		stats.PushedNotes += pushed
+		stats.PulledNotes += pulled
+		stats.DeletedNotes += deleted
+
+		if pulled > 0 || deleted > 0 {
+			initGitRepoIfNeeded(ctx, pair.dir, "dino")
+			_, _ = runGitCommand(ctx, pair.dir, "add", "-A", "--", "notes/")
+			_, _ = runGitCommand(ctx, pair.dir, "commit", "-m", "chore(dupe): sync notes with remote")
+			_ = s.regenerateProjectArtifacts(ctx, pair.dir, 1, pair.cfg)
+		} else if pair.isNewProj {
+			_ = s.regenerateProjectArtifacts(ctx, pair.dir, 1, pair.cfg)
+		}
+		stats.SyncedProjects++
+	}
+	_ = s.saveProjectSyncState(state)
+	return stats
+}
+
+func (s *Server) listLocalProjectConfigs(root string) []ProjectConfig {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []ProjectConfig
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if cfg, err := readProjectConfig(filepath.Join(root, entry.Name())); err == nil {
+			out = append(out, cfg)
+		}
+	}
+	return out
+}
+
+func reconcileProjectNotesTwoWay(
+	ctx context.Context,
+	client *http.Client,
+	cfg RemoteSyncConfig,
+	projDir, remoteID string,
+	remoteEntries []ProjectTreeEntry,
+	prevState map[string]string,
+) (pushed, pulled, deleted int, nextState map[string]string) {
+	localNotes := collectLocalSyncableNotes(projDir)
+	remoteNotes := make(map[string]ProjectTreeEntry)
+	for _, entry := range remoteEntries {
+		if isSyncableNotePath(entry.Path) {
+			remoteNotes[entry.Path] = entry
+		}
+	}
+
+	allPaths := make(map[string]bool)
+	for p := range localNotes {
+		allPaths[p] = true
+	}
+	for p := range remoteNotes {
+		allPaths[p] = true
+	}
+	for p := range prevState {
+		if isSyncableNotePath(p) {
+			allPaths[p] = true
+		}
+	}
+
+	nextState = make(map[string]string)
+	for relPath := range allPaths {
+		lMeta, hasLocal := localNotes[relPath]
+		rEntry, hasRemote := remoteNotes[relPath]
+		lastHash := prevState[relPath]
+
+		switch {
+		case hasLocal && hasRemote:
+			if rEntry.SHA256 != "" && lMeta.SHA256 == rEntry.SHA256 {
+				nextState[relPath] = lMeta.SHA256
+				continue
+			}
+			// Determine direction using last synced SHA-256 first, falling back to ModTime
+			pushLocal := false
+			if lastHash != "" && rEntry.SHA256 != "" {
+				if lastHash == rEntry.SHA256 {
+					pushLocal = true
+				} else if lastHash == lMeta.SHA256 {
+					pushLocal = false
+				} else {
+					rTime := parseTreeModTime(rEntry.ModTime)
+					pushLocal = !rTime.After(lMeta.ModTime)
+				}
+			} else {
+				rTime := parseTreeModTime(rEntry.ModTime)
+				if rTime.IsZero() {
+					pushLocal = lastHash != lMeta.SHA256
+				} else {
+					pushLocal = lMeta.ModTime.After(rTime)
+				}
+			}
+			if pushLocal {
+				if data, err := os.ReadFile(lMeta.AbsPath); err == nil {
+					if uploadRemoteProjectFile(ctx, client, cfg, remoteID, relPath, data) == nil {
+						nextState[relPath] = lMeta.SHA256
+						pushed++
+						continue
+					}
+				}
+				if lastHash != "" {
+					nextState[relPath] = lastHash
+				}
+			} else {
+				if data, err := downloadRemoteProjectFile(ctx, client, cfg, remoteID, relPath); err == nil {
+					if prevBytes, rErr := os.ReadFile(lMeta.AbsPath); rErr == nil && !bytes.Equal(prevBytes, data) {
+						backupNoteToHistory(projDir, relPath, prevBytes)
+					}
+					if writeLocalSyncedFile(projDir, relPath, data, parseTreeModTime(rEntry.ModTime)) == nil {
+						sum := sha256.Sum256(data)
+						nextState[relPath] = hex.EncodeToString(sum[:])
+						pulled++
+						continue
+					}
+				}
+				if lastHash != "" {
+					nextState[relPath] = lastHash
+				}
+			}
+
+		case hasLocal && !hasRemote:
+			if lastHash != "" && lastHash == lMeta.SHA256 {
+				if prevBytes, rErr := os.ReadFile(lMeta.AbsPath); rErr == nil {
+					backupNoteToHistory(projDir, relPath, prevBytes)
+				}
+				if os.Remove(lMeta.AbsPath) == nil {
+					deleted++
+					continue
+				}
+				nextState[relPath] = lastHash
+			} else {
+				if data, err := os.ReadFile(lMeta.AbsPath); err == nil {
+					if uploadRemoteProjectFile(ctx, client, cfg, remoteID, relPath, data) == nil {
+						nextState[relPath] = lMeta.SHA256
+						pushed++
+						continue
+					}
+				}
+				if lastHash != "" {
+					nextState[relPath] = lastHash
+				}
+			}
+
+		case !hasLocal && hasRemote:
+			if lastHash != "" && rEntry.SHA256 != "" && lastHash == rEntry.SHA256 {
+				if deleteRemoteProjectFile(ctx, client, cfg, remoteID, relPath) == nil {
+					deleted++
+					continue
+				}
+				nextState[relPath] = lastHash
+			} else {
+				if data, err := downloadRemoteProjectFile(ctx, client, cfg, remoteID, relPath); err == nil {
+					if writeLocalSyncedFile(projDir, relPath, data, parseTreeModTime(rEntry.ModTime)) == nil {
+						sum := sha256.Sum256(data)
+						nextState[relPath] = hex.EncodeToString(sum[:])
+						pulled++
+						continue
+					}
+				}
+				if lastHash != "" {
+					nextState[relPath] = lastHash
+				}
+			}
+		}
+	}
+	return pushed, pulled, deleted, nextState
+}
+
+func writeLocalSyncedFile(projDir, relPath string, data []byte, modTime time.Time) error {
+	absPath, err := safeJoin(projDir, relPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(absPath, data, 0o644); err != nil {
+		return err
+	}
+	if !modTime.IsZero() {
+		_ = os.Chtimes(absPath, modTime, modTime)
+	}
+	return nil
+}
+
+func fetchRemoteProjects(ctx context.Context, client *http.Client, cfg RemoteSyncConfig) ([]ProjectConfig, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.RemoteURL+"/api/projects", nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var list []ProjectConfig
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, false
+	}
+	return list, true
+}
+
+func createRemoteProject(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, localCfg ProjectConfig) (ProjectConfig, error) {
+	body, _ := json.Marshal(createProjectRequest{
+		ID:             localCfg.ID,
+		FolderName:     localCfg.FolderName,
+		Name:           localCfg.Name,
+		OverleafRemote: localCfg.OverleafRemote,
+		LinkAllPapers:  &localCfg.LinkAllPapers,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.RemoteURL+"/api/projects", bytes.NewReader(body))
+	if err != nil {
+		return ProjectConfig{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ProjectConfig{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return ProjectConfig{}, fmt.Errorf("create remote project status %d", resp.StatusCode)
+	}
+	var created ProjectConfig
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return ProjectConfig{}, err
+	}
+	return created, nil
+}
+
+func fetchRemoteProjectTree(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, projectID string) ([]ProjectTreeEntry, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/projects/%s/tree", cfg.RemoteURL, projectID), nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var payload struct {
+		Files []ProjectTreeEntry `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, false
+	}
+	return payload.Files, true
+}
+
+func downloadRemoteProjectFile(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, projectID, relPath string) ([]byte, error) {
+	assetURL := fmt.Sprintf("%s/api/projects/%s/asset?path=%s", cfg.RemoteURL, projectID, url.QueryEscape(relPath))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download project file status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 20<<20))
+}
+
+func uploadRemoteProjectFile(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, projectID, relPath string, data []byte) error {
+	payload := writeRepoFileRequest{
+		Path:  relPath,
+		Force: true,
+	}
+	if utf8.Valid(data) {
+		payload.Content = string(data)
+	} else {
+		payload.IsBase64 = true
+		payload.Content = base64.StdEncoding.EncodeToString(data)
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/api/projects/%s/file", cfg.RemoteURL, projectID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload project file status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func deleteRemoteProjectFile(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, projectID, relPath string) error {
+	delURL := fmt.Sprintf("%s/api/projects/%s/file?path=%s", cfg.RemoteURL, projectID, url.QueryEscape(relPath))
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, delURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("delete remote file status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *Server) downloadRemotePDF(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, paperID, expectedHash, destPath string) error {

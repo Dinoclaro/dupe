@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { BacklinkHit, DiagramEntry, NoteEntry } from './types';
+import { BacklinkHit, NoteEntry } from './types';
 
 export interface WikiLinkOccurrence {
-  kind: 'note' | 'paper' | 'diagram';
+  kind: 'note' | 'paper';
   raw: string;
   target: string;
   alias?: string;
@@ -51,14 +51,8 @@ export function extractWikiLinksInLine(lineText: string): WikiLinkOccurrence[] {
       continue;
     }
 
-    const lower = rawTarget.toLowerCase();
-    const kind: 'note' | 'diagram' =
-      isEmbed || lower.endsWith('.drawio.svg') || lower.endsWith('.svg') || lower.startsWith('diagrams/')
-        ? 'diagram'
-        : 'note';
-
     results.push({
-      kind,
+      kind: 'note',
       raw: m[0],
       target: rawTarget.split('#')[0].trim(),
       alias,
@@ -174,14 +168,12 @@ export function normalizeNoteRelPath(rawName: string): string {
 
 export class NotesIndex {
   private notes: NoteEntry[] = [];
-  private diagrams: DiagramEntry[] = [];
   private backlinksByTarget = new Map<string, BacklinkHit[]>();
   private backlinksByPaperKey = new Map<string, BacklinkHit[]>();
   private tagsIndex = new Map<string, NoteEntry[]>();
 
   rebuild(projectRoot: string | null): void {
     this.notes = [];
-    this.diagrams = [];
     this.backlinksByTarget.clear();
     this.backlinksByPaperKey.clear();
     this.tagsIndex.clear();
@@ -191,7 +183,6 @@ export class NotesIndex {
     }
 
     const notesDir = path.join(projectRoot, 'notes');
-    const diagramsDir = path.join(projectRoot, 'diagrams');
     const paperDir = path.join(projectRoot, 'paper');
 
     const mdFiles = this.walkFiles(notesDir, '.md');
@@ -273,15 +264,6 @@ export class NotesIndex {
       });
     }
 
-    for (const absDiagram of this.walkFiles(diagramsDir)) {
-      const relPath = path.relative(projectRoot, absDiagram).replace(/\\/g, '/');
-      this.diagrams.push({
-        name: path.basename(absDiagram),
-        relPath,
-        absPath: absDiagram,
-      });
-    }
-
     for (const absTex of this.walkFiles(paperDir, '.tex')) {
       const relPath = path.relative(projectRoot, absTex).replace(/\\/g, '/');
       let content = '';
@@ -311,15 +293,10 @@ export class NotesIndex {
     }
 
     this.notes.sort((a, b) => a.slug.localeCompare(b.slug));
-    this.diagrams.sort((a, b) => a.relPath.localeCompare(b.relPath));
   }
 
   getNotes(): NoteEntry[] {
     return this.notes;
-  }
-
-  getDiagrams(): DiagramEntry[] {
-    return this.diagrams;
   }
 
   getTagsMap(): Map<string, NoteEntry[]> {
@@ -334,15 +311,6 @@ export class NotesIndex {
     return (
       this.notes.find((n) => n.slug.toLowerCase() === clean) ||
       this.notes.find((n) => n.title.toLowerCase() === clean) ||
-      null
-    );
-  }
-
-  resolveDiagramTarget(target: string): DiagramEntry | null {
-    const clean = target.trim().replace(/\\/g, '/').replace(/^diagrams\//i, '').toLowerCase();
-    return (
-      this.diagrams.find((d) => d.relPath.toLowerCase() === `diagrams/${clean}`) ||
-      this.diagrams.find((d) => d.name.toLowerCase() === clean) ||
       null
     );
   }

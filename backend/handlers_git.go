@@ -502,6 +502,7 @@ type writeRepoFileRequest struct {
 	Path     string `json:"path"`
 	Content  string `json:"content"`
 	IsBase64 bool   `json:"is_base64"`
+	Force    bool   `json:"force,omitempty"`
 }
 
 func (s *Server) handleWriteRepoFile(w http.ResponseWriter, r *http.Request) {

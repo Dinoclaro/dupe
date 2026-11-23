@@ -151,12 +151,6 @@ export interface NoteEntry {
   outgoingLinks: string[];
 }
 
-export interface DiagramEntry {
-  name: string;
-  relPath: string;
-  absPath: string;
-}
-
 export interface BacklinkHit {
   sourceRelPath: string;
   sourceAbsPath: string;

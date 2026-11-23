@@ -7,10 +7,6 @@ import {
   compileLatexPreview,
   renderMarkdownPreview,
 } from '../workers/latexCompiler';
-import {
-  decodeDrawioSvgDataUri,
-  exportDiagramToSvg,
-} from '../components/Diagram/svgExport';
 import { normalizeRect } from '../components/Reader/PdfReaderPane';
 import {
   Paper,
@@ -26,7 +22,6 @@ import {
   saveWorkspaceSnapshot,
 } from '../api/client';
 import { buildFolderTree } from '../components/Sidebar/ExplorerSidebar';
-import { convertDrawioClipboardToSnippet } from '../components/Editor/LatexEditorPane';
 import {
   checkLatexStructure,
   matchDiagnosticsForFile,
@@ -69,7 +64,7 @@ const SAMPLE_PAPERS: Paper[] = [
   },
 ];
 
-describe('Phase 2 Writing Studio & Diagram Tool', () => {
+describe('Phase 2 Writing Studio', () => {
   it('detects @citation and \\cite{} autocomplete triggers', () => {
     const atTrigger = matchCitationTrigger('As shown in @vasw', 17);
     expect(atTrigger).toEqual({
@@ -100,19 +95,7 @@ describe('Phase 2 Writing Studio & Diagram Tool', () => {
   });
 
   it('compiles LaTeX with KaTeX math, citations, and embedded SVG figures', () => {
-    const svg = exportDiagramToSvg([
-      {
-        id: 'box-1',
-        type: 'rect',
-        x: 10,
-        y: 20,
-        width: 120,
-        height: 60,
-        stroke: '#1e40af',
-        fill: '#dbeafe',
-        label: 'Encoder',
-      },
-    ]);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><text>Encoder</text></svg>';
 
     const res = compileLatexPreview({
       requestId: 1,
@@ -143,12 +126,6 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
       w: 0.5,
       h: 0.0625,
     });
-  });
-
-  it('decodes Draw.io xmlsvg base64 data URIs into SVG markup', () => {
-    const rawSvg = '<svg xmlns="http://www.w3.org/2000/svg"><text>$$f(x)$$</text></svg>';
-    const dataUri = `data:image/svg+xml;base64,${btoa(rawSvg)}`;
-    expect(decodeDrawioSvgDataUri(dataUri)).toBe(rawSvg);
   });
 
   it('queues and deduplicates offline outbox entries', () => {
@@ -230,28 +207,6 @@ We build on \\cite{vaswani2017attention} and $x^2 + y^2 = z^2$.
     const paperDir = root.childrenDirs.find((d) => d.name === 'paper')!;
     const sectionsDir = paperDir.childrenDirs.find((d) => d.name === 'sections')!;
     expect(sectionsDir.files.map((f) => f.path)).toEqual(['paper/sections/intro.tex']);
-  });
-
-  it('converts copied Draw.io mxGraphModel clipboard XML into LaTeX figure and Markdown image snippets', () => {
-    const drawioClipboard =
-      '<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="Encoder Block" vertex="1" parent="1"/></root></mxGraphModel>';
-
-    const latexSnippet = convertDrawioClipboardToSnippet(
-      drawioClipboard,
-      '',
-      false,
-      'architecture',
-    );
-    expect(latexSnippet).toContain('\\includegraphics[width=0.8\\linewidth]{figures/architecture.svg}');
-    expect(latexSnippet).toContain('\\caption{Encoder Block}');
-
-    const mdSnippet = convertDrawioClipboardToSnippet(
-      drawioClipboard,
-      '',
-      true,
-      'architecture',
-    );
-    expect(mdSnippet).toBe('![Encoder Block](../paper/figures/architecture.svg)');
   });
 
   it('guarantees local notes always win over server stubs and syncs local note vault', () => {

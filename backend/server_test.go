@@ -907,6 +907,112 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 	}
 }
 
+func TestTwoWayProjectNotesSyncExcludesDiagrams(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Setup simulated hosted server
+	hostedStorage := t.TempDir()
+	hostedDB, err := initSQLiteDB(ctx, filepath.Join(hostedStorage, "library.db"))
+	if err != nil {
+		t.Fatalf("init hosted sqlite: %v", err)
+	}
+	defer hostedDB.Close()
+	_ = createOrUpdateUser(ctx, hostedDB, "alice", "strong-password-123", "#FFEB3B")
+
+	jwtSecret := []byte("test-secret-at-least-32-bytes-long")
+	hostedSrv := &Server{
+		db:          hostedDB,
+		jwtSecret:   jwtSecret,
+		storageDir:  hostedStorage,
+		projectsDir: filepath.Join(hostedStorage, "projects"),
+		mode:        "hosted",
+		offlineMeta: true,
+	}
+	ts := httptest.NewServer(hostedSrv.routes())
+	defer ts.Close()
+
+	token, err := issueToken(jwtSecret, 1, "alice", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("issueToken: %v", err)
+	}
+
+	// Setup simulated laptop local server
+	localStorage := t.TempDir()
+	localDB, err := initSQLiteDB(ctx, filepath.Join(localStorage, "library.db"))
+	if err != nil {
+		t.Fatalf("init local sqlite: %v", err)
+	}
+	defer localDB.Close()
+	_ = createOrUpdateUser(ctx, localDB, "local", "local-mode-implicit-user", "#FFEB3B")
+
+	localProjectsRoot := t.TempDir()
+	localSrv := &Server{
+		db:          localDB,
+		jwtSecret:   jwtSecret,
+		storageDir:  localStorage,
+		projectsDir: localProjectsRoot,
+		mode:        "local",
+		offlineMeta: true,
+	}
+
+	cfg, localProjDir, err := localSrv.createProjectOnDisk(ctx, 1, "local", "Robot Study", "", "", true)
+	if err != nil {
+		t.Fatalf("createProjectOnDisk: %v", err)
+	}
+
+	// Verify diagrams/ is not scaffolded on creation
+	if _, err := os.Stat(filepath.Join(localProjDir, "diagrams")); !os.IsNotExist(err) {
+		t.Fatalf("expected diagrams/ directory not to be created, stat err=%v", err)
+	}
+
+	// Create a local note and a leftover diagrams/ file (which must NOT sync)
+	localNotePath := filepath.Join(localProjDir, "notes", "laptop-ideas.md")
+	_ = os.WriteFile(localNotePath, []byte("# Laptop Ideas\n\nFirst draft from VS Code.\n"), 0o644)
+	_ = os.MkdirAll(filepath.Join(localProjDir, "diagrams"), 0o755)
+	_ = os.WriteFile(filepath.Join(localProjDir, "diagrams", "ignored.drawio.svg"), []byte("<svg/>"), 0o644)
+
+	syncCfg := RemoteSyncConfig{RemoteURL: ts.URL, Token: token}
+	res1, err := localSrv.runRemoteSyncCycle(ctx, syncCfg)
+	if err != nil {
+		t.Fatalf("first sync failed: %v", err)
+	}
+	if res1["synced_projects"] != 1 {
+		t.Fatalf("expected 1 synced project, got %v", res1["synced_projects"])
+	}
+
+	remoteProjDir := filepath.Join(hostedStorage, "projects", "user_1", cfg.FolderName)
+	if got, err := os.ReadFile(filepath.Join(remoteProjDir, "notes", "laptop-ideas.md")); err != nil || !strings.Contains(string(got), "First draft from VS Code") {
+		t.Fatalf("expected laptop-ideas.md to be pushed to hosted, err=%v got=%q", err, string(got))
+	}
+	if _, err := os.Stat(filepath.Join(remoteProjDir, "diagrams", "ignored.drawio.svg")); !os.IsNotExist(err) {
+		t.Fatalf("expected diagrams file not to sync, stat err=%v", err)
+	}
+
+	// Create a phone note on hosted and edit existing note on hosted
+	_ = os.WriteFile(filepath.Join(remoteProjDir, "notes", "phone-note.md"), []byte("# Phone Note\n\nWritten on iPad.\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(remoteProjDir, "notes", "laptop-ideas.md"), []byte("# Laptop Ideas\n\nEdited on phone.\n"), 0o644)
+
+	if _, err := localSrv.runRemoteSyncCycle(ctx, syncCfg); err != nil {
+		t.Fatalf("second sync failed: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(localProjDir, "notes", "phone-note.md")); err != nil || !strings.Contains(string(got), "Written on iPad") {
+		t.Fatalf("expected phone-note.md to be pulled locally, err=%v got=%q", err, string(got))
+	}
+	if got, err := os.ReadFile(localNotePath); err != nil || !strings.Contains(string(got), "Edited on phone") {
+		t.Fatalf("expected remote edit to laptop-ideas.md to pull locally, err=%v got=%q", err, string(got))
+	}
+
+	// Delete phone-note.md locally and verify it deletes remotely on next sync
+	_ = os.Remove(filepath.Join(localProjDir, "notes", "phone-note.md"))
+	if _, err := localSrv.runRemoteSyncCycle(ctx, syncCfg); err != nil {
+		t.Fatalf("third sync failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(remoteProjDir, "notes", "phone-note.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected local deletion of phone-note.md to propagate to hosted, stat err=%v", err)
+	}
+}
+
 
 
 

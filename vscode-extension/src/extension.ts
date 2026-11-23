@@ -37,8 +37,6 @@ import {
   RemoteSyncStatus,
 } from './types';
 
-const DEFAULT_DRAWIO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="220" viewBox="0 0 400 220" content="%3Cmxfile%3E%3Cdiagram%20id%3D%22d1%22%20name%3D%22Page-1%22%3E%3CmxGraphModel%3E%3Croot%3E%3CmxCell%20id%3D%220%22%2F%3E%3CmxCell%20id%3D%221%22%20parent%3D%220%22%2F%3E%3C%2Froot%3E%3C%2FmxGraphModel%3E%3C%2Fdiagram%3E%3C%2Fmxfile%3E"><rect width="100%" height="100%" fill="#ffffff"/><text x="200" y="114" text-anchor="middle" font-family="sans-serif" font-size="14" fill="#555">New dupe diagram</text></svg>\n`;
-
 const STARTER_MAIN_TEX = `\\documentclass[conference]{IEEEtran}
 \\usepackage[utf8]{inputenc}
 \\usepackage{amsmath,amssymb,graphicx}
@@ -632,7 +630,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const qp = vscode.window.createQuickPick<
         vscode.QuickPickItem & { absPath?: string; createNote?: boolean }
       >();
-      qp.placeholder = 'Jump to note, diagram, or paper/*.tex — or type a name to create a new note';
+      qp.placeholder = 'Jump to note or paper/*.tex — or type a name to create a new note';
       qp.matchOnDescription = true;
 
       const buildStaticItems = () => {
@@ -643,13 +641,6 @@ export function activate(context: vscode.ExtensionContext): void {
             description: n.tags.map((t) => `#${t}`).join(' '),
             detail: n.relPath,
             absPath: n.absPath,
-          });
-        }
-        for (const d of notesIndex.getDiagrams()) {
-          items.push({
-            label: `$(type-hierarchy-sub) ${d.name}`,
-            detail: d.relPath,
-            absPath: d.absPath,
           });
         }
         const paperDir = path.join(projRoot, 'paper');
@@ -759,22 +750,8 @@ export function activate(context: vscode.ExtensionContext): void {
       rebuildLocalIndices();
     }),
 
-    vscode.commands.registerCommand('dupe.openOrCreateWikiLink', async (target?: string, kind?: string) => {
+    vscode.commands.registerCommand('dupe.openOrCreateWikiLink', async (target?: string) => {
       if (!target) {
-        return;
-      }
-      if (kind === 'diagram') {
-        const diag = notesIndex.resolveDiagramTarget(target);
-        if (diag) {
-          await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(diag.absPath));
-        } else if (activeProjectRoot) {
-          const stem = target.replace(/^diagrams\//, '').replace(/(\.drawio\.svg|\.svg)$/, '');
-          const abs = path.join(activeProjectRoot, 'diagrams', `${stem}.drawio.svg`);
-          await fsp.mkdir(path.dirname(abs), { recursive: true });
-          await fsp.writeFile(abs, DEFAULT_DRAWIO_SVG, 'utf8');
-          rebuildLocalIndices();
-          await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(abs));
-        }
         return;
       }
 
@@ -1508,34 +1485,6 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(
         `Linked ${res.source_path} -> ${res.linked_path} (${res.project?.name || proj?.name || 'project'}).`,
       );
-    }),
-
-    vscode.commands.registerCommand('dupe.newDiagram', async () => {
-      const proj = await pickProjectOrWarn();
-      if (!proj) {
-        return;
-      }
-      const projRoot = await resolveProjectRoot(proj);
-      if (!projRoot) {
-        return;
-      }
-      const rawName = await vscode.window.showInputBox({
-        prompt: 'Diagram stem inside diagrams/ (.drawio.svg)',
-        placeHolder: 'e.g. architecture',
-      });
-      if (!rawName?.trim()) {
-        return;
-      }
-      const cleanStem = rawName.trim().replace(/(\.drawio\.svg|\.svg)$/, '');
-      const absDiagram = path.join(projRoot, 'diagrams', `${cleanStem}.drawio.svg`);
-      await fsp.mkdir(path.dirname(absDiagram), { recursive: true });
-      try {
-        await fsp.access(absDiagram);
-      } catch {
-        await fsp.writeFile(absDiagram, DEFAULT_DRAWIO_SVG, 'utf8');
-      }
-      rebuildLocalIndices();
-      await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(absDiagram));
     }),
 
     vscode.commands.registerCommand('dupe.openWebUI', async () => {

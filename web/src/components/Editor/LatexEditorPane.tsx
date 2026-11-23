@@ -36,65 +36,6 @@ const editorViewportCache = new Map<
   { anchor: number; head: number; scrollTop: number }
 >();
 
-export function convertDrawioClipboardToSnippet(
-  rawText: string,
-  rawHtml: string,
-  isMarkdown: boolean,
-  fallbackFigureName?: string,
-): string | null {
-  const combined = `${rawText || ''}\n${rawHtml || ''}`;
-  const isDrawioPayload =
-    combined.includes('<mxGraphModel') ||
-    combined.includes('%3CmxGraphModel') ||
-    combined.includes('&lt;mxGraphModel') ||
-    combined.includes('<mxfile') ||
-    combined.includes('%3Cmxfile');
-  if (!isDrawioPayload) {
-    return null;
-  }
-
-  let activeFigure = fallbackFigureName || 'architecture';
-  try {
-    const saved = localStorage.getItem('dupe_active_diagram_name');
-    if (saved && saved.trim()) {
-      activeFigure = saved.trim();
-    }
-  } catch {
-    // ignore storage errors
-  }
-
-  let decoded = combined;
-  try {
-    if (combined.includes('%3Cmx')) {
-      decoded = decodeURIComponent(combined);
-    }
-  } catch {
-    // keep raw string
-  }
-
-  const labelMatches = Array.from(decoded.matchAll(/value="([^"]+)"/g))
-    .map((m) =>
-      m[1]
-        .replace(/&lt;[^&]*&gt;/g, '')
-        .replace(/<[^>]*>/g, '')
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .trim(),
-    )
-    .filter((v) => v.length > 0 && v.length < 60);
-
-  const uniqueLabels = Array.from(new Set(labelMatches)).slice(0, 4);
-  const captionText =
-    uniqueLabels.length > 0
-      ? uniqueLabels.join(' — ')
-      : activeFigure.replace(/_/g, ' ');
-
-  if (isMarkdown) {
-    return `![${captionText}](../paper/figures/${activeFigure}.svg)`;
-  }
-  return `\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{figures/${activeFigure}.svg}\n  \\caption{${captionText}}\n  \\label{fig:${activeFigure}}\n\\end{figure}`;
-}
-
 interface LatexEditorPaneProps {
   fileLabel: string;
   source: string;
@@ -296,26 +237,6 @@ export const LatexEditorPane: React.FC<LatexEditorPaneProps> = ({
       autocompletion({
         override: [createCitationCompletionSource(() => papersRef.current, isMarkdown)],
         activateOnTyping: true,
-      }),
-      EditorView.domEventHandlers({
-        paste(event, view) {
-          if (readOnly) {
-            return false;
-          }
-          const rawText = event.clipboardData?.getData('text/plain') || '';
-          const rawHtml = event.clipboardData?.getData('text/html') || '';
-          const snippet = convertDrawioClipboardToSnippet(rawText, rawHtml, isMarkdown);
-          if (!snippet) {
-            return false;
-          }
-          event.preventDefault();
-          const { from, to } = view.state.selection.main;
-          view.dispatch({
-            changes: { from, to, insert: snippet },
-            selection: { anchor: from + snippet.length },
-          });
-          return true;
-        },
       }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !isApplyingSyncRef.current) {

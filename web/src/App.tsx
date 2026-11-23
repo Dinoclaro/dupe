@@ -28,12 +28,6 @@ import { PdfReaderPane } from './components/Reader/PdfReaderPane';
 import { LatexEditorPane } from './components/Editor/LatexEditorPane';
 import { buildCommentCountMap } from './components/Editor/commentMarkers';
 import { CompiledPreviewPane } from './components/Editor/CompiledPreviewPane';
-import { DiagramPane } from './components/Diagram/DiagramPane';
-import {
-  DEFAULT_DRAWIO_XML,
-  DiagramElement,
-  exportDiagramToSvg,
-} from './components/Diagram/svgExport';
 import {
   CompileRequest,
   CompileResponse,
@@ -49,86 +43,22 @@ const DEFAULT_LATEX_TEMPLATE = `\\documentclass{article}
 \\maketitle
 
 \\begin{abstract}
-We present a VS Code-style academic research workspace that extracts BibTeX entries automatically from PDFs and synchronizes figures, notes, and citations with Overleaf via GitHub.
+We present a VS Code-style academic research workspace that extracts BibTeX entries automatically from PDFs and synchronizes notes and citations with Overleaf.
 \\end{abstract}
 
 \\section{Introduction}
 Type @ or \\cite{} to autocomplete references from your uploaded PDF library. Inline equations such as $E = mc^2$ and display equations render in real time:
 $$\\mathcal{L}(\\theta) = \\frac{1}{N}\\sum_{i=1}^{N} \\|f_\\theta(x_i) - y_i\\|_2^2$$
 
-\\section{System Architecture}
-\\begin{figure}[h]
-  \\includegraphics[width=0.8\\linewidth]{figures/architecture.svg}
-  \\caption{System pipeline exported from the Draw.io Diagram Canvas.}
-\\end{figure}
-
 \\bibliographystyle{plain}
 \\bibliography{references}
 \\end{document}
 `;
 
-const INITIAL_DIAGRAM_ELEMENTS: DiagramElement[] = [
-  {
-    id: 'node-pdf',
-    type: 'rect',
-    x: 60,
-    y: 90,
-    width: 150,
-    height: 70,
-    stroke: '#1e40af',
-    fill: '#dbeafe',
-    label: 'PDF Library',
-  },
-  {
-    id: 'arrow-1',
-    type: 'arrow',
-    x: 215,
-    y: 125,
-    width: 90,
-    height: 0,
-    stroke: '#334155',
-    fill: '#f1f5f9',
-    label: 'PyMuPDF',
-  },
-  {
-    id: 'node-bib',
-    type: 'rect',
-    x: 315,
-    y: 90,
-    width: 160,
-    height: 70,
-    stroke: '#065f46',
-    fill: '#d1fae5',
-    label: 'references.bib',
-  },
-  {
-    id: 'arrow-2',
-    type: 'arrow',
-    x: 480,
-    y: 125,
-    width: 90,
-    height: 0,
-    stroke: '#334155',
-    fill: '#f1f5f9',
-    label: 'Git Push',
-  },
-  {
-    id: 'node-overleaf',
-    type: 'ellipse',
-    x: 580,
-    y: 90,
-    width: 160,
-    height: 70,
-    stroke: '#6b21a8',
-    fill: '#f3e8ff',
-    label: 'Overleaf / LaTeX',
-  },
-];
-
 export interface StudioTab {
   id: string;
   title: string;
-  kind: 'pdf' | 'tex' | 'bib' | 'markdown' | 'preview' | 'diagram' | 'asset' | 'json' | 'other';
+  kind: 'pdf' | 'tex' | 'bib' | 'markdown' | 'preview' | 'asset' | 'json' | 'other';
   paperId?: string;
   filePath?: string;
 }
@@ -211,15 +141,6 @@ export const App: React.FC = () => {
   const [compilingPdf, setCompilingPdf] = useState(false);
   const [pdfVersion, setPdfVersion] = useState(1);
 
-  // Diagrams keyed by figure stem (e.g. 'architecture')
-  const [diagramsXmlByStem, setDiagramsXmlByStem] = useState<Record<string, string>>({
-    architecture: DEFAULT_DRAWIO_XML,
-  });
-  const [figuresMap, setFiguresMap] = useState<Record<string, string>>(() => ({
-    'figures/architecture.svg': exportDiagramToSvg(INITIAL_DIAGRAM_ELEMENTS),
-    'architecture.svg': exportDiagramToSvg(INITIAL_DIAGRAM_ELEMENTS),
-  }));
-
   // VS Code Editor Groups (Left = Group 0, Right = Group 1)
   const [leftTabs, setLeftTabs] = useState<StudioTab[]>([
     {
@@ -257,7 +178,7 @@ export const App: React.FC = () => {
       requestId: 0,
       source: DEFAULT_LATEX_TEMPLATE,
       papers: [],
-      figures: figuresMap,
+      figures: {},
     }),
   );
 
@@ -316,26 +237,26 @@ export const App: React.FC = () => {
     const payload: CompileRequest = {
       requestId: reqId,
       source: activeSourceText,
-      papers: papers.map((p) => ({
-        bibtex_key: p.bibtex_key,
-        title: p.title,
-        authors: p.authors,
-        publication_year: p.publication_year,
-        doi: p.doi,
-      })),
-      figures: figuresMap,
-    };
+        papers: papers.map((p) => ({
+          bibtex_key: p.bibtex_key,
+          title: p.title,
+          authors: p.authors,
+          publication_year: p.publication_year,
+          doi: p.doi,
+        })),
+        figures: {},
+      };
 
-    const timer = window.setTimeout(() => {
-      if (workerRef.current) {
-        workerRef.current.postMessage(payload);
-      } else {
-        setCompiled(compileLatexPreview(payload));
-      }
-    }, 100);
+      const timer = window.setTimeout(() => {
+        if (workerRef.current) {
+          workerRef.current.postMessage(payload);
+        } else {
+          setCompiled(compileLatexPreview(payload));
+        }
+      }, 100);
 
-    return () => window.clearTimeout(timer);
-  }, [activeSourceText, papers, figuresMap]);
+      return () => window.clearTimeout(timer);
+    }, [activeSourceText, papers]);
 
   const loadPapers = useCallback(async () => {
     const list = await api.listPapers();
@@ -843,23 +764,6 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (file.kind === 'diagram') {
-        const stem = file.path
-          .replace(/^(diagrams|paper\/figures)\//, '')
-          .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
-        if (!diagramsXmlByStem[stem]) {
-          setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: DEFAULT_DRAWIO_XML }));
-        }
-        const diagTab: StudioTab = {
-          id: `file:${file.path}`,
-          title: `diagrams/${stem}.svg`,
-          kind: 'diagram',
-          filePath: stem,
-        };
-        openTabInGroup(diagTab, inSplit ? 1 : 0);
-        return;
-      }
-
       const genericTab: StudioTab = {
         id: `file:${file.path}`,
         title: file.path,
@@ -930,12 +834,6 @@ export const App: React.FC = () => {
             ...prev,
             [res.path]: diskDiffersFromHead && prev[res.path] !== false,
           }));
-          if (file.kind === 'diagram' && res.content.trim().startsWith('<')) {
-            const stem = file.path
-              .replace(/^(diagrams|paper\/figures)\//, '')
-              .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
-            setDiagramsXmlByStem((prev) => ({ ...prev, [stem]: res.content }));
-          }
         }
       } catch {
         // use local buffer
@@ -957,20 +855,10 @@ export const App: React.FC = () => {
   };
 
   const handleCreateProjectFile = async (
-    kind: 'tex' | 'markdown' | 'diagram',
+    kind: 'tex' | 'markdown',
     rawName: string,
   ) => {
     if (!activeProject) {
-      return;
-    }
-    if (kind === 'diagram') {
-      const stem = rawName
-        .replace(/^(diagrams|paper\/figures)\//, '')
-        .replace(/\.(drawio\.svg|drawio|excalidraw|svg)$/i, '');
-      const diagPath = `diagrams/${stem}.drawio.svg`;
-      await api.writeProjectFile(activeProject.id, diagPath, DEFAULT_DRAWIO_XML, false);
-      await refreshProjectTree(activeProject.id);
-      await handleOpenProjectFile({ path: diagPath, kind: 'diagram' }, false);
       return;
     }
 
@@ -1375,46 +1263,6 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleExportFigure = async (
-    cleanName: string,
-    svgContent: string,
-    xmlContent: string,
-    insertIntoLatex: boolean,
-  ) => {
-    const relSvgPath = `figures/${cleanName}.svg`;
-    const diagPath = `diagrams/${cleanName}.drawio.svg`;
-
-    setDiagramsXmlByStem((prev) => ({ ...prev, [cleanName]: svgContent || xmlContent }));
-    setFiguresMap((prev) => ({
-      ...prev,
-      [relSvgPath]: svgContent,
-      [`${cleanName}.svg`]: svgContent,
-    }));
-
-    if (activeProject) {
-      await api.writeProjectFile(activeProject.id, diagPath, svgContent || xmlContent, false);
-      await refreshProjectTree(activeProject.id);
-    }
-
-    if (insertIntoLatex) {
-      const figSnippet = `\n\\begin{figure}[h]\n  \\centering\n  \\includegraphics[width=0.8\\linewidth]{${relSvgPath}}\n  \\caption{${cleanName.replace(/_/g, ' ')}}\n  \\label{fig:${cleanName}}\n\\end{figure}\n`;
-      if (insertSnippetRef.current) {
-        insertSnippetRef.current(figSnippet);
-      } else {
-        setFileBuffers((prev) => ({
-          ...prev,
-          [activeEditorPath]: `${prev[activeEditorPath] || ''}\n${figSnippet}`,
-        }));
-      }
-    }
-
-    setStatusMessage(
-      `Saved ${diagPath} and exported paper/${relSvgPath}${
-        insertIntoLatex ? ' (inserted into editor)' : ''
-      }.`,
-    );
-  };
-
   const handleGroupSplitDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     const stage = editorStageRef.current;
@@ -1589,20 +1437,6 @@ export const App: React.FC = () => {
               line,
             );
           }}
-        />
-      );
-    }
-
-    if (tab.kind === 'diagram') {
-      const stem = tab.filePath || 'architecture';
-      const initialXml = diagramsXmlByStem[stem] || DEFAULT_DRAWIO_XML;
-      return (
-        <DiagramPane
-          key={tab.id}
-          figureName={stem}
-          initialXmlOrSvg={initialXml}
-          hasActiveRepo={Boolean(activeProject?.overleaf_remote)}
-          onSaveDiagram={handleExportFigure}
         />
       );
     }

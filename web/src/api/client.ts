@@ -44,7 +44,7 @@ export interface SyncRepoResult {
 export interface DocumentItem {
   id: string;
   owner_id: number;
-  doc_type: 'markdown' | 'diagram' | 'latex' | 'typst';
+  doc_type: 'markdown' | 'latex' | 'typst';
   title: string;
   content: string;
   is_shared: boolean;
@@ -66,7 +66,7 @@ export interface ProjectConfig {
 
 export interface ProjectTreeEntry {
   path: string;
-  kind: 'tex' | 'bib' | 'markdown' | 'diagram' | 'asset' | 'json' | 'other';
+  kind: 'tex' | 'bib' | 'markdown' | 'asset' | 'json' | 'other';
   git_status?: 'M' | 'U' | '';
 }
 
