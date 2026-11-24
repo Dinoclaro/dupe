@@ -818,8 +818,9 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 		paperDir := filepath.Join(projDir, "paper")
 		codeDir := filepath.Join(projDir, "code")
 		notesDir := filepath.Join(projDir, "notes")
+		scratchDir := filepath.Join(projDir, "scratch")
 		refsTextDir := filepath.Join(projDir, "refs", "text")
-		for _, d := range []string{paperDir, filepath.Join(paperDir, "figures"), codeDir, notesDir, refsTextDir} {
+		for _, d := range []string{paperDir, filepath.Join(paperDir, "figures"), codeDir, notesDir, scratchDir, refsTextDir} {
 			_ = os.MkdirAll(d, 0o755)
 		}
 		_ = writeProjectConfig(projDir, rp)

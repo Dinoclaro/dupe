@@ -842,6 +842,15 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 	if !strings.Contains(string(afterAgents), "## 5. New Laptop Setup") || !strings.Contains(string(afterAgents), "/api/local/setup.sh?projects=") {
 		t.Fatalf("expected AGENTS.md to include laptop setup section, got:\n%s", string(afterAgents))
 	}
+	if _, statErr := os.Stat(filepath.Join(projDir, "scratch")); statErr != nil {
+		t.Fatalf("expected scratch/ directory to exist: %v", statErr)
+	}
+	giBytes, _ := os.ReadFile(filepath.Join(projDir, ".gitignore"))
+	for _, pat := range []string{"paper/", "code/", "scratch/", ".dupe/build/", ".dupe/notes_history/"} {
+		if !strings.Contains(string(giBytes), pat) {
+			t.Fatalf("expected .gitignore to contain %q, got:\n%s", pat, string(giBytes))
+		}
+	}
 
 	// 2. Link multiple code repos and a paper subdir via as_subdir: true
 	repoA := t.TempDir()

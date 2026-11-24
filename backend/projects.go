@@ -399,7 +399,7 @@ func extractPaperSummaryFromDisk(projectDir string) (string, []string, []string)
 	notesDir := filepath.Join(projectDir, "notes")
 	if entries, err := os.ReadDir(notesDir); err == nil {
 		for _, de := range entries {
-			if !de.IsDir() && strings.HasSuffix(de.Name(), ".md") && de.Name() != "comments.md" {
+			if !de.IsDir() && strings.HasSuffix(de.Name(), ".md") && de.Name() != "comments.md" && de.Name() != agentsUserNoteName {
 				noteNames = append(noteNames, "notes/"+de.Name())
 			}
 		}
@@ -411,7 +411,43 @@ func extractPaperSummaryFromDisk(projectDir string) (string, []string, []string)
 const (
 	agentsUserStartMarker = "<!-- dupe:user-description:start -->"
 	agentsUserEndMarker   = "<!-- dupe:user-description:end -->"
+	agentsUserPlaceholder = "Add your project description, goals, or custom agent instructions here. `dupe` preserves everything inside these markers across regenerations."
+	// The user section is mirrored into notes/ because only notes/ is synced between machines;
+	// AGENTS.md itself is regenerated locally on every machine.
+	agentsUserNoteName = "AGENTS.user.md"
 )
+
+// resolveUserDescription returns the user section for AGENTS.md and keeps the synced
+// notes/AGENTS.user.md mirror up to date. Whichever copy was modified last wins.
+func resolveUserDescription(projectDir string) string {
+	agentsPath := filepath.Join(projectDir, "AGENTS.md")
+	notePath := filepath.Join(projectDir, "notes", agentsUserNoteName)
+
+	agentsDesc := extractUserDescriptionFromAgentsMD(projectDir)
+	if agentsDesc == agentsUserPlaceholder {
+		agentsDesc = ""
+	}
+
+	noteRaw, noteErr := os.ReadFile(notePath)
+	if noteErr != nil {
+		if agentsDesc != "" {
+			_ = os.MkdirAll(filepath.Dir(notePath), 0o755)
+			_ = os.WriteFile(notePath, []byte(agentsDesc+"\n"), 0o644)
+		}
+		return agentsDesc
+	}
+	noteDesc := strings.TrimSpace(string(noteRaw))
+
+	if agentsDesc != "" && agentsDesc != noteDesc {
+		agentsStat, aErr := os.Stat(agentsPath)
+		noteStat, nErr := os.Stat(notePath)
+		if aErr == nil && nErr == nil && agentsStat.ModTime().After(noteStat.ModTime()) {
+			_ = os.WriteFile(notePath, []byte(agentsDesc+"\n"), 0o644)
+			return agentsDesc
+		}
+	}
+	return noteDesc
+}
 
 func extractUserDescriptionFromAgentsMD(projectDir string) string {
 	raw, err := os.ReadFile(filepath.Join(projectDir, "AGENTS.md"))
@@ -596,7 +632,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	openComments, addressedComments := readCommentsWithoutWriting(projectDir)
 	customSummaryBytes, _ := os.ReadFile(filepath.Join(projectDir, ".dupe", "summary.md"))
 	customSummary := strings.TrimSpace(string(customSummaryBytes))
-	userDescription := extractUserDescriptionFromAgentsMD(projectDir)
+	userDescription := resolveUserDescription(projectDir)
 	abstractText, sections, noteNames := extractPaperSummaryFromDisk(projectDir)
 	codeTargets := collectLinkedSubdirTargets(filepath.Join(projectDir, "code"))
 	paperTargets := collectLinkedSubdirTargets(filepath.Join(projectDir, "paper"))
@@ -610,7 +646,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	if userDescription != "" {
 		b.WriteString(userDescription + "\n")
 	} else {
-		b.WriteString("Add your project description, goals, or custom agent instructions here. `dupe` preserves everything inside these markers across regenerations.\n")
+		b.WriteString(agentsUserPlaceholder + "\n")
 	}
 	b.WriteString(agentsUserEndMarker + "\n\n")
 
@@ -647,15 +683,17 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	b.WriteString("- `paper/`: Overleaf-linked LaTeX repository or linked paper subdirectories (`dupe_references.bib`, `figures/`).\n")
 	b.WriteString("- `code/`: Linked code repository or subdirectories (edited in VS Code).\n")
 	b.WriteString("- `notes/`: Markdown research notes (`*.md`) and `notes/comments.md` annotation queue.\n")
+	b.WriteString("- `scratch/`: Temporary test scripts and experimental files for agents (gitignored).\n")
 	b.WriteString("- `refs/index.json`: Metadata and BibTeX keys for linked reference papers.\n")
 	b.WriteString("- `refs/text/<bibtex_key>.md`: Extracted full text of each reference paper.\n\n")
 
 	b.WriteString("## 3. Rules for Agents\n\n")
 	b.WriteString("- Edit LaTeX manuscripts in `paper/` and research notes in `notes/`.\n")
+	b.WriteString("- Put temporary test scripts and agent experiments in `scratch/`.\n")
 	b.WriteString("- Check **Open Comments** below (and `notes/comments.md`) for user annotations and tasks.\n")
 	b.WriteString("- When you address an open comment (`- [ ]`), mark it `- [x]` and move it under `## Addressed Comments` in `notes/comments.md`.\n")
 	b.WriteString("- Periodically update `.dupe/summary.md` (or call `update_project_summary`) with a concise 3-5 sentence summary of the project goal, current progress, and active focus.\n")
-	b.WriteString("- Edit only inside `<!-- dupe:user-description:start -->` ... `<!-- dupe:user-description:end -->` in `AGENTS.md`; `dupe` regenerates all other sections, `paper/dupe_references.bib`, and `refs/`.\n")
+	b.WriteString("- Edit only inside `<!-- dupe:user-description:start -->` ... `<!-- dupe:user-description:end -->` in `AGENTS.md` (mirrored to the synced `notes/AGENTS.user.md`; the most recently edited copy wins); `dupe` regenerates all other sections, `paper/dupe_references.bib`, and `refs/`.\n")
 	b.WriteString("- Cite linked papers in LaTeX with `\\cite{<bibtex_key>}` and in Markdown notes with `[[paper:<bibtex_key>]]`.\n\n")
 
 	b.WriteString("## 4. Current Context\n\n")
@@ -774,6 +812,43 @@ func writeFileIfChanged(path string, content []byte, perm os.FileMode) error {
 	return os.WriteFile(path, content, perm)
 }
 
+func ensureProjectGitIgnore(projectDir string) error {
+	required := []string{
+		".vscode/",
+		".dupe/build/",
+		".dupe/notes_history/",
+		"paper/",
+		"code/",
+		"scratch/",
+	}
+	giPath := filepath.Join(projectDir, ".gitignore")
+	existingRaw, _ := os.ReadFile(giPath)
+	seen := make(map[string]bool)
+	var lines []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(existingRaw), "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !seen[trimmed] {
+			seen[trimmed] = true
+			lines = append(lines, trimmed)
+		}
+	}
+	changed := false
+	for _, entry := range required {
+		if !seen[entry] {
+			seen[entry] = true
+			lines = append(lines, entry)
+			changed = true
+		}
+	}
+	if !changed && len(existingRaw) > 0 {
+		return nil
+	}
+	return writeFileIfChanged(giPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
 func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir string, userID int, cfg ProjectConfig) error {
 	papers, err := s.queryLinkedPapersForProject(ctx, userID, cfg)
 	if err != nil {
@@ -784,13 +859,15 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 	figuresDir := filepath.Join(paperDir, "figures")
 	codeDir := filepath.Join(projectDir, "code")
 	notesDir := filepath.Join(projectDir, "notes")
+	scratchDir := filepath.Join(projectDir, "scratch")
 	refsTextDir := filepath.Join(projectDir, "refs", "text")
 
-	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, refsTextDir} {
+	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, scratchDir, refsTextDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
 	}
+	_ = ensureProjectGitIgnore(projectDir)
 
 	var bibEntries []string
 	seenKeys := make(map[string]bool)
@@ -978,7 +1055,7 @@ func (s *Server) createProjectOnDiskWithID(
 	if err := writeProjectConfig(projDir, cfg); err != nil {
 		return ProjectConfig{}, "", err
 	}
-	if err := os.WriteFile(filepath.Join(projDir, ".gitignore"), []byte("paper/\ncode/\n"), 0o644); err != nil {
+	if err := ensureProjectGitIgnore(projDir); err != nil {
 		return ProjectConfig{}, "", err
 	}
 
@@ -1100,7 +1177,7 @@ func classifyProjectFileKind(relSlash string) string {
 
 func isIgnoredProjectDirName(name string) bool {
 	switch name {
-	case ".git", ".dupe", "code", "diagrams", "node_modules", "__pycache__", "wandb", "logs", "results", ".vscode", ".github", "build", "dist", "assets":
+	case ".git", ".dupe", "code", "diagrams", "scratch", "node_modules", "__pycache__", "wandb", "logs", "results", ".vscode", ".github", "build", "dist", "assets":
 		return true
 	default:
 		return strings.HasSuffix(name, ".egg-info")
@@ -1742,7 +1819,7 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 
 func isProtectedProjectPath(relSlash string) bool {
 	switch relSlash {
-	case "", ".", "paper", "notes", "refs", "code", "AGENTS.md", ".dupe", ".git", "paper/dupe_references.bib":
+	case "", ".", "paper", "notes", "scratch", "refs", "code", "AGENTS.md", ".dupe", ".git", "paper/dupe_references.bib":
 		return true
 	}
 	return strings.HasPrefix(relSlash, ".git/") ||
