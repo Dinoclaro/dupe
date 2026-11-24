@@ -855,12 +855,7 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 		stats.PulledNotes += pulled
 		stats.DeletedNotes += deleted
 
-		if pulled > 0 || deleted > 0 {
-			initGitRepoIfNeeded(ctx, pair.dir, "dino")
-			_, _ = runGitCommand(ctx, pair.dir, "add", "-A", "--", "notes/")
-			_, _ = runGitCommand(ctx, pair.dir, "commit", "-m", "chore(dupe): sync notes with remote")
-			_ = s.regenerateProjectArtifacts(ctx, pair.dir, 1, pair.cfg)
-		} else if pair.isNewProj {
+		if pulled > 0 || deleted > 0 || pair.isNewProj {
 			_ = s.regenerateProjectArtifacts(ctx, pair.dir, 1, pair.cfg)
 		}
 		stats.SyncedProjects++

@@ -1798,11 +1798,6 @@ func (s *Server) handleWriteProjectFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if isNoteFile {
-		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
-		_, _ = runGitCommand(r.Context(), projDir, "add", "--", relSlash)
-		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): auto-save note "+relSlash)
-	}
 	if strings.HasPrefix(relSlash, "paper/") || isNoteFile {
 		if agentsStat, statErr := os.Stat(filepath.Join(projDir, "AGENTS.md")); errors.Is(statErr, os.ErrNotExist) || time.Since(agentsStat.ModTime()) > 5*time.Minute {
 			_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
@@ -1860,11 +1855,6 @@ func (s *Server) handleDeleteProjectFile(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to delete file")
 		return
 	}
-	if strings.HasPrefix(relSlash, "notes/") {
-		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
-		_, _ = runGitCommand(r.Context(), projDir, "add", "-A", "--", "notes/")
-		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): delete "+relSlash)
-	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1914,11 +1904,6 @@ func (s *Server) handleRenameProjectFile(w http.ResponseWriter, r *http.Request)
 	if err := os.Rename(oldAbs, newAbs); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to rename file")
 		return
-	}
-	if strings.HasPrefix(oldSlash, "notes/") || strings.HasPrefix(newSlash, "notes/") {
-		initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
-		_, _ = runGitCommand(r.Context(), projDir, "add", "-A", "--", "notes/")
-		_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", fmt.Sprintf("chore(dupe): rename %s to %s", oldSlash, newSlash))
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"old_path": oldSlash,
@@ -1984,10 +1969,6 @@ func (s *Server) handleAddProjectComment(w http.ResponseWriter, r *http.Request)
 	openBlocks, addressedBlocks, commentsMD := parseAndReconcileComments(projDir, block.String())
 	_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
 	agentsBytes, _ := os.ReadFile(filepath.Join(projDir, "AGENTS.md"))
-
-	initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
-	_, _ = runGitCommand(r.Context(), projDir, "add", "--", "notes/comments.md", "AGENTS.md")
-	_, _ = runGitCommand(r.Context(), projDir, "commit", "-m", "chore(dupe): add comment on "+sourceLabel)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"comments_md":     commentsMD,
