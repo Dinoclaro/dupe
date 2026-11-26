@@ -166,6 +166,101 @@ export function normalizeNoteRelPath(rawName: string): string {
   return path.posix.normalize(`notes/${clean}`);
 }
 
+export function formatCommentBlock(params: {
+  source: string;
+  location?: string;
+  quote?: string;
+  comment: string;
+  timestamp?: string;
+}): string {
+  const stamp =
+    params.timestamp ||
+    new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const source = params.source.trim() || 'project';
+  const loc = (params.location || '').trim();
+  let header = `- [ ] **[${stamp}] \`${source}\``;
+  if (loc) {
+    header += ` (${loc})`;
+  }
+  header += '**';
+
+  const lines = [header];
+  const quoteClean = (params.quote || '').trim().replace(/\s+/g, ' ');
+  if (quoteClean) {
+    const truncated = quoteClean.length > 280 ? `${quoteClean.slice(0, 280)}…` : quoteClean;
+    lines.push(`  > "${truncated}"`);
+  }
+  lines.push(`  **Comment:** ${params.comment.trim()}`);
+  return lines.join('\n');
+}
+
+export function insertOpenCommentInMarkdown(existingRaw: string, commentBlock: string): string {
+  const block = commentBlock.trim();
+  if (!existingRaw.trim()) {
+    return [
+      '# Project Comments & Annotations',
+      '',
+      '## Open Comments',
+      '',
+      block,
+      '',
+      '## Addressed Comments',
+      '',
+      '_No addressed comments yet._',
+      '',
+    ].join('\n');
+  }
+
+  const normalized = existingRaw.replace(/\r\n/g, '\n');
+  const openHeadingRe = /^## Open Comments\s*$/m;
+  const match = openHeadingRe.exec(normalized);
+  if (match) {
+    const insertIdx = match.index + match[0].length;
+    const before = normalized.slice(0, insertIdx);
+    let after = normalized.slice(insertIdx);
+    after = after.replace(/^\n*_No open comments\._\n*/, '\n\n');
+    const cleanedAfter = after.replace(/^\n+/, '');
+    return `${before}\n\n${block}\n\n${cleanedAfter}`.replace(/\n{3,}$/, '\n');
+  }
+
+  return `# Project Comments & Annotations\n\n## Open Comments\n\n${block}\n\n${normalized.trimStart()}`;
+}
+
+export function insertCommentIntoTargetNote(
+  existingRaw: string,
+  commentBlock: string,
+  targetRelPath: string,
+): string {
+  const normRel = normalizeNoteRelPath(targetRelPath);
+  if (normRel === 'notes/comments.md' || /^## Open Comments\s*$/m.test(existingRaw)) {
+    return insertOpenCommentInMarkdown(existingRaw, commentBlock);
+  }
+
+  const block = commentBlock.trim();
+  const baseName = path.posix.basename(normRel, '.md');
+  if (!existingRaw.trim()) {
+    return `# ${baseName}\n\n## Comments\n\n${block}\n`;
+  }
+
+  const normalized = existingRaw.replace(/\r\n/g, '\n');
+  const commentsHeadingRe = /^## Comments\s*$/m;
+  const headingMatch = commentsHeadingRe.exec(normalized);
+  if (headingMatch) {
+    const afterHeadingIdx = headingMatch.index + headingMatch[0].length;
+    const rest = normalized.slice(afterHeadingIdx);
+    const nextHeadingMatch = /\n##\s+/.exec(rest);
+    if (nextHeadingMatch) {
+      const sectionEndIdx = afterHeadingIdx + nextHeadingMatch.index;
+      const before = normalized.slice(0, sectionEndIdx).replace(/\n+$/, '');
+      const after = normalized.slice(sectionEndIdx).replace(/^\n+/, '');
+      return `${before}\n\n${block}\n\n${after}`.replace(/\n{3,}$/, '\n');
+    }
+    return `${normalized.replace(/\n+$/, '')}\n\n${block}\n`;
+  }
+
+  return `${normalized.replace(/\n+$/, '')}\n\n## Comments\n\n${block}\n`;
+}
+
 export class NotesIndex {
   private notes: NoteEntry[] = [];
   private backlinksByTarget = new Map<string, BacklinkHit[]>();

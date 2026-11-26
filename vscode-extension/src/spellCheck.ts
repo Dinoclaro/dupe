@@ -259,12 +259,17 @@ export class SpellDictionary {
     }
   }
 
-  static loadFromGzipFile(gzPath: string, systemFallbackPath?: string): SpellDictionary {
+  static loadFromGzipFile(gzPath: string, ...systemFallbackPaths: string[]): SpellDictionary {
     let content = '';
     if (fs.existsSync(gzPath)) {
       content = zlib.gunzipSync(fs.readFileSync(gzPath)).toString('utf8');
-    } else if (systemFallbackPath && fs.existsSync(systemFallbackPath)) {
-      content = fs.readFileSync(systemFallbackPath, 'utf8');
+    } else {
+      for (const fallback of systemFallbackPaths) {
+        if (fallback && fs.existsSync(fallback)) {
+          content = fs.readFileSync(fallback, 'utf8');
+          break;
+        }
+      }
     }
     const list = content ? content.split(/\r?\n/) : [];
     return new SpellDictionary(list);

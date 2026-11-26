@@ -242,9 +242,15 @@ func (s *Server) executeMCPTool(ctx context.Context, userID int, username, toolN
 				if joinErr != nil {
 					return "Invalid PDF storage path", true
 				}
-				fullText := s.extractFullTextMarkdown(ctx, absPath)
+				if _, statErr := os.Stat(absPath); statErr != nil {
+					return fmt.Sprintf("# %s\nAuthors: %s\nDOI: %s\n\nError: PDF file is not cached locally at %s (%v). Run library sync first.", p.Title, p.Authors, p.DOI, absPath, statErr), true
+				}
+				fullText, extractErr := s.extractFullTextMarkdownWithErr(ctx, absPath)
+				if extractErr != nil {
+					return fmt.Sprintf("# %s\nAuthors: %s\nDOI: %s\n\nError extracting PDF body text: %v", p.Title, p.Authors, p.DOI, extractErr), true
+				}
 				if fullText == "" {
-					return fmt.Sprintf("# %s\nAuthors: %s\nDOI: %s\n", p.Title, p.Authors, p.DOI), false
+					return fmt.Sprintf("# %s\nAuthors: %s\nDOI: %s\n\nError: PDF contains no extractable text (may be scanned images without OCR).", p.Title, p.Authors, p.DOI), true
 				}
 				if section != "" {
 					var filtered []string

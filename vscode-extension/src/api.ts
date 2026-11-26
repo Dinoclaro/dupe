@@ -225,6 +225,13 @@ export class DupeApiClient {
     return this.requestJson('POST', `/api/projects/${encodeURIComponent(projectId)}/context`, {});
   }
 
+  addProjectComment(
+    projectId: string,
+    payload: { source: string; location: string; quote: string; comment: string },
+  ): Promise<{ comments_md: string; open_count: number; addressed_count: number }> {
+    return this.requestJson('POST', `/api/projects/${encodeURIComponent(projectId)}/comments`, payload);
+  }
+
   syncTexBackward(
     projectId: string,
     params: { page: number; x: number; y: number; w: number; h: number; target?: string },

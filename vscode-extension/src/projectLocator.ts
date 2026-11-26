@@ -85,3 +85,44 @@ export function readLocalRefsIndex(projectRoot: string): LocalRefIndexEntry[] {
     return [];
   }
 }
+
+export function discoverNestedGitRepoPaths(projectRoot: string): string[] {
+  const seen = new Set<string>();
+  const repos: string[] = [];
+
+  const addIfGitRepo = (candidate: string): string | null => {
+    try {
+      const real = fs.realpathSync(candidate);
+      if (!fs.statSync(real).isDirectory()) {
+        return null;
+      }
+      if (fs.existsSync(path.join(real, '.git')) && !seen.has(real)) {
+        seen.add(real);
+        repos.push(real);
+      }
+      return real;
+    } catch {
+      return null;
+    }
+  };
+
+  for (const container of ['paper', 'code']) {
+    const containerPath = path.join(projectRoot, container);
+    const realContainer = addIfGitRepo(containerPath);
+    if (!realContainer) {
+      continue;
+    }
+    try {
+      for (const entry of fs.readdirSync(realContainer, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) {
+          continue;
+        }
+        addIfGitRepo(path.join(realContainer, entry.name));
+      }
+    } catch {
+      // ignore unreadable container
+    }
+  }
+
+  return repos;
+}

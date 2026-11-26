@@ -45,7 +45,7 @@ export class DupeSpellProvider implements vscode.CodeActionProvider, vscode.Disp
       const gzPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'dict', `${dialect}.txt.gz`).fsPath;
       const sysFallback =
         dialect === 'en-GB' ? '/usr/share/dict/british-english' : '/usr/share/dict/american-english';
-      dict = SpellDictionary.loadFromGzipFile(gzPath, sysFallback);
+      dict = SpellDictionary.loadFromGzipFile(gzPath, sysFallback, '/usr/share/dict/words');
       this.dictCache.set(dialect, dict);
     }
     const projectWords = loadProjectDictionaryFile(projectRoot);

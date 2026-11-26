@@ -752,10 +752,11 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 	_ = os.MkdirAll(root, 0o755)
 
 	type matchedProject struct {
-		cfg       ProjectConfig
-		dir       string
-		remoteID  string
-		isNewProj bool
+		cfg           ProjectConfig
+		dir           string
+		remoteID      string
+		isNewProj     bool
+		configUpdated bool
 	}
 
 	remoteByID := make(map[string]ProjectConfig, len(remoteProjects))
@@ -786,22 +787,38 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 	// 1. Match or create local projects -> remote
 	for _, lCfg := range s.listLocalProjectConfigs(root) {
 		projDir := localProjects[lCfg.ID]
+		if syncCodeReposMetadataFromDisk(ctx, projDir, &lCfg) {
+			_ = writeProjectConfig(projDir, lCfg)
+		}
 		rp, found := remoteByID[lCfg.ID]
 		if !found {
 			rp, found = remoteByFolder[lCfg.FolderName]
 		}
+		configUpdated := false
 		if !found {
 			created, cErr := createRemoteProject(ctx, client, cfg, lCfg)
 			if cErr != nil {
 				continue
 			}
 			rp = created
+		} else {
+			if len(lCfg.CodeRepos) == 0 && len(rp.CodeRepos) > 0 {
+				lCfg.CodeRepos = rp.CodeRepos
+				if lCfg.CodeRemote == "" && rp.CodeRemote != "" {
+					lCfg.CodeRemote = rp.CodeRemote
+				}
+				_ = writeProjectConfig(projDir, lCfg)
+				configUpdated = true
+			} else if len(lCfg.CodeRepos) > 0 && !codeReposEqual(lCfg.CodeRepos, rp.CodeRepos) {
+				_ = updateRemoteProjectCodeRepos(ctx, client, cfg, rp.ID, lCfg.CodeRemote, lCfg.CodeRepos)
+			}
 		}
 		matchedRemoteIDs[rp.ID] = true
 		pairs = append(pairs, matchedProject{
-			cfg:      lCfg,
-			dir:      projDir,
-			remoteID: rp.ID,
+			cfg:           lCfg,
+			dir:           projDir,
+			remoteID:      rp.ID,
+			configUpdated: configUpdated,
 		})
 	}
 
@@ -829,6 +846,9 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 				_, _ = syncOverleafRemoteIntoPaperDir(ctx, paperDir, rp.OverleafRemote, "dino")
 			}
 		}
+		if len(rp.CodeRepos) > 0 {
+			cloneCodeReposIfEmpty(ctx, projDir, rp.CodeRepos, "dino")
+		}
 		pairs = append(pairs, matchedProject{
 			cfg:       rp,
 			dir:       projDir,
@@ -839,6 +859,8 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 
 	state := s.loadProjectSyncState()
 	for _, pair := range pairs {
+		// Mirror any local edits to AGENTS.md user-description into notes/AGENTS.user.md before syncing notes.
+		_ = resolveUserDescription(pair.dir)
 		remoteEntries, treeOK := fetchRemoteProjectTree(ctx, client, cfg, pair.remoteID)
 		if !treeOK {
 			continue
@@ -855,7 +877,7 @@ func (s *Server) syncProjectsTwoWay(ctx context.Context, client *http.Client, cf
 		stats.PulledNotes += pulled
 		stats.DeletedNotes += deleted
 
-		if pulled > 0 || deleted > 0 || pair.isNewProj {
+		if pulled > 0 || deleted > 0 || pair.isNewProj || pair.configUpdated {
 			_ = s.regenerateProjectArtifacts(ctx, pair.dir, 1, pair.cfg)
 		}
 		stats.SyncedProjects++
@@ -1061,6 +1083,8 @@ func createRemoteProject(ctx context.Context, client *http.Client, cfg RemoteSyn
 		FolderName:     localCfg.FolderName,
 		Name:           localCfg.Name,
 		OverleafRemote: localCfg.OverleafRemote,
+		CodeRemote:     localCfg.CodeRemote,
+		CodeRepos:      localCfg.CodeRepos,
 		LinkAllPapers:  &localCfg.LinkAllPapers,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.RemoteURL+"/api/projects", bytes.NewReader(body))
@@ -1082,6 +1106,31 @@ func createRemoteProject(ctx context.Context, client *http.Client, cfg RemoteSyn
 		return ProjectConfig{}, err
 	}
 	return created, nil
+}
+
+func updateRemoteProjectCodeRepos(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, projectID, codeRemote string, codeRepos []LinkedCodeRepo) error {
+	payload := map[string]any{
+		"code_repos": codeRepos,
+	}
+	if codeRemote != "" {
+		payload["code_remote"] = codeRemote
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/api/projects/%s", cfg.RemoteURL, projectID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update remote project code_repos status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func fetchRemoteProjectTree(ctx context.Context, client *http.Client, cfg RemoteSyncConfig, projectID string) ([]ProjectTreeEntry, bool) {

@@ -14,11 +14,15 @@ import {
   computeMarkdownEnterEdit,
   extractMarkdownTags,
   extractWikiLinksInLine,
+  formatCommentBlock,
+  insertCommentIntoTargetNote,
+  insertOpenCommentInMarkdown,
   normalizeNoteRelPath,
   toggleCheckboxLine,
   toggleWrappedFormat,
 } from '../notesIndex';
 import {
+  discoverNestedGitRepoPaths,
   discoverProjectsInWorkspace,
   findDupeProjectRoot,
   readLocalRefsIndex,
@@ -238,6 +242,66 @@ We evaluate \\cite{chi2023diffusion} on $E = mc^2$ and \\begin{equation}xyzabc =
       expect(loadProjectDictionaryFile(tmpProj)).toEqual(['mycustomterm']);
     } finally {
       fs.rmSync(tmpProj, { recursive: true, force: true });
+    }
+  });
+
+  it('formats and inserts inline selection comments under Open Comments in notes/comments.md', () => {
+    const block = formatCommentBlock({
+      source: 'paper/experiments.tex',
+      location: 'lines 42-43',
+      quote: 'We benchmark against   Filtered-BC.',
+      comment: 'Tighten phrasing here.',
+      timestamp: '2026-11-25 10:30',
+    });
+    expect(block).toContain('- [ ] **[2026-11-25 10:30] `paper/experiments.tex` (lines 42-43)**');
+    expect(block).toContain('> "We benchmark against Filtered-BC."');
+    expect(block).toContain('**Comment:** Tighten phrasing here.');
+
+    const created = insertOpenCommentInMarkdown('', block);
+    expect(created).toContain('# Project Comments & Annotations');
+    expect(created).toContain('## Open Comments\n\n' + block);
+    expect(created).toContain('## Addressed Comments');
+
+    const emptyExisting = `# Project Comments & Annotations\n\n## Open Comments\n\n_No open comments._\n\n## Addressed Comments\n\n_No addressed comments yet._\n`;
+    const replaced = insertOpenCommentInMarkdown(emptyExisting, block);
+    expect(replaced).not.toContain('_No open comments._');
+    expect(replaced).toContain(block);
+
+    const newTarget = insertCommentIntoTargetNote('', block, 'notes/paperChanges.md');
+    expect(newTarget).toContain('# paperChanges\n\n## Comments\n\n' + block);
+
+    const existingPaperChanges = `# paperChanges\n\n## Goal\nGet paper ready.\n`;
+    const appended = insertCommentIntoTargetNote(existingPaperChanges, block, 'notes/paperChanges.md');
+    expect(appended).toContain('## Goal\nGet paper ready.\n\n## Comments\n\n' + block);
+
+    const block2 = formatCommentBlock({
+      source: 'paper/intro.tex',
+      location: 'line 12',
+      quote: 'Second quote',
+      comment: 'Second comment',
+      timestamp: '2026-11-26 15:45',
+    });
+    const appendedTwice = insertCommentIntoTargetNote(appended, block2, 'notes/paperChanges.md');
+    expect(appendedTwice.indexOf(block)).toBeLessThan(appendedTwice.indexOf(block2));
+    expect(appendedTwice.match(/## Comments/g)).toHaveLength(1);
+  });
+
+  it('discovers nested and symlinked git repos inside paper/ and code/', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dupe-git-repos-'));
+    try {
+      const projDir = path.join(tmpRoot, 'proj');
+      const externalCode = path.join(tmpRoot, 'external-mimic-src');
+      fs.mkdirSync(path.join(projDir, 'paper', '.git'), { recursive: true });
+      fs.mkdirSync(path.join(projDir, 'code', 'cloned-sub', '.git'), { recursive: true });
+      fs.mkdirSync(path.join(externalCode, '.git'), { recursive: true });
+      fs.symlinkSync(externalCode, path.join(projDir, 'code', 'mimic_src'), 'dir');
+
+      const found = discoverNestedGitRepoPaths(projDir);
+      expect(found).toContain(fs.realpathSync(path.join(projDir, 'paper')));
+      expect(found).toContain(fs.realpathSync(path.join(projDir, 'code', 'cloned-sub')));
+      expect(found).toContain(fs.realpathSync(externalCode));
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
 });

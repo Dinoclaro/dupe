@@ -24,12 +24,19 @@ export interface BibMetadata {
   paperId?: string;
 }
 
+export interface LinkedCodeRepo {
+  subdir?: string;
+  remote_url: string;
+  branch?: string;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
   folder_name: string;
   overleaf_remote: string;
   code_remote?: string;
+  code_repos?: LinkedCodeRepo[];
   linked_paper_ids: string[];
   link_all_papers: boolean;
   pending_push: boolean;

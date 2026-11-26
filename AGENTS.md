@@ -61,6 +61,11 @@ These rules apply to all prose you write or edit, in any language and any folder
 
 End each agent-authored PR description, review, review comment, issue description, and issue comment with the Markdown suffix `*Unfiltered AI output* 🤖`. Commit messages and PR titles take no signature.
 
+## Comment and change notes
+
+- Mark each addressed item in `notes/comments.md`, `notes/changes.md`, or similar note files as `- [x]`.
+- Move addressed items to an `## Addressed` or `## Addressed Comments` section at the bottom of the file.
+
 ## Agent files
 
 - `GEMINI.md` and `AGENTS.md` hold the instructions for coding agents in this repository. Keep both synchronized when updating repo-wide agent rules.

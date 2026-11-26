@@ -25,17 +25,24 @@ import (
 
 var projectSlugRegex = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
+type LinkedCodeRepo struct {
+	Subdir    string `json:"subdir,omitempty"`
+	RemoteURL string `json:"remote_url"`
+	Branch    string `json:"branch,omitempty"`
+}
+
 type ProjectConfig struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	FolderName     string    `json:"folder_name"`
-	OverleafRemote string    `json:"overleaf_remote"`
-	CodeRemote     string    `json:"code_remote,omitempty"`
-	LinkedPaperIDs []string  `json:"linked_paper_ids"`
-	LinkAllPapers  bool      `json:"link_all_papers"`
-	PendingPush    bool      `json:"pending_push"`
-	LastSyncedAt   *string   `json:"last_synced_at,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	FolderName     string           `json:"folder_name"`
+	OverleafRemote string           `json:"overleaf_remote"`
+	CodeRemote     string           `json:"code_remote,omitempty"`
+	CodeRepos      []LinkedCodeRepo `json:"code_repos,omitempty"`
+	LinkedPaperIDs []string         `json:"linked_paper_ids"`
+	LinkAllPapers  bool             `json:"link_all_papers"`
+	PendingPush    bool             `json:"pending_push"`
+	LastSyncedAt   *string          `json:"last_synced_at,omitempty"`
+	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
 type ProjectTreeEntry struct {
@@ -520,6 +527,7 @@ func summarizeContainerGitContext(ctx context.Context, parentDir, containerName 
 type codeRepoHint struct {
 	Subdir    string
 	RemoteURL string
+	Branch    string
 }
 
 func sanitizeRemoteURLForDocs(raw string) string {
@@ -539,24 +547,41 @@ func sanitizeRemoteURLForDocs(raw string) string {
 	return cleaned
 }
 
-func collectCodeRepoCloneHints(ctx context.Context, projectDir string, cfg ProjectConfig) []codeRepoHint {
+func readGitBranchForRepo(ctx context.Context, repoDir string) string {
+	out, err := runGitCommand(ctx, repoDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+	return branch
+}
+
+func collectDiskCodeRepos(ctx context.Context, projectDir string) []LinkedCodeRepo {
 	seen := make(map[string]bool)
-	var hints []codeRepoHint
-	addHint := func(subdir, remote string) {
+	var repos []LinkedCodeRepo
+	addRepo := func(subdir, remote, branch string) {
 		clean := sanitizeRemoteURLForDocs(remote)
-		if clean == "" || seen[clean] {
+		if clean == "" {
 			return
 		}
-		seen[clean] = true
-		hints = append(hints, codeRepoHint{Subdir: subdir, RemoteURL: clean})
+		key := subdir + "|" + clean
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		repos = append(repos, LinkedCodeRepo{
+			Subdir:    subdir,
+			RemoteURL: clean,
+			Branch:    strings.TrimSpace(branch),
+		})
 	}
 
-	if strings.TrimSpace(cfg.CodeRemote) != "" {
-		addHint("", cfg.CodeRemote)
-	}
 	codeDir := filepath.Join(projectDir, "code")
 	if out, err := runGitCommand(ctx, codeDir, "remote", "get-url", "origin"); err == nil {
-		addHint("", out)
+		addRepo("", out, readGitBranchForRepo(ctx, codeDir))
 	}
 	if entries, err := os.ReadDir(codeDir); err == nil {
 		for _, entry := range entries {
@@ -566,12 +591,105 @@ func collectCodeRepoCloneHints(ctx context.Context, projectDir string, cfg Proje
 			subPath := filepath.Join(codeDir, entry.Name())
 			if info, statErr := os.Stat(subPath); statErr == nil && info.IsDir() {
 				if out, err := runGitCommand(ctx, subPath, "remote", "get-url", "origin"); err == nil {
-					addHint(entry.Name(), out)
+					addRepo(entry.Name(), out, readGitBranchForRepo(ctx, subPath))
 				}
 			}
 		}
 	}
+	sort.Slice(repos, func(i, j int) bool {
+		return repos[i].Subdir < repos[j].Subdir
+	})
+	return repos
+}
+
+func codeReposEqual(a, b []LinkedCodeRepo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func syncCodeReposMetadataFromDisk(ctx context.Context, projectDir string, cfg *ProjectConfig) bool {
+	diskRepos := collectDiskCodeRepos(ctx, projectDir)
+	if len(diskRepos) == 0 {
+		return false
+	}
+	changed := !codeReposEqual(cfg.CodeRepos, diskRepos)
+	cfg.CodeRepos = diskRepos
+	if len(diskRepos) == 1 && diskRepos[0].Subdir == "" && cfg.CodeRemote == "" {
+		cfg.CodeRemote = diskRepos[0].RemoteURL
+		changed = true
+	}
+	return changed
+}
+
+func collectCodeRepoCloneHints(ctx context.Context, projectDir string, cfg ProjectConfig) []codeRepoHint {
+	seen := make(map[string]bool)
+	var hints []codeRepoHint
+	addHint := func(subdir, remote, branch string) {
+		clean := sanitizeRemoteURLForDocs(remote)
+		if clean == "" {
+			return
+		}
+		key := subdir + "|" + clean
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		hints = append(hints, codeRepoHint{
+			Subdir:    subdir,
+			RemoteURL: clean,
+			Branch:    strings.TrimSpace(branch),
+		})
+	}
+
+	for _, r := range collectDiskCodeRepos(ctx, projectDir) {
+		addHint(r.Subdir, r.RemoteURL, r.Branch)
+	}
+	for _, r := range cfg.CodeRepos {
+		addHint(r.Subdir, r.RemoteURL, r.Branch)
+	}
+	if strings.TrimSpace(cfg.CodeRemote) != "" && len(hints) == 0 {
+		addHint("", cfg.CodeRemote, "")
+	}
 	return hints
+}
+
+func cloneCodeReposIfEmpty(ctx context.Context, projectDir string, repos []LinkedCodeRepo, username string) {
+	if len(repos) == 0 {
+		return
+	}
+	codeDir := filepath.Join(projectDir, "code")
+	if entries, err := os.ReadDir(codeDir); err == nil {
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), ".") {
+				return
+			}
+		}
+	}
+	for _, repo := range repos {
+		if strings.TrimSpace(repo.RemoteURL) == "" {
+			continue
+		}
+		targetDir := codeDir
+		if repo.Subdir != "" {
+			if strings.Contains(repo.Subdir, "/") || strings.Contains(repo.Subdir, "\\") || strings.Contains(repo.Subdir, "..") {
+				continue
+			}
+			targetDir = filepath.Join(codeDir, repo.Subdir)
+		}
+		if _, err := os.Stat(filepath.Join(targetDir, ".git")); err == nil {
+			continue
+		}
+		if _, err := cloneGitRepoIntoDir(ctx, targetDir, repo.RemoteURL, username); err == nil && repo.Branch != "" {
+			_, _ = runGitCommand(ctx, targetDir, "checkout", repo.Branch)
+		}
+	}
 }
 
 func writeSetupSection(ctx context.Context, b *strings.Builder, projectDir string, cfg ProjectConfig) {
@@ -606,10 +724,14 @@ func writeSetupSection(ctx context.Context, b *strings.Builder, projectDir strin
 		b.WriteString("```bash\n")
 		b.WriteString(fmt.Sprintf("mkdir -p %s/code && cd %s/code\n", projectRelPath, projectRelPath))
 		for _, hint := range codeHints {
+			branchFlag := ""
+			if hint.Branch != "" {
+				branchFlag = "-b " + hint.Branch + " "
+			}
 			if hint.Subdir == "" {
-				b.WriteString(fmt.Sprintf("git clone %s .\n", hint.RemoteURL))
+				b.WriteString(fmt.Sprintf("git clone %s%s .\n", branchFlag, hint.RemoteURL))
 			} else {
-				b.WriteString(fmt.Sprintf("git clone %s %s\n", hint.RemoteURL, hint.Subdir))
+				b.WriteString(fmt.Sprintf("git clone %s%s %s\n", branchFlag, hint.RemoteURL, hint.Subdir))
 			}
 		}
 		b.WriteString("```\n\n")
@@ -626,6 +748,7 @@ func writeSetupSection(ctx context.Context, b *strings.Builder, projectDir strin
 	b.WriteString("rm -rf /tmp/dupe-ext /tmp/dupe-studio.vsix\n")
 	b.WriteString(fmt.Sprintf("code %s\n", projectRelPath))
 	b.WriteString("```\n\n")
+	b.WriteString(fmt.Sprintf("When VS Code opens `%s`, click **Trust Folder** (or trust `%s`) so all tasks and full workspace features are enabled.\n\n", projectRelPath, projectsArg))
 }
 
 func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectConfig, refs []RefIndexEntry, isLocalMode bool) string {
@@ -692,6 +815,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	b.WriteString("- Put temporary test scripts and agent experiments in `scratch/`.\n")
 	b.WriteString("- Check **Open Comments** below (and `notes/comments.md`) for user annotations and tasks.\n")
 	b.WriteString("- When you address an open comment (`- [ ]`), mark it `- [x]` and move it under `## Addressed Comments` in `notes/comments.md`.\n")
+	b.WriteString("- When you address items in `notes/changes.md` or other feedback notes in `notes/`, mark them `- [x]` and move them under `## Addressed` at the bottom of that file.\n")
 	b.WriteString("- Periodically update `.dupe/summary.md` (or call `update_project_summary`) with a concise 3-5 sentence summary of the project goal, current progress, and active focus.\n")
 	b.WriteString("- Edit only inside `<!-- dupe:user-description:start -->` ... `<!-- dupe:user-description:end -->` in `AGENTS.md` (mirrored to the synced `notes/AGENTS.user.md`; the most recently edited copy wins); `dupe` regenerates all other sections, `paper/dupe_references.bib`, and `refs/`.\n")
 	b.WriteString("- Cite linked papers in LaTeX with `\\cite{<bibtex_key>}` and in Markdown notes with `[[paper:<bibtex_key>]]`.\n\n")
@@ -749,17 +873,76 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	return b.String()
 }
 
-func (s *Server) extractFullTextMarkdown(ctx context.Context, pdfAbsPath string) string {
-	ctxTimeout, cancel := context.WithTimeout(ctx, extractMetaTimeout)
-	defer cancel()
+func (s *Server) extractFullTextMarkdownWithErr(ctx context.Context, pdfAbsPath string) (string, error) {
+	var cachePath string
+	if s.storageDir != "" {
+		stem := strings.TrimSuffix(filepath.Base(pdfAbsPath), filepath.Ext(pdfAbsPath))
+		if stem != "" {
+			cachePath = filepath.Join(s.storageDir, "text", stem+".md")
+			if cached, err := os.ReadFile(cachePath); err == nil {
+				if trimmed := strings.TrimSpace(string(cached)); trimmed != "" {
+					return trimmed, nil
+				}
+			}
+		}
+	}
 
-	cmd := exec.CommandContext(ctxTimeout, s.pythonBin, s.extractScript, pdfAbsPath, "--extract-text")
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	var pyErrDetail string
+	if s.pythonBin != "" && s.extractScript != "" {
+		ctxTimeout, cancel := context.WithTimeout(ctx, extractMetaTimeout)
+		cmd := exec.CommandContext(ctxTimeout, s.pythonBin, s.extractScript, pdfAbsPath, "--extract-text")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+		cancel()
+		if runErr == nil {
+			if text := strings.TrimSpace(stdout.String()); text != "" {
+				if cachePath != "" {
+					_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
+					_ = os.WriteFile(cachePath, []byte(text+"\n"), 0o644)
+				}
+				return text, nil
+			}
+		} else {
+			errMsg := strings.TrimSpace(stderr.String())
+			if errMsg == "" {
+				errMsg = runErr.Error()
+			}
+			pyErrDetail = fmt.Sprintf("python (%s): %s", s.pythonBin, errMsg)
+		}
+	} else {
+		pyErrDetail = "pythonBin or extractScript not configured"
+	}
+
+	if pdftotextBin, lookErr := exec.LookPath("pdftotext"); lookErr == nil {
+		ctxTimeout, cancel := context.WithTimeout(ctx, extractMetaTimeout)
+		cmd := exec.CommandContext(ctxTimeout, pdftotextBin, "-layout", pdfAbsPath, "-")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+		cancel()
+		if runErr == nil {
+			if text := strings.TrimSpace(stdout.String()); text != "" {
+				if cachePath != "" {
+					_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
+					_ = os.WriteFile(cachePath, []byte(text+"\n"), 0o644)
+				}
+				return text, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("PDF text extraction failed (%s); install PyMuPDF (`pip install PyMuPDF`) or poppler (`pdftotext`)", pyErrDetail)
+}
+
+func (s *Server) extractFullTextMarkdown(ctx context.Context, pdfAbsPath string) string {
+	text, err := s.extractFullTextMarkdownWithErr(ctx, pdfAbsPath)
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(stdout.String())
+	return text
 }
 
 func (s *Server) queryLinkedPapersForProject(ctx context.Context, userID int, cfg ProjectConfig) ([]Paper, error) {
@@ -928,6 +1111,10 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 	}
 	if err := writeFileIfChanged(filepath.Join(projectDir, "refs", "index.json"), append(idxBytes, '\n'), 0o644); err != nil {
 		return err
+	}
+
+	if syncCodeReposMetadataFromDisk(ctx, projectDir, &cfg) {
+		_ = writeProjectConfig(projectDir, cfg)
 	}
 
 	agentsMD := buildProjectAgentsMD(ctx, projectDir, cfg, refsIndex, s.mode == "local")
@@ -1334,12 +1521,13 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type createProjectRequest struct {
-	ID             string `json:"id,omitempty"`
-	FolderName     string `json:"folder_name,omitempty"`
-	Name           string `json:"name"`
-	OverleafRemote string `json:"overleaf_remote"`
-	CodeRemote     string `json:"code_remote"`
-	LinkAllPapers  *bool  `json:"link_all_papers"`
+	ID             string           `json:"id,omitempty"`
+	FolderName     string           `json:"folder_name,omitempty"`
+	Name           string           `json:"name"`
+	OverleafRemote string           `json:"overleaf_remote"`
+	CodeRemote     string           `json:"code_remote"`
+	CodeRepos      []LinkedCodeRepo `json:"code_repos,omitempty"`
+	LinkAllPapers  *bool            `json:"link_all_papers"`
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -1379,7 +1567,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		linkAll = *req.LinkAllPapers
 	}
 
-	cfg, _, err := s.createProjectOnDiskWithID(
+	cfg, projDir, err := s.createProjectOnDiskWithID(
 		r.Context(),
 		claims.UserID,
 		claims.Username,
@@ -1394,16 +1582,22 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create project: %v", err))
 		return
 	}
+	if len(req.CodeRepos) > 0 {
+		cfg.CodeRepos = req.CodeRepos
+		_ = writeProjectConfig(projDir, cfg)
+		_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
+	}
 	writeJSON(w, http.StatusCreated, cfg)
 }
 
 type updateProjectRequest struct {
-	Name           *string  `json:"name"`
-	OverleafRemote *string  `json:"overleaf_remote"`
-	OverleafToken  *string  `json:"overleaf_token"`
-	CodeRemote     *string  `json:"code_remote"`
-	LinkedPaperIDs []string `json:"linked_paper_ids"`
-	LinkAllPapers  *bool    `json:"link_all_papers"`
+	Name           *string          `json:"name"`
+	OverleafRemote *string          `json:"overleaf_remote"`
+	OverleafToken  *string          `json:"overleaf_token"`
+	CodeRemote     *string          `json:"code_remote"`
+	CodeRepos      []LinkedCodeRepo `json:"code_repos,omitempty"`
+	LinkedPaperIDs []string         `json:"linked_paper_ids"`
+	LinkAllPapers  *bool            `json:"link_all_papers"`
 }
 
 func syncOverleafRemoteIntoPaperDir(ctx context.Context, paperDir, remoteURL, username string) (string, error) {
@@ -1456,6 +1650,9 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.LinkedPaperIDs != nil {
 		cfg.LinkedPaperIDs = req.LinkedPaperIDs
+	}
+	if req.CodeRepos != nil {
+		cfg.CodeRepos = req.CodeRepos
 	}
 	if req.LinkAllPapers != nil {
 		cfg.LinkAllPapers = *req.LinkAllPapers
@@ -2493,6 +2690,8 @@ func resolveTectonicBinary() string {
 	home, _ := os.UserHomeDir()
 	candidates := []string{
 		filepath.Join(home, ".local", "bin", "tectonic"),
+		"/opt/homebrew/bin/tectonic",
+		"/usr/local/bin/tectonic",
 		"/home/dinoclaro/.local/bin/tectonic",
 		"/home/dino/.local/bin/tectonic",
 		"/home/linuxbrew/.linuxbrew/bin/tectonic",
@@ -2504,6 +2703,27 @@ func resolveTectonicBinary() string {
 		}
 	}
 	return "tectonic"
+}
+
+func isTectonicCacheCold() bool {
+	home, _ := os.UserHomeDir()
+	var dirs []string
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdg != "" {
+		dirs = append(dirs, filepath.Join(xdg, "Tectonic"))
+	}
+	if home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, ".cache", "Tectonic"),
+			filepath.Join(home, "Library", "Caches", "Tectonic"),
+		)
+	}
+	for _, d := range dirs {
+		formatsDir := filepath.Join(d, "formats")
+		if entries, err := os.ReadDir(formatsDir); err == nil && len(entries) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type compileProjectRequest struct {
@@ -2601,7 +2821,12 @@ func (s *Server) handleCompileProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := time.Now()
-	ctxTimeout, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	coldCache := isTectonicCacheCold()
+	compileTimeout := 60 * time.Second
+	if coldCache {
+		compileTimeout = 300 * time.Second
+	}
+	ctxTimeout, cancel := context.WithTimeout(r.Context(), compileTimeout)
 	defer cancel()
 
 	texWorkDir := filepath.Dir(rootTexPath)
@@ -2655,7 +2880,7 @@ func (s *Server) handleCompileProject(w http.ResponseWriter, r *http.Request) {
 	if runErr != nil && len(errs) == 0 {
 		msg := fmt.Sprintf("LaTeX compiler failed: %v", runErr)
 		if errors.Is(ctxTimeout.Err(), context.DeadlineExceeded) {
-			msg = "LaTeX compiler timed out after 60s (check for infinite loops or large network assets)"
+			msg = fmt.Sprintf("LaTeX compiler timed out after %ds (first-time Tectonic bundle download or infinite loop; check internet/logs)", int(compileTimeout.Seconds()))
 		} else if errors.Is(runErr, exec.ErrNotFound) {
 			msg = "Tectonic compiler binary not found on the server"
 		}

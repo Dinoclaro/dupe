@@ -7,6 +7,12 @@
   "engines": {
     "vscode": "^1.90.0"
   },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Spell checking, citation autocomplete, notes, and local PDF preview work in Restricted Mode; trust the project folder for full workspace features."
+    }
+  },
   "categories": [
     "Other",
     "Programming Languages"
@@ -60,6 +66,11 @@
           "items": { "type": "string" },
           "default": [],
           "description": "User dictionary words ignored by the dupe spell checker."
+        },
+        "dupe.commentTargetNote": {
+          "type": "string",
+          "default": "notes/comments.md",
+          "description": "Project note file where inline selection comments are appended (e.g. notes/comments.md or notes/paperChanges.md)."
         }
       }
     },
@@ -271,6 +282,16 @@
       {
         "command": "dupe.addWordToUserDict",
         "title": "dupe: Add Word to User Dictionary"
+      },
+      {
+        "command": "dupe.addComment",
+        "title": "dupe: Add Comment on Selection",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "dupe.selectCommentTarget",
+        "title": "dupe: Select Comment Target Note",
+        "icon": "$(list-selection)"
       }
     ],
     "keybindings": [
@@ -324,6 +345,11 @@
         "command": "dupe.compileLatex",
         "key": "alt+c",
         "when": "editorTextFocus && (editorLangId == latex || editorLangId == tex)"
+      },
+      {
+        "command": "dupe.addComment",
+        "key": "alt+shift+c",
+        "when": "editorTextFocus && (editorLangId == markdown || editorLangId == latex || editorLangId == tex)"
       }
     ],
     "menus": {
@@ -486,6 +512,11 @@
           "command": "dupe.quickInsertLink",
           "when": "editorLangId == markdown || editorLangId == latex || editorLangId == tex",
           "group": "navigation@3"
+        },
+        {
+          "command": "dupe.addComment",
+          "when": "editorLangId == markdown || editorLangId == latex || editorLangId == tex",
+          "group": "navigation@4"
         }
       ]
     }

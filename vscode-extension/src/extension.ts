@@ -16,12 +16,15 @@ import {
 import {
   NotesIndex,
   computeMarkdownEnterEdit,
+  formatCommentBlock,
+  insertCommentIntoTargetNote,
   normalizeNoteRelPath,
   toggleCheckboxLine,
   toggleWrappedFormat,
 } from './notesIndex';
 import { DupePdfViewer } from './pdfViewer';
 import {
+  discoverNestedGitRepoPaths,
   discoverProjectsInWorkspace,
   findDupeProjectRoot,
   readLocalProjectConfig,
@@ -74,6 +77,59 @@ export function activate(context: vscode.ExtensionContext): void {
     backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
     isWholeLine: true,
   });
+
+  interface VSCodeGitAPI {
+    readonly state: 'uninitialized' | 'initialized';
+    readonly repositories: Array<{ rootUri: vscode.Uri }>;
+    onDidChangeState: vscode.Event<'uninitialized' | 'initialized'>;
+    openRepository(root: vscode.Uri): Promise<unknown>;
+  }
+  interface VSCodeGitExtension {
+    readonly enabled: boolean;
+    getAPI(version: 1): VSCodeGitAPI;
+  }
+
+  let gitStateWatcher: vscode.Disposable | undefined;
+
+  async function syncVSCodeGitRepositories(projectRoot: string | null): Promise<void> {
+    if (!projectRoot) {
+      return;
+    }
+    const gitExt = vscode.extensions.getExtension<VSCodeGitExtension>('vscode.git');
+    if (!gitExt) {
+      return;
+    }
+    try {
+      const exports = gitExt.isActive ? gitExt.exports : await gitExt.activate();
+      if (!exports?.enabled) {
+        return;
+      }
+      const gitApi = exports.getAPI(1);
+      const openNested = async () => {
+        const repoPaths = discoverNestedGitRepoPaths(projectRoot);
+        const alreadyOpen = new Set(gitApi.repositories.map((r) => path.resolve(r.rootUri.fsPath)));
+        for (const repoPath of repoPaths) {
+          if (!alreadyOpen.has(path.resolve(repoPath))) {
+            await gitApi.openRepository(vscode.Uri.file(repoPath)).catch(() => null);
+          }
+        }
+      };
+      if (gitApi.state === 'initialized') {
+        await openNested();
+      } else {
+        gitStateWatcher?.dispose();
+        gitStateWatcher = gitApi.onDidChangeState((st) => {
+          if (st === 'initialized') {
+            gitStateWatcher?.dispose();
+            gitStateWatcher = undefined;
+            void openNested();
+          }
+        });
+      }
+    } catch {
+      // ignore if vscode.git is unavailable or restricted
+    }
+  }
 
   let papers: Paper[] = [];
   let projects: ProjectConfig[] = [];
@@ -298,6 +354,7 @@ export function activate(context: vscode.ExtensionContext): void {
       daemonError,
     });
     updateStatusBar();
+    void syncVSCodeGitRepositories(activeProjectRoot);
   }
 
   function applyCompilerDiagnostics(
@@ -561,9 +618,15 @@ export function activate(context: vscode.ExtensionContext): void {
               4000,
             );
           } else {
-            void vscode.window.showWarningMessage(
-              `LaTeX compile finished with ${(res.errors || []).length} error(s) (${res.failure_kind}). Check Problems panel.`,
-            );
+            const errs = res.errors || [];
+            const firstMsg = errs[0]?.message;
+            const summary =
+              res.failure_kind === 'compiler' && firstMsg
+                ? `LaTeX compiler error: ${firstMsg}`
+                : firstMsg
+                  ? `LaTeX compile finished with ${errs.length} error(s) (${res.failure_kind}): ${firstMsg}`
+                  : `LaTeX compile finished with ${errs.length} error(s) (${res.failure_kind}). Check Problems panel.`;
+            void vscode.window.showWarningMessage(summary);
           }
         } catch (err) {
           void vscode.window.showErrorMessage(
@@ -606,6 +669,7 @@ export function activate(context: vscode.ExtensionContext): void {
     spellProvider,
     diagnostics,
     syncTexFlashDeco,
+    { dispose: () => gitStateWatcher?.dispose() },
     statusSyncItem,
     statusCompileItem,
     statusLibraryItem,
@@ -1514,6 +1578,165 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
+    vscode.commands.registerCommand('dupe.selectCommentTarget', async () => {
+      if (activeProjectRoot) {
+        notesIndex.rebuild(activeProjectRoot);
+      }
+      const cfg = vscode.workspace.getConfiguration('dupe');
+      const currentTarget = normalizeNoteRelPath(cfg.get<string>('commentTargetNote', 'notes/comments.md'));
+      const seen = new Set<string>();
+      const items: Array<vscode.QuickPickItem & { relPath?: string; custom?: boolean }> = [];
+      const addOption = (relPath: string, description: string) => {
+        const norm = normalizeNoteRelPath(relPath);
+        if (seen.has(norm)) {
+          return;
+        }
+        seen.add(norm);
+        items.push({
+          label: norm,
+          description: norm === currentTarget ? `(current) ${description}`.trim() : description,
+          relPath: norm,
+        });
+      };
+
+      addOption('notes/comments.md', 'Default annotation queue');
+      addOption('notes/paperChanges.md', 'Paper revision checklist');
+      for (const n of notesIndex.getNotes()) {
+        addOption(n.relPath, '');
+      }
+      items.push({
+        label: '$(add) Enter custom note path...',
+        description: 'e.g. notes/review-notes.md',
+        custom: true,
+      });
+
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: `Select target note for inline comments (current: ${currentTarget})`,
+      });
+      if (!picked) {
+        return;
+      }
+
+      let nextRel = picked.relPath;
+      if (picked.custom) {
+        const raw = await vscode.window.showInputBox({
+          prompt: 'Target note path inside notes/',
+          value: currentTarget,
+          placeHolder: 'notes/paperChanges.md',
+        });
+        if (!raw?.trim()) {
+          return;
+        }
+        nextRel = normalizeNoteRelPath(raw);
+      }
+      if (!nextRel) {
+        return;
+      }
+
+      const scope =
+        vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+      await cfg.update('commentTargetNote', nextRel, scope);
+      void vscode.window.showInformationMessage(`Inline comments will now append to ${nextRel}.`);
+    }),
+
+    vscode.commands.registerCommand('dupe.addComment', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== 'file') {
+        void vscode.window.showInformationMessage('Open a .tex or .md file in a dupe project to add a comment.');
+        return;
+      }
+      const docPath = editor.document.uri.fsPath;
+      const docRoot = findDupeProjectRoot(path.dirname(docPath)) || activeProjectRoot;
+      let proj: ProjectConfig | null = activeProject;
+      if (docRoot && (!proj || activeProjectRoot !== docRoot)) {
+        const localCfg = readLocalProjectConfig(docRoot);
+        if (localCfg) {
+          proj = localCfg;
+        }
+      }
+      if (!proj && !docRoot) {
+        proj = await pickProjectOrWarn();
+      }
+      const projRoot = docRoot || (proj ? await resolveProjectRoot(proj) : null);
+      if (!projRoot) {
+        void vscode.window.showWarningMessage('Could not locate a dupe project for this file.');
+        return;
+      }
+
+      const targetRel = normalizeNoteRelPath(
+        vscode.workspace
+          .getConfiguration('dupe')
+          .get<string>('commentTargetNote', 'notes/comments.md'),
+      );
+
+      const relSource = path.relative(projRoot, docPath).replace(/\\/g, '/');
+      const sel = editor.selection;
+      const startLine = sel.start.line + 1;
+      const endLine = sel.end.line + 1;
+      const location =
+        !sel.isEmpty && endLine > startLine ? `lines ${startLine}-${endLine}` : `line ${startLine}`;
+      const rawQuote = sel.isEmpty
+        ? editor.document.lineAt(sel.active.line).text
+        : editor.document.getText(sel);
+      const quote = rawQuote.trim();
+
+      const comment = await vscode.window.showInputBox({
+        prompt: `Comment on ${relSource} (${location}) -> ${targetRel}`,
+        placeHolder: 'Describe the change or note for agents...',
+      });
+      if (!comment?.trim()) {
+        return;
+      }
+
+      const targetAbsPath = path.join(projRoot, targetRel);
+      let savedViaApi = false;
+      if (proj && targetRel === 'notes/comments.md') {
+        try {
+          await api.addProjectComment(proj.id, {
+            source: relSource,
+            location,
+            quote,
+            comment: comment.trim(),
+          });
+          savedViaApi = true;
+        } catch {
+          savedViaApi = false;
+        }
+      }
+      if (!savedViaApi) {
+        await fsp.mkdir(path.dirname(targetAbsPath), { recursive: true });
+        let existing = '';
+        try {
+          existing = await fsp.readFile(targetAbsPath, 'utf8');
+        } catch {
+          existing = '';
+        }
+        const block = formatCommentBlock({
+          source: relSource,
+          location,
+          quote,
+          comment: comment.trim(),
+        });
+        const nextContent = insertCommentIntoTargetNote(existing, block, targetRel);
+        await fsp.writeFile(targetAbsPath, nextContent, 'utf8');
+      }
+
+      rebuildLocalIndices();
+      const action = await vscode.window.showInformationMessage(
+        `Added comment on ${relSource} (${location}) to ${targetRel}.`,
+        'Open Note',
+        'Change Target Note',
+      );
+      if (action === 'Open Note') {
+        const targetDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(targetAbsPath));
+        await vscode.window.showTextDocument(targetDoc, { viewColumn: vscode.ViewColumn.Beside });
+      } else if (action === 'Change Target Note') {
+        await vscode.commands.executeCommand('dupe.selectCommentTarget');
+      }
+    }),
+
     vscode.workspace.onDidOpenTextDocument((doc) => spellProvider.checkDocument(doc)),
     vscode.workspace.onDidChangeTextDocument((ev) => spellProvider.scheduleCheck(ev.document)),
     vscode.workspace.onDidCloseTextDocument((doc) => spellProvider.clearDocument(doc.uri)),
@@ -1525,6 +1748,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => void refreshAll()),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => void syncVSCodeGitRepositories(activeProjectRoot)),
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (!editor) {
         return;

@@ -340,6 +340,87 @@ if ! command -v tectonic >/dev/null 2>&1 && [ ! -x "$BIN_DIR/tectonic" ]; then
   fi
 fi
 
+PYTHON_BIN_VAL="python3"
+if command -v python3 >/dev/null 2>&1; then
+  if [ ! -x "$INSTALL_DIR/.venv/bin/python3" ]; then
+    echo "==> Setting up Python virtual environment in $INSTALL_DIR/.venv..."
+    python3 -m venv "$INSTALL_DIR/.venv" >/dev/null 2>&1 || true
+  fi
+  if [ -x "$INSTALL_DIR/.venv/bin/python3" ]; then
+    PYTHON_BIN_VAL="$INSTALL_DIR/.venv/bin/python3"
+    if ! "$PYTHON_BIN_VAL" -c "import fitz" >/dev/null 2>&1 && [ -f "$INSTALL_DIR/scripts/requirements.txt" ]; then
+      echo "==> Installing Python PDF dependencies (PyMuPDF)..."
+      "$PYTHON_BIN_VAL" -m pip install -q -r "$INSTALL_DIR/scripts/requirements.txt" || echo "Warning: pip install failed; install PyMuPDF or poppler pdftotext for MCP read_paper."
+    fi
+  fi
+fi
+
+TECT_BIN=""
+if [ -x "$BIN_DIR/tectonic" ]; then
+  TECT_BIN="$BIN_DIR/tectonic"
+elif command -v tectonic >/dev/null 2>&1; then
+  TECT_BIN="$(command -v tectonic)"
+fi
+if [ -n "$TECT_BIN" ]; then
+  TECT_CACHE_DIR="$HOME/.cache/Tectonic"
+  if [ "$OS_NAME" = "darwin" ]; then
+    TECT_CACHE_DIR="$HOME/Library/Caches/Tectonic"
+  fi
+  if [ ! -d "$TECT_CACHE_DIR/formats" ] || [ -z "$(ls -A "$TECT_CACHE_DIR/formats" 2>/dev/null || true)" ]; then
+    echo "==> Warming Tectonic LaTeX cache (first-time bundle download)..."
+    WARM_TMP="$(mktemp -d)"
+    printf '\\documentclass{article}\n\\usepackage{amsmath,amssymb,graphicx,hyperref,tikz}\n\\begin{document}\ndupe warmup\n\\end{document}\n' > "$WARM_TMP/warmup.tex"
+    "$TECT_BIN" -X compile --outdir "$WARM_TMP" "$WARM_TMP/warmup.tex" >/dev/null 2>&1 || echo "Warning: Tectonic warmup skipped; first compile will download bundles."
+    rm -rf "$WARM_TMP"
+  fi
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  echo "==> Registering dupe MCP server for Antigravity and Claude Code..."
+  DUPE_MCP_CMD="$INSTALL_DIR/backend/server" \
+  DUPE_MCP_PROJECTS="$PROJECTS_DIR" \
+  DUPE_MCP_STORAGE="$STORAGE_DIR" \
+  DUPE_MCP_PYTHON="$PYTHON_BIN_VAL" \
+  DUPE_MCP_EXTRACT="$INSTALL_DIR/scripts/extract_meta.py" \
+  python3 - <<'PY' || true
+import json, os
+
+entry = {
+    "command": os.environ["DUPE_MCP_CMD"],
+    "args": ["mcp", "--mode", "local", "--projects", os.environ["DUPE_MCP_PROJECTS"]],
+    "env": {
+        "STORAGE_DIR": os.environ["DUPE_MCP_STORAGE"],
+        "PROJECTS_DIR": os.environ["DUPE_MCP_PROJECTS"],
+        "PYTHON_BIN": os.environ["DUPE_MCP_PYTHON"],
+        "EXTRACT_SCRIPT": os.environ["DUPE_MCP_EXTRACT"],
+    },
+}
+
+for raw_path in ("~/.gemini/config/mcp_config.json", "~/.claude.json"):
+    cfg_path = os.path.expanduser(raw_path)
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    data = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as fh:
+                txt = fh.read().strip()
+            if txt:
+                parsed = json.loads(txt)
+                if isinstance(parsed, dict):
+                    data = parsed
+        except Exception:
+            data = {}
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    servers["dupe"] = entry
+    data["mcpServers"] = servers
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+PY
+fi
+
 if [ "$AUTOSTART" = "1" ] && [ "$OS_NAME" = "darwin" ]; then
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
   PLIST_PATH="$HOME/Library/LaunchAgents/io.dupe.local.plist"
@@ -360,10 +441,12 @@ if [ "$AUTOSTART" = "1" ] && [ "$OS_NAME" = "darwin" ]; then
     <string>$PROJECTS_DIR</string>
     <key>WEB_DIST_DIR</key>
     <string>$INSTALL_DIR/web/dist</string>
+    <key>PYTHON_BIN</key>
+    <string>$PYTHON_BIN_VAL</string>
     <key>EXTRACT_SCRIPT</key>
     <string>$INSTALL_DIR/scripts/extract_meta.py</string>
     <key>PATH</key>
-    <string>$BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>$BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/Library/TeX/texbin:/usr/bin:/bin</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
@@ -405,6 +488,7 @@ WorkingDirectory=$INSTALL_DIR/backend
 Environment="STORAGE_DIR=$STORAGE_DIR"
 Environment="PROJECTS_DIR=$PROJECTS_DIR"
 Environment="WEB_DIST_DIR=$INSTALL_DIR/web/dist"
+Environment="PYTHON_BIN=$PYTHON_BIN_VAL"
 Environment="EXTRACT_SCRIPT=$INSTALL_DIR/scripts/extract_meta.py"
 Environment="PATH=$BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 ExecStart=$INSTALL_DIR/backend/server serve --mode local --projects "$PROJECTS_DIR" %s
@@ -423,7 +507,7 @@ fi
 
 echo "==> Starting dupe in local mode on http://127.0.0.1:8080 ..."
 cd "$INSTALL_DIR/backend"
-STORAGE_DIR="$STORAGE_DIR" WEB_DIST_DIR="$INSTALL_DIR/web/dist" EXTRACT_SCRIPT="$INSTALL_DIR/scripts/extract_meta.py" \
+STORAGE_DIR="$STORAGE_DIR" WEB_DIST_DIR="$INSTALL_DIR/web/dist" PYTHON_BIN="$PYTHON_BIN_VAL" EXTRACT_SCRIPT="$INSTALL_DIR/scripts/extract_meta.py" \
   exec "$INSTALL_DIR/backend/server" serve --mode local --projects "$PROJECTS_DIR" %s
 `, baseURL, rawToken, rawProjects, storageSuffix, autostartFlag, launchdSyncArgs, syncFlags, syncFlags)
 
@@ -774,6 +858,9 @@ func (s *Server) handleLinkLocalFolder(w http.ResponseWriter, r *http.Request) {
 			linkedPath = containerDir
 		}
 		_ = s.regenerateProjectArtifacts(r.Context(), projDir, claims.UserID, cfg)
+		if updatedCfg, readErr := readProjectConfig(projDir); readErr == nil {
+			cfg = updatedCfg
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"project":     cfg,
 			"linked_path": linkedPath,

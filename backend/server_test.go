@@ -926,7 +926,17 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 		t.Fatalf("expected 200 for /api/local/setup.sh, got %d", sRec.Code)
 	}
 	scriptBody := sRec.Body.String()
-	for _, want := range []string{"darwin-arm64", "io.dupe.local.plist", "tectonic-0.15.0-aarch64-apple-darwin.tar.gz", "dupe-local.service"} {
+	for _, want := range []string{
+		"darwin-arm64",
+		"io.dupe.local.plist",
+		"/Library/TeX/texbin",
+		"tectonic-0.15.0-aarch64-apple-darwin.tar.gz",
+		"dupe-local.service",
+		"Warming Tectonic LaTeX cache",
+		"mcp_config.json",
+		".claude.json",
+		"requirements.txt",
+	} {
 		if !strings.Contains(scriptBody, want) {
 			t.Fatalf("expected setup.sh to contain %q", want)
 		}
@@ -1036,6 +1046,133 @@ func TestTwoWayProjectNotesSyncExcludesDiagrams(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(remoteProjDir, "notes", "phone-note.md")); !os.IsNotExist(err) {
 		t.Fatalf("expected local deletion of phone-note.md to propagate to hosted, stat err=%v", err)
+	}
+}
+
+func TestCodeReposSyncTectonicColdCacheAndMCPError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// 1. Cold vs warm Tectonic cache detection
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(fakeHome, ".cache"))
+	if !isTectonicCacheCold() {
+		t.Fatal("expected isTectonicCacheCold() to be true when cache dir does not exist")
+	}
+	formatsDir := filepath.Join(fakeHome, ".cache", "Tectonic", "formats")
+	if err := os.MkdirAll(formatsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(formatsDir, "latex.fmt"), []byte("cached"), 0o644)
+	if isTectonicCacheCold() {
+		t.Fatal("expected isTectonicCacheCold() to be false once formats/ has an entry")
+	}
+
+	// 2. Linked code repo remote + branch persistence and sync to a fresh machine
+	hostedStorage := t.TempDir()
+	hostedDB, err := initSQLiteDB(ctx, filepath.Join(hostedStorage, "library.db"))
+	if err != nil {
+		t.Fatalf("init hosted sqlite: %v", err)
+	}
+	defer hostedDB.Close()
+	_ = createOrUpdateUser(ctx, hostedDB, "alice", "strong-password-123", "#FFEB3B")
+	jwtSecret := []byte("test-secret-at-least-32-bytes-long")
+	hostedSrv := &Server{
+		db:          hostedDB,
+		jwtSecret:   jwtSecret,
+		storageDir:  hostedStorage,
+		projectsDir: filepath.Join(hostedStorage, "projects"),
+		mode:        "hosted",
+		offlineMeta: true,
+	}
+	ts := httptest.NewServer(hostedSrv.routes())
+	defer ts.Close()
+	token, _ := issueToken(jwtSecret, 1, "alice", time.Now().UTC())
+
+	localStorageA := t.TempDir()
+	localDBA, _ := initSQLiteDB(ctx, filepath.Join(localStorageA, "library.db"))
+	defer localDBA.Close()
+	_ = createOrUpdateUser(ctx, localDBA, "local", "local-mode-implicit-user", "#FFEB3B")
+	localSrvA := &Server{
+		db:          localDBA,
+		jwtSecret:   jwtSecret,
+		storageDir:  localStorageA,
+		projectsDir: t.TempDir(),
+		mode:        "local",
+		offlineMeta: true,
+	}
+	cfgA, projDirA, err := localSrvA.createProjectOnDisk(ctx, 1, "local", "PELE Paper", "", "", true)
+	if err != nil {
+		t.Fatalf("createProjectOnDisk: %v", err)
+	}
+
+	// Create a git repo inside code/mbrl_soft on branch dev/dino/mbrl
+	repoDir := filepath.Join(projDirA, "code", "mbrl_soft")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-b", "dev/dino/mbrl"},
+		{"config", "user.name", "dino"},
+		{"config", "user.email", "dino@example.com"},
+		{"remote", "add", "origin", "git@github.com:Dinoclaro/mbrl_soft.git"},
+	} {
+		if _, err := runGitCommand(ctx, repoDir, args...); err != nil {
+			t.Fatalf("git %v failed: %v", args, err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("mbrl\n"), 0o644)
+	_, _ = runGitCommand(ctx, repoDir, "add", "-A")
+	_, _ = runGitCommand(ctx, repoDir, "commit", "-m", "init")
+
+	if err := localSrvA.regenerateProjectArtifacts(ctx, projDirA, 1, cfgA); err != nil {
+		t.Fatalf("regenerateProjectArtifacts: %v", err)
+	}
+	syncCfg := RemoteSyncConfig{RemoteURL: ts.URL, Token: token}
+	if _, err := localSrvA.runRemoteSyncCycle(ctx, syncCfg); err != nil {
+		t.Fatalf("sync from machine A failed: %v", err)
+	}
+
+	// Machine B starts with empty projects dir and syncs from hosted
+	localStorageB := t.TempDir()
+	localDBB, _ := initSQLiteDB(ctx, filepath.Join(localStorageB, "library.db"))
+	defer localDBB.Close()
+	_ = createOrUpdateUser(ctx, localDBB, "local", "local-mode-implicit-user", "#FFEB3B")
+	projectsRootB := t.TempDir()
+	localSrvB := &Server{
+		db:          localDBB,
+		jwtSecret:   jwtSecret,
+		storageDir:  localStorageB,
+		projectsDir: projectsRootB,
+		mode:        "local",
+		offlineMeta: true,
+	}
+	if _, err := localSrvB.runRemoteSyncCycle(ctx, syncCfg); err != nil {
+		t.Fatalf("sync on machine B failed: %v", err)
+	}
+	agentsB, err := os.ReadFile(filepath.Join(projectsRootB, cfgA.FolderName, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("expected AGENTS.md on machine B: %v", err)
+	}
+	if !strings.Contains(string(agentsB), "git clone -b dev/dino/mbrl git@github.com:Dinoclaro/mbrl_soft.git mbrl_soft") {
+		t.Fatalf("expected AGENTS.md on machine B to preserve branch & remote clone hint, got:\n%s", string(agentsB))
+	}
+	if !strings.Contains(string(agentsB), "Trust Folder") {
+		t.Fatalf("expected AGENTS.md setup instructions to mention Workspace Trust")
+	}
+
+	// 3. read_paper MCP tool surfaces an actionable error when PDF extraction fails
+	pdfPath := filepath.Join(localStorageA, "pdfs", strings.Repeat("a", 64)+".pdf")
+	_ = os.MkdirAll(filepath.Dir(pdfPath), 0o755)
+	_ = os.WriteFile(pdfPath, []byte("%PDF-1.4\n"), 0o644)
+	_, _ = localDBA.Exec(ctx, `
+		INSERT INTO papers (id, owner_id, title, authors, publication_year, doi, bibtex_key, bibtex_raw, file_path, file_hash, is_shared)
+		VALUES ($1, 1, $2, $3, 2026, $4, $5, $6, $7, $8, FALSE)
+	`, "33333333-3333-4333-8333-333333333333", "Test Paper", "Dino", "10.1000/test", "dino2026test", "@article{dino2026test}", "pdfs/"+strings.Repeat("a", 64)+".pdf", strings.Repeat("a", 64))
+	outText, isErr := localSrvA.executeMCPTool(ctx, 1, "local", "read_paper", map[string]any{"key": "dino2026test"})
+	if !isErr || !strings.Contains(outText, "Error extracting PDF body text") {
+		t.Fatalf("expected read_paper to surface extraction error (isErr=%v), got: %s", isErr, outText)
 	}
 }
 

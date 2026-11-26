@@ -281,7 +281,20 @@ func envOrDefault(key, fallback string) string {
 }
 
 func resolveDefaultPath(candidates ...string) string {
-	for _, c := range candidates {
+	var all []string
+	if exePath, err := os.Executable(); err == nil {
+		if resolved, rErr := filepath.EvalSymlinks(exePath); rErr == nil {
+			exePath = resolved
+		}
+		exeDir := filepath.Dir(exePath)
+		for _, c := range candidates {
+			if strings.HasPrefix(c, "../") || strings.HasPrefix(c, "./") {
+				all = append(all, filepath.Clean(filepath.Join(exeDir, c)))
+			}
+		}
+	}
+	all = append(all, candidates...)
+	for _, c := range all {
 		if _, err := os.Stat(c); err == nil {
 			return c
 		}
@@ -289,10 +302,32 @@ func resolveDefaultPath(candidates ...string) string {
 	return candidates[0]
 }
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+func resolveDefaultStorageDir() string {
+	if explicit := strings.TrimSpace(os.Getenv("STORAGE_DIR")); explicit != "" {
+		return explicit
+	}
+	// Check standard relative paths and ~/.local/share/dupe/storage_* for standalone -mcp invocations
+	candidates := []string{"../storage", "./storage"}
+	if exePath, err := os.Executable(); err == nil {
+		if resolved, rErr := filepath.EvalSymlinks(exePath); rErr == nil {
+			exePath = resolved
+		}
+		exeDir := filepath.Dir(exePath)
+		candidates = append([]string{filepath.Clean(filepath.Join(exeDir, "../storage"))}, candidates...)
+		parentDir := filepath.Dir(exeDir)
+		if matches, gErr := filepath.Glob(filepath.Join(parentDir, "storage_*")); gErr == nil {
+			candidates = append(candidates, matches...)
+		}
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.IsDir() {
+			return c
+		}
+	}
+	return "../storage"
+}
 
+func main() {
 	createUser := flag.String("create-user", "", "Create or update a user account and exit")
 	password := flag.String("password", "", "Password for --create-user")
 	colorHex := flag.String("color", "#FFEB3B", "Highlight color hex for --create-user")
@@ -317,16 +352,27 @@ func main() {
 		isMCPSubcmd = true
 	}
 
+	logOut := os.Stdout
+	if isMCPSubcmd {
+		// Keep stdout reserved strictly for JSON-RPC frames in stdio MCP mode.
+		logOut = os.Stderr
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logOut, nil)))
+
 	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
 	if mode == "" {
-		mode = strings.ToLower(envOrDefault("DUPE_MODE", "hosted"))
+		defaultMode := "hosted"
+		if isMCPSubcmd && strings.TrimSpace(os.Getenv("DATABASE_URL")) == "" {
+			defaultMode = "local"
+		}
+		mode = strings.ToLower(envOrDefault("DUPE_MODE", defaultMode))
 	}
 	if mode != "local" && mode != "hosted" {
 		slog.Error("invalid mode; expected local or hosted", "mode", mode)
 		os.Exit(1)
 	}
 
-	storageDir := envOrDefault("STORAGE_DIR", resolveDefaultPath("../storage", "./storage"))
+	storageDir := resolveDefaultStorageDir()
 	if err := os.MkdirAll(filepath.Join(storageDir, "pdfs"), 0o755); err != nil {
 		slog.Error("failed to initialize storage pdfs directory", "error", err)
 		os.Exit(1)
@@ -425,7 +471,7 @@ func main() {
 		webDistDir:    webDistDir,
 	}
 
-	if mode == "local" {
+	if mode == "local" && !isMCPSubcmd {
 		initSyncURL := strings.TrimSpace(*syncURLFlag)
 		if initSyncURL == "" {
 			initSyncURL = envOrDefault("DUPE_SYNC_URL", "")
