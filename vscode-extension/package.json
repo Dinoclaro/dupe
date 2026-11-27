@@ -2,7 +2,7 @@
   "name": "dupe-studio",
   "displayName": "dupe Research Studio",
   "description": "Explorer-integrated paper library, Obsidian-style notes & lists, citation intelligence, SyncTeX PDF reader, and Overleaf sync backed by the local dupe daemon.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "dinoclaro",
   "engines": {
     "vscode": "^1.90.0"
@@ -349,6 +349,7 @@
       {
         "command": "dupe.addComment",
         "key": "alt+shift+c",
+        "mac": "ctrl+shift+c",
         "when": "editorTextFocus && (editorLangId == markdown || editorLangId == latex || editorLangId == tex)"
       }
     ],
@@ -375,6 +376,11 @@
           "group": "navigation@4"
         },
         {
+          "command": "dupe.addComment",
+          "when": "editorLangId == latex || editorLangId == tex",
+          "group": "navigation@5"
+        },
+        {
           "command": "dupe.quickOpenNote",
           "when": "editorLangId == markdown",
           "group": "navigation@1"
@@ -393,6 +399,11 @@
           "command": "dupe.quickInsertLink",
           "when": "editorLangId == markdown",
           "group": "navigation@4"
+        },
+        {
+          "command": "dupe.addComment",
+          "when": "editorLangId == markdown",
+          "group": "navigation@5"
         }
       ],
       "explorer/context": [
