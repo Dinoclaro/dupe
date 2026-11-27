@@ -203,7 +203,7 @@ func (s *Server) executeMCPTool(ctx context.Context, userID int, username, toolN
 		if err != nil {
 			return fmt.Sprintf("Failed to search library: %v", err), true
 		}
-		var matches []Paper
+		matches := make([]Paper, 0)
 		for _, p := range papers {
 			if q == "" ||
 				strings.Contains(strings.ToLower(p.Title), q) ||

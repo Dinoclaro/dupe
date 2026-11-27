@@ -18,6 +18,7 @@ const sqliteUUIDExpr = `(lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) |
 
 const sqliteSchemaSQL = `
 PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
