@@ -2,7 +2,7 @@
   "name": "dupe-studio",
   "displayName": "dupe Research Studio",
   "description": "Explorer-integrated paper library, Obsidian-style notes & lists, citation intelligence, SyncTeX PDF reader, and Overleaf sync backed by the local dupe daemon.",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "publisher": "dinoclaro",
   "engines": {
     "vscode": "^1.90.0"
