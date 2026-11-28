@@ -154,6 +154,31 @@ func (s *Server) handleMCPRequest(ctx context.Context, userID int, username stri
 							"required": []string{"summary"},
 						},
 					},
+					{
+						"name":        "record_provenance",
+						"description": "Record which code script and git commit generated a paper figure, table, or asset.",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"target_path":   map[string]any{"type": "string", "description": "Project-relative output path (e.g. paper/figures/fig1.pdf)"},
+								"source_script": map[string]any{"type": "string", "description": "Project-relative generating script (e.g. code/repo/plot.py)"},
+								"command":       map[string]any{"type": "string", "description": "Optional command used to generate the target"},
+								"notes":         map[string]any{"type": "string", "description": "Optional notes"},
+								"project_id":    map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+							"required": []string{"target_path", "source_script"},
+						},
+					},
+					{
+						"name":        "check_provenance",
+						"description": "Verify whether recorded paper figures/assets are up to date with their source scripts and commits.",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"project_id": map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+						},
+					},
 				},
 			},
 		}
@@ -363,6 +388,47 @@ func (s *Server) executeMCPTool(ctx context.Context, userID int, username, toolN
 			return fmt.Sprintf("Failed to regenerate AGENTS.md: %v", err), true
 		}
 		return fmt.Sprintf("Updated .dupe/summary.md and regenerated AGENTS.md for project %s.", cfg.Name), false
+
+	case "record_provenance":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		cfg, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		saved, recErr := recordProjectProvenance(ctx, projDir, ProvenanceEntry{
+			TargetPath:   strArg("target_path"),
+			SourceScript: strArg("source_script"),
+			Command:      strArg("command"),
+			Notes:        strArg("notes"),
+		})
+		if recErr != nil {
+			return fmt.Sprintf("Failed to record provenance: %v", recErr), true
+		}
+		_ = s.regenerateProjectArtifacts(ctx, projDir, userID, cfg)
+		out, _ := json.MarshalIndent(saved, "", "  ")
+		return string(out), false
+
+	case "check_provenance":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		_, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		results, chkErr := checkProjectProvenance(ctx, projDir)
+		if chkErr != nil {
+			return fmt.Sprintf("Failed to check provenance: %v", chkErr), true
+		}
+		if results == nil {
+			results = []ProvenanceCheckResult{}
+		}
+		out, _ := json.MarshalIndent(results, "", "  ")
+		return string(out), false
 
 	default:
 		return fmt.Sprintf("Unknown tool: %s", toolName), true

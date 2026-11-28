@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Test Go backend
+        working-directory: backend
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build and test web frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - name: Build, test, and package VS Code extension (.vsix)
+        working-directory: vscode-extension
+        run: |
+          npm ci
+          npm run build
+          npm test
+          EXT_VER=$(node -p "require('./package.json').version")
+          mkdir -p ../dist-release
+          npx --yes @vscode/vsce package --allow-missing-repository --no-dependencies -o "../dist-release/dupe-studio-${EXT_VER}.vsix"
+          cp "../dist-release/dupe-studio-${EXT_VER}.vsix" "../dist-release/dupe-studio-latest.vsix"
+
+      - name: Build cross-platform dupe release bundles
+        run: |
+          mkdir -p dist-release
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            STAGE="$(mktemp -d)"
+            mkdir -p "$STAGE/dupe/backend" "$STAGE/dupe/web" "$STAGE/dupe/scripts" "$STAGE/dupe/herdr"
+            (cd backend && CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$STAGE/dupe/backend/server" .)
+            cp -R web/dist "$STAGE/dupe/web/dist"
+            cp scripts/extract_meta.py scripts/requirements.txt "$STAGE/dupe/scripts/"
+            cp -R herdr/. "$STAGE/dupe/herdr/"
+            chmod +x "$STAGE/dupe/herdr/install_herdr_dupe.sh" "$STAGE/dupe/herdr/bin/dupe-herdr"
+            tar -czf "dist-release/dupe-${GOOS}-${GOARCH}.tar.gz" -C "$STAGE" dupe
+            rm -rf "$STAGE"
+          done
+          (cd dist-release && sha256sum * > SHA256SUMS.txt)
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist-release/*

@@ -162,6 +162,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/search", s.requireAuth(s.handleSearchProject))
 	mux.HandleFunc("POST /api/projects/{id}/comments", s.requireAuth(s.handleAddProjectComment))
 	mux.HandleFunc("POST /api/projects/{id}/context", s.requireAuth(s.handleGatherProjectContext))
+	mux.HandleFunc("GET /api/projects/{id}/provenance", s.requireAuth(s.handleGetProjectProvenance))
+	mux.HandleFunc("POST /api/projects/{id}/provenance", s.requireAuth(s.handleRecordProjectProvenance))
 
 	mux.HandleFunc("GET /api/library/changes", s.requireAuth(s.handleLibraryChanges))
 	mux.HandleFunc("POST /api/library/sync", s.requireAuth(s.handleLibrarySync))
@@ -340,13 +342,19 @@ func main() {
 
 	args := os.Args[1:]
 	isMCPSubcmd := false
-	if len(args) > 0 && (args[0] == "mcp" || args[0] == "serve") {
+	isInitSubcmd := false
+	var subcmdPositional []string
+	if len(args) > 0 && (args[0] == "mcp" || args[0] == "serve" || args[0] == "init") {
 		if args[0] == "mcp" {
 			isMCPSubcmd = true
+		} else if args[0] == "init" {
+			isInitSubcmd = true
 		}
 		_ = flag.CommandLine.Parse(args[1:])
+		subcmdPositional = flag.Args()
 	} else {
 		flag.Parse()
+		subcmdPositional = flag.Args()
 	}
 	if *mcpFlag {
 		isMCPSubcmd = true
@@ -361,9 +369,9 @@ func main() {
 
 	mode := strings.ToLower(strings.TrimSpace(*modeFlag))
 	if mode == "" {
-		defaultMode := "hosted"
-		if isMCPSubcmd && strings.TrimSpace(os.Getenv("DATABASE_URL")) == "" {
-			defaultMode = "local"
+		defaultMode := "local"
+		if !isMCPSubcmd && !isInitSubcmd && strings.TrimSpace(os.Getenv("DATABASE_URL")) != "" {
+			defaultMode = "hosted"
 		}
 		mode = strings.ToLower(envOrDefault("DUPE_MODE", defaultMode))
 	}
@@ -471,7 +479,7 @@ func main() {
 		webDistDir:    webDistDir,
 	}
 
-	if mode == "local" && !isMCPSubcmd {
+	if mode == "local" && !isMCPSubcmd && !isInitSubcmd {
 		initSyncURL := strings.TrimSpace(*syncURLFlag)
 		if initSyncURL == "" {
 			initSyncURL = envOrDefault("DUPE_SYNC_URL", "")
@@ -491,6 +499,20 @@ func main() {
 			_ = srv.saveRemoteSyncConfig(cfg)
 		}
 		go srv.startBackgroundRemoteSync(ctx)
+	}
+
+	if isInitSubcmd {
+		targetDir := "."
+		if len(subcmdPositional) > 0 && strings.TrimSpace(subcmdPositional[0]) != "" {
+			targetDir = subcmdPositional[0]
+		}
+		cfg, absProjDir, initErr := srv.initProjectInDir(ctx, 1, "local", targetDir)
+		if initErr != nil {
+			slog.Error("failed to initialize dupe project", "path", targetDir, "error", initErr)
+			os.Exit(1)
+		}
+		fmt.Printf("Initialized dupe project %q at %s\n", cfg.Name, absProjDir)
+		return
 	}
 
 	if isMCPSubcmd {
