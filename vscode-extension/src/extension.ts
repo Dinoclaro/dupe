@@ -761,6 +761,38 @@ export function activate(context: vscode.ExtensionContext): void {
       qp.show();
     }),
 
+    vscode.commands.registerCommand('dupe.openLatestArtifact', async () => {
+      const proj = await pickProjectOrWarn();
+      if (!proj) {
+        return;
+      }
+      const projRoot = await resolveProjectRoot(proj);
+      if (!projRoot) {
+        return;
+      }
+      notesIndex.rebuild(projRoot);
+      const artifacts = notesIndex.getArtifacts();
+      if (artifacts.length === 0) {
+        void vscode.window.showInformationMessage(
+          'No agent artifacts in notes/artifacts/ yet.',
+        );
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        artifacts.map((a, idx) => ({
+          label: `$(sparkle) ${a.title}`,
+          description: idx === 0 ? 'latest' : a.tags.map((t) => `#${t}`).join(' '),
+          detail: a.relPath,
+          absPath: a.absPath,
+        })),
+        { placeHolder: 'Select an agent artifact to preview' },
+      );
+      if (!picked) {
+        return;
+      }
+      await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(picked.absPath));
+    }),
+
     // Daily Note (Alt+D)
     vscode.commands.registerCommand('dupe.dailyNote', async () => {
       const today = new Date().toISOString().slice(0, 10);

@@ -186,6 +186,9 @@ describe('dupe VS Code extension helpers', () => {
       );
       fs.writeFileSync(path.join(projDir, 'notes', 'ideas.md'), '# Ideas\n\nTarget note #core\n');
       fs.writeFileSync(path.join(projDir, 'notes', 'daily', '2026-11-22.md'), 'See [[ideas]] and [[paper:chi2023diffusion]]\n');
+      fs.mkdirSync(path.join(projDir, 'notes', 'artifacts'), { recursive: true });
+      fs.writeFileSync(path.join(projDir, 'notes', 'artifacts', '2026-11-27-first.md'), '# First\n');
+      fs.writeFileSync(path.join(projDir, 'notes', 'artifacts', '2026-11-28-second.md'), '# Second\n');
 
       expect(findDupeProjectRoot(path.join(projDir, 'paper', 'sections'))).toBe(projDir);
       expect(discoverProjectsInWorkspace([tmpRoot])).toHaveLength(1);
@@ -193,7 +196,8 @@ describe('dupe VS Code extension helpers', () => {
 
       const idx = new NotesIndex();
       idx.rebuild(projDir);
-      expect(idx.getNotes()).toHaveLength(2);
+      expect(idx.getNotes()).toHaveLength(4);
+      expect(idx.getArtifacts().map((a) => a.title)).toContain('2026-11-28-second');
 
       const targetNote = idx.resolveNoteTarget('ideas')!;
       expect(targetNote.relPath).toBe('notes/ideas.md');

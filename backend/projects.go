@@ -368,7 +368,7 @@ func cleanLatexSnippetForSummary(raw string) string {
 	return joined
 }
 
-func extractPaperSummaryFromDisk(projectDir string) (string, []string, []string) {
+func extractPaperSummaryFromDisk(projectDir string) (string, []string, []string, []string) {
 	paperDir := filepath.Join(projectDir, "paper")
 	abstractText := ""
 	if absBytes, err := os.ReadFile(filepath.Join(paperDir, "abstract.tex")); err == nil {
@@ -412,7 +412,18 @@ func extractPaperSummaryFromDisk(projectDir string) (string, []string, []string)
 		}
 	}
 	sort.Strings(noteNames)
-	return abstractText, sections, noteNames
+
+	var artifactNames []string
+	artifactsDir := filepath.Join(notesDir, "artifacts")
+	if entries, err := os.ReadDir(artifactsDir); err == nil {
+		for _, de := range entries {
+			if !de.IsDir() && strings.HasSuffix(de.Name(), ".md") {
+				artifactNames = append(artifactNames, "notes/artifacts/"+de.Name())
+			}
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(artifactNames)))
+	return abstractText, sections, noteNames, artifactNames
 }
 
 const (
@@ -756,7 +767,7 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	customSummaryBytes, _ := os.ReadFile(filepath.Join(projectDir, ".dupe", "summary.md"))
 	customSummary := strings.TrimSpace(string(customSummaryBytes))
 	userDescription := resolveUserDescription(projectDir)
-	abstractText, sections, noteNames := extractPaperSummaryFromDisk(projectDir)
+	abstractText, sections, noteNames, artifactNames := extractPaperSummaryFromDisk(projectDir)
 	codeTargets := collectLinkedSubdirTargets(filepath.Join(projectDir, "code"))
 	paperTargets := collectLinkedSubdirTargets(filepath.Join(projectDir, "paper"))
 
@@ -800,19 +811,29 @@ func buildProjectAgentsMD(ctx context.Context, projectDir string, cfg ProjectCon
 	if len(noteNames) > 0 {
 		b.WriteString(fmt.Sprintf("- **Active Notes:** %s\n", strings.Join(noteNames, ", ")))
 	}
+	if len(artifactNames) > 0 {
+		limit := len(artifactNames)
+		if limit > 8 {
+			limit = 8
+		}
+		b.WriteString(fmt.Sprintf("- **Recent Agent Artifacts:** %s\n", strings.Join(artifactNames[:limit], ", ")))
+	}
 	b.WriteString("\n")
 
 	b.WriteString("## 2. Project Structure\n\n")
 	b.WriteString("- `paper/`: Overleaf-linked LaTeX repository or linked paper subdirectories (`dupe_references.bib`, `figures/`).\n")
 	b.WriteString("- `code/`: Linked code repository or subdirectories (edited in VS Code).\n")
 	b.WriteString("- `notes/`: Markdown research notes (`*.md`) and `notes/comments.md` annotation queue.\n")
-	b.WriteString("- `scratch/`: Temporary test scripts and experimental files for agents (gitignored).\n")
+	b.WriteString("- `notes/artifacts/`: Agent-authored reports, plans, and summaries (`YYYY-MM-DD-<slug>.md`, synced across machines).\n")
+	b.WriteString("- `scratch/`: Temporary test scripts and experimental files inside this project (gitignored; never use `~/scratch` or `/tmp`).\n")
 	b.WriteString("- `refs/index.json`: Metadata and BibTeX keys for linked reference papers.\n")
 	b.WriteString("- `refs/text/<bibtex_key>.md`: Extracted full text of each reference paper.\n\n")
 
 	b.WriteString("## 3. Rules for Agents\n\n")
 	b.WriteString("- Edit LaTeX manuscripts in `paper/` and research notes in `notes/`.\n")
-	b.WriteString("- Put temporary test scripts and agent experiments in `scratch/`.\n")
+	b.WriteString("- Enforce project-local scratch: put all temporary scripts, logs, and experimental outputs in `<project>/scratch/`, never `~/scratch` or `/tmp`.\n")
+	b.WriteString("- Communicate findings via artifacts in `notes/artifacts/<YYYY-MM-DD>-<slug>.md` and reply in chat/terminal with only the artifact path and a 2-3 line TL;DR.\n")
+	b.WriteString("- Keep all artifacts and reports succinct and to the point; prefer Mermaid diagrams (`flowchart`, `sequenceDiagram`) and compact bullets/tables over blocks of paragraphs.\n")
 	b.WriteString("- Check **Open Comments** below (and `notes/comments.md`) for user annotations and tasks.\n")
 	b.WriteString("- When you address an open comment (`- [ ]`), mark it `- [x]` and move it under `## Addressed Comments` in `notes/comments.md`.\n")
 	b.WriteString("- When you address items in `notes/changes.md` or other feedback notes in `notes/`, mark them `- [x]` and move them under `## Addressed` at the bottom of that file.\n")
@@ -1042,10 +1063,11 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 	figuresDir := filepath.Join(paperDir, "figures")
 	codeDir := filepath.Join(projectDir, "code")
 	notesDir := filepath.Join(projectDir, "notes")
+	artifactsDir := filepath.Join(notesDir, "artifacts")
 	scratchDir := filepath.Join(projectDir, "scratch")
 	refsTextDir := filepath.Join(projectDir, "refs", "text")
 
-	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, scratchDir, refsTextDir} {
+	for _, d := range []string{paperDir, figuresDir, codeDir, notesDir, artifactsDir, scratchDir, refsTextDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

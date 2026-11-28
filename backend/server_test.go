@@ -845,6 +845,12 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(projDir, "scratch")); statErr != nil {
 		t.Fatalf("expected scratch/ directory to exist: %v", statErr)
 	}
+	if _, statErr := os.Stat(filepath.Join(projDir, "notes", "artifacts")); statErr != nil {
+		t.Fatalf("expected notes/artifacts/ directory to exist: %v", statErr)
+	}
+	if !strings.Contains(string(afterAgents), "notes/artifacts/") || !strings.Contains(string(afterAgents), "Mermaid") {
+		t.Fatalf("expected AGENTS.md to include artifact and Mermaid reporting rules, got:\n%s", string(afterAgents))
+	}
 	giBytes, _ := os.ReadFile(filepath.Join(projDir, ".gitignore"))
 	for _, pat := range []string{"paper/", "code/", "scratch/", ".dupe/build/", ".dupe/notes_history/"} {
 		if !strings.Contains(string(giBytes), pat) {

@@ -394,6 +394,22 @@ export class NotesIndex {
     return this.notes;
   }
 
+  getArtifacts(): NoteEntry[] {
+    return this.notes
+      .filter((n) => n.relPath.startsWith('notes/artifacts/'))
+      .sort((a, b) => {
+        try {
+          const mtimeDiff = fs.statSync(b.absPath).mtimeMs - fs.statSync(a.absPath).mtimeMs;
+          if (mtimeDiff !== 0) {
+            return mtimeDiff;
+          }
+        } catch {
+          // fall back to reverse filename sort
+        }
+        return b.slug.localeCompare(a.slug);
+      });
+  }
+
   getTagsMap(): Map<string, NoteEntry[]> {
     return this.tagsIndex;
   }
