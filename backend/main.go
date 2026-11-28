@@ -176,6 +176,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/context", s.requireAuth(s.handleGatherProjectContext))
 	mux.HandleFunc("GET /api/projects/{id}/provenance", s.requireAuth(s.handleGetProjectProvenance))
 	mux.HandleFunc("POST /api/projects/{id}/provenance", s.requireAuth(s.handleRecordProjectProvenance))
+	mux.HandleFunc("GET /api/projects/{id}/brain", s.requireAuth(s.handleGetProjectBrain))
 
 	mux.HandleFunc("GET /api/library/changes", s.requireAuth(s.handleLibraryChanges))
 	mux.HandleFunc("POST /api/library/sync", s.requireAuth(s.handleLibrarySync))

@@ -1,7 +1,16 @@
 import * as vscode from 'vscode';
 import { filterPapersByQuery } from './citations';
 import { NotesIndex } from './notesIndex';
-import { BacklinkHit, LocalStatus, LocalUpdateInfo, NoteEntry, Paper, ProjectConfig, RemoteSyncStatus } from './types';
+import {
+  BacklinkHit,
+  LocalStatus,
+  LocalUpdateInfo,
+  NoteEntry,
+  Paper,
+  ProjectConfig,
+  RemoteSyncStatus,
+  UnlinkedMentionHit,
+} from './types';
 
 export class PaperTreeItem extends vscode.TreeItem {
   constructor(
@@ -103,6 +112,20 @@ export class BacklinkTreeItem extends vscode.TreeItem {
   }
 }
 
+export class UnlinkedMentionTreeItem extends vscode.TreeItem {
+  constructor(public readonly mention: UnlinkedMentionHit) {
+    super(`Link: ${mention.sourceRelPath}:${mention.line}`, vscode.TreeItemCollapsibleState.None);
+    this.description = `"${mention.matchedText}" — click to [[link]]`;
+    this.iconPath = new vscode.ThemeIcon('link');
+    this.tooltip = `${mention.preview}\n\nClick to convert "${mention.matchedText}" into [[${mention.targetSlug}|${mention.matchedText}]]`;
+    this.command = {
+      command: 'dupe.linkUnlinkedMention',
+      title: 'Convert Unlinked Mention to [[Wikilink]]',
+      arguments: [mention],
+    };
+  }
+}
+
 export class PaperLibraryProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
   private readonly onDidChangeEmitter = new vscode.EventEmitter<vscode.TreeItem | undefined>();
   readonly onDidChangeTreeData = this.onDidChangeEmitter.event;
@@ -187,17 +210,37 @@ export class NotesAndBacklinksProvider implements vscode.TreeDataProvider<vscode
 
   getChildren(): vscode.TreeItem[] {
     const hits = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
+    const unlinked = this.activeFilePath
+      ? this.notesIndex.getUnlinkedMentionsForNote(this.activeFilePath)
+      : [];
+
+    const items: vscode.TreeItem[] = [
+      new InfoTreeItem(
+        'Open Knowledge Graph (Alt+G)',
+        'Explore notes, artifacts, papers & code links',
+        'type-hierarchy',
+        { command: 'dupe.openKnowledgeGraph', title: 'Open Knowledge Graph' },
+      ),
+    ];
+
     if (hits.length === 0) {
-      return [
+      items.push(
         new InfoTreeItem(
           'No backlinks to current file',
           'Link notes with [[note-name]] · Quick Switcher: Alt+O',
           'circle-outline',
           { command: 'dupe.quickOpenNote', title: 'Quick Switcher' },
         ),
-      ];
+      );
+    } else {
+      items.push(...hits.map((h) => new BacklinkTreeItem(h)));
     }
-    return hits.map((h) => new BacklinkTreeItem(h));
+
+    if (unlinked.length > 0) {
+      items.push(...unlinked.map((u) => new UnlinkedMentionTreeItem(u)));
+    }
+
+    return items;
   }
 }
 

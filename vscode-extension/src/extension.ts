@@ -5,6 +5,7 @@ import path from 'node:path';
 import * as vscode from 'vscode';
 import { DupeApiClient } from './api';
 import { loadProjectBibMetadata } from './bibParser';
+import { BrainGraphPanel } from './brainGraphPanel';
 import { DupeCitationFeatures } from './citationFeatures';
 import { formatCitationSnippet, paperFromLocalRefIndex } from './citations';
 import {
@@ -47,6 +48,7 @@ import {
   Paper,
   ProjectConfig,
   RemoteSyncStatus,
+  UnlinkedMentionHit,
 } from './types';
 
 const STARTER_MAIN_TEX = `\\documentclass[conference]{IEEEtran}
@@ -76,6 +78,7 @@ Start writing your introduction here.
 export function activate(context: vscode.ExtensionContext): void {
   const api = new DupeApiClient();
   const pdfViewer = new DupePdfViewer(context.extensionUri);
+  const brainGraphPanel = new BrainGraphPanel();
   const notesIndex = new NotesIndex();
   const paperProvider = new PaperLibraryProvider();
   const notesProvider = new NotesAndBacklinksProvider(notesIndex);
@@ -238,11 +241,28 @@ export function activate(context: vscode.ExtensionContext): void {
     return null;
   }
 
+  function buildCurrentBrainGraph() {
+    const opts = brainGraphPanel.getQueryOptions();
+    const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath || null;
+    return notesIndex.buildBrainGraphPayload(activeProjectRoot, papers, {
+      focusPath: activeFsPath,
+      depth: opts.localMode ? opts.depth : 0,
+      includeAgentBrain: opts.includeAgentBrain,
+    });
+  }
+
+  function refreshBrainGraphIfOpen(): void {
+    if (brainGraphPanel.isOpen()) {
+      brainGraphPanel.postGraph(buildCurrentBrainGraph());
+    }
+  }
+
   function rebuildLocalIndices(): void {
     bibMap = loadProjectBibMetadata(activeProjectRoot, papers);
     notesIndex.rebuild(activeProjectRoot);
     const activeFsPath = vscode.window.activeTextEditor?.document.uri.fsPath || null;
     notesProvider.refresh(activeFsPath);
+    refreshBrainGraphIfOpen();
   }
 
   function getSerializableBibMap(): Record<string, BibMetadata> {
@@ -2109,6 +2129,100 @@ export function activate(context: vscode.ExtensionContext): void {
       });
     }),
 
+    vscode.commands.registerCommand('dupe.openKnowledgeGraph', async () => {
+      if (!activeProjectRoot) {
+        void vscode.window.showWarningMessage('Open a dupe project folder first.');
+        return;
+      }
+      const rootDir = activeProjectRoot;
+      brainGraphPanel.open(buildCurrentBrainGraph(), {
+        onOpenPath: async (relPath) => {
+          const absPath = path.join(rootDir, relPath);
+          if (fs.existsSync(absPath)) {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
+          }
+        },
+        onOpenPaperByKey: async (key) => {
+          await vscode.commands.executeCommand('dupe.openPaperByKey', key);
+        },
+        onCreateGhostNote: async (label, relPath) => {
+          const targetRel = relPath.startsWith('notes/') ? relPath : `notes/concepts/${label}.md`;
+          const absPath = path.join(rootDir, targetRel);
+          if (!fs.existsSync(absPath)) {
+            await fsp.mkdir(path.dirname(absPath), { recursive: true });
+            const seed = [
+              '---',
+              'type: concept',
+              'status: seed',
+              'tags: [concept]',
+              '---',
+              '',
+              `# ${label}`,
+              '',
+              'Connected to [[MOC]].',
+              '',
+            ].join('\n');
+            await fsp.writeFile(absPath, seed, 'utf8');
+          }
+          rebuildLocalIndices();
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
+        },
+        onRequestRefresh: async () => {
+          refreshBrainGraphIfOpen();
+        },
+      });
+    }),
+
+    vscode.commands.registerCommand('dupe.openAgentBlackboard', async () => {
+      if (!activeProjectRoot) {
+        void vscode.window.showWarningMessage('Open a dupe project folder first.');
+        return;
+      }
+      const boardPath = path.join(activeProjectRoot, '.dupe', 'brain', 'blackboard.md');
+      if (!fs.existsSync(boardPath)) {
+        await fsp.mkdir(path.join(activeProjectRoot, '.dupe', 'brain', 'topics'), { recursive: true });
+        await fsp.writeFile(
+          boardPath,
+          '# Agent Brain & Blackboard (Gitignored)\n\nAgents collaborate here without bloating `notes/`.\n',
+          'utf8',
+        );
+      }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(boardPath));
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }),
+
+    vscode.commands.registerCommand(
+      'dupe.linkUnlinkedMention',
+      async (mention?: UnlinkedMentionHit) => {
+        if (!mention) return;
+        try {
+          const raw = await fsp.readFile(mention.sourceAbsPath, 'utf8');
+          const lines = raw.split(/\r?\n/);
+          const idx = mention.line - 1;
+          if (idx < 0 || idx >= lines.length) return;
+          const linkText =
+            mention.matchedText.toLowerCase() === mention.targetSlug.toLowerCase()
+              ? `[[${mention.targetSlug}]]`
+              : `[[${mention.targetSlug}|${mention.matchedText}]]`;
+          const updatedLine = lines[idx].replace(mention.matchedText, linkText);
+          if (updatedLine === lines[idx]) return;
+          lines[idx] = updatedLine;
+          await fsp.writeFile(mention.sourceAbsPath, lines.join('\n'), 'utf8');
+          rebuildLocalIndices();
+          void vscode.window.showInformationMessage(
+            `Linked "${mention.matchedText}" in ${mention.sourceRelPath} -> ${linkText}.`,
+          );
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `Failed to link mention: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      },
+    ),
+
+    brainGraphPanel,
     herdrWatcher,
     statusHerdrItem,
 
@@ -2136,6 +2250,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void refreshAll();
       } else {
         notesProvider.refresh(fsPath);
+        refreshBrainGraphIfOpen();
       }
     }),
     vscode.workspace.onDidSaveTextDocument((doc) => {
@@ -2143,7 +2258,12 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       const fsPath = doc.uri.fsPath;
-      if (fsPath.endsWith('.md') && activeProjectRoot && fsPath.startsWith(path.join(activeProjectRoot, 'notes'))) {
+      if (
+        fsPath.endsWith('.md') &&
+        activeProjectRoot &&
+        (fsPath.startsWith(path.join(activeProjectRoot, 'notes')) ||
+          fsPath.startsWith(path.join(activeProjectRoot, '.dupe', 'brain')))
+      ) {
         rebuildLocalIndices();
         return;
       }

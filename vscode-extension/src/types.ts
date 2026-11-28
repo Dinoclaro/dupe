@@ -177,7 +177,12 @@ export interface NoteEntry {
   absPath: string;
   slug: string;
   tags: string[];
+  aliases?: string[];
+  frontmatterType?: string;
   outgoingLinks: string[];
+  lineCount?: number;
+  byteSize?: number;
+  isBloated?: boolean;
 }
 
 export interface BacklinkHit {
@@ -185,4 +190,59 @@ export interface BacklinkHit {
   sourceAbsPath: string;
   line: number;
   preview: string;
+}
+
+export interface UnlinkedMentionHit {
+  sourceRelPath: string;
+  sourceAbsPath: string;
+  targetSlug: string;
+  targetRelPath: string;
+  matchedText: string;
+  line: number;
+  preview: string;
+}
+
+export type BrainNodeKind =
+  | 'moc'
+  | 'concept'
+  | 'note'
+  | 'artifact'
+  | 'blackboard'
+  | 'paper'
+  | 'tex'
+  | 'code'
+  | 'ghost';
+
+export interface BrainGraphNode {
+  id: string;
+  label: string;
+  kind: BrainNodeKind;
+  path: string;
+  tags: string[];
+  aliases?: string[];
+  degree: number;
+  backlinks: number;
+  lines?: number;
+  bloated?: boolean;
+  snippet?: string;
+}
+
+export interface BrainGraphEdge {
+  source: string;
+  target: string;
+  kind: 'wikilink' | 'cite' | 'provenance';
+}
+
+export interface BrainGraphPayload {
+  nodes: BrainGraphNode[];
+  edges: BrainGraphEdge[];
+  focusNodeId: string | null;
+  summary: {
+    curatedNoteCount: number;
+    artifactCount: number;
+    blackboardCount: number;
+    orphanCount: number;
+    ghostCount: number;
+    bloatedCount: number;
+  };
 }

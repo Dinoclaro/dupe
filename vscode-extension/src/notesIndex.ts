@@ -1,6 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { BacklinkHit, NoteEntry } from './types';
+import {
+  BacklinkHit,
+  BrainGraphEdge,
+  BrainGraphNode,
+  BrainGraphPayload,
+  BrainNodeKind,
+  NoteEntry,
+  Paper,
+  UnlinkedMentionHit,
+} from './types';
 
 export interface WikiLinkOccurrence {
   kind: 'note' | 'paper';
@@ -12,9 +21,98 @@ export interface WikiLinkOccurrence {
   endOffset: number;
 }
 
+export interface ParsedFrontmatter {
+  type?: string;
+  status?: string;
+  tags: string[];
+  aliases: string[];
+}
+
+export const CURATED_BRAIN_MAX_LINES = 150;
+export const CURATED_BRAIN_MAX_BYTES = 8 * 1024;
+
 const WIKI_LINK_RE = /(!?)\[\[([^\]\n]+)\]\]/g;
 const MARKDOWN_TAG_RE = /(?:^|[\s,(])#([a-zA-Z][a-zA-Z0-9_/-]*)/g;
 const LATEX_CITE_KEYS_RE = /\\cite[a-zA-Z*]*\{([^}]+)\}/g;
+
+export function parseMarkdownFrontmatter(content: string): {
+  frontmatter: ParsedFrontmatter;
+  body: string;
+  bodyStartLine: number;
+} {
+  const norm = content.replace(/\r\n/g, '\n');
+  if (!norm.startsWith('---\n')) {
+    return { frontmatter: { tags: [], aliases: [] }, body: norm, bodyStartLine: 0 };
+  }
+  const rest = norm.slice(4);
+  let endIdx = rest.indexOf('\n---\n');
+  let delimiterLen = 5;
+  if (endIdx < 0) {
+    if (rest.endsWith('\n---')) {
+      endIdx = rest.length - 4;
+      delimiterLen = 4;
+    } else {
+      return { frontmatter: { tags: [], aliases: [] }, body: norm, bodyStartLine: 0 };
+    }
+  }
+
+  const header = rest.slice(0, endIdx);
+  const body = rest.slice(endIdx + delimiterLen);
+  const bodyStartLine = header.split('\n').length + 2;
+
+  const frontmatter: ParsedFrontmatter = { tags: [], aliases: [] };
+  let activeListKey: 'tags' | 'aliases' | null = null;
+  for (const rawLine of header.split('\n')) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (trimmed.startsWith('- ') && activeListKey) {
+      const item = trimmed
+        .slice(2)
+        .trim()
+        .replace(/^['"]|['"]$/g, '');
+      if (item) {
+        if (activeListKey === 'tags') {
+          frontmatter.tags.push(item.replace(/^#/, ''));
+        } else {
+          frontmatter.aliases.push(item);
+        }
+      }
+      continue;
+    }
+    activeListKey = null;
+    const colon = trimmed.indexOf(':');
+    if (colon <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, colon).trim().toLowerCase();
+    const rawVal = trimmed.slice(colon + 1).trim();
+    if (key === 'type') {
+      frontmatter.type = rawVal.replace(/^['"]|['"]$/g, '').toLowerCase();
+    } else if (key === 'status') {
+      frontmatter.status = rawVal.replace(/^['"]|['"]$/g, '');
+    } else if (key === 'tags' || key === 'aliases') {
+      if (!rawVal) {
+        activeListKey = key;
+        continue;
+      }
+      const cleaned = rawVal.replace(/^\[|\]$/g, '');
+      for (const part of cleaned.split(',')) {
+        const item = part.trim().replace(/^['"]|['"]$/g, '');
+        if (!item) {
+          continue;
+        }
+        if (key === 'tags') {
+          frontmatter.tags.push(item.replace(/^#/, ''));
+        } else {
+          frontmatter.aliases.push(item);
+        }
+      }
+    }
+  }
+  return { frontmatter, body, bodyStartLine };
+}
 
 export function extractWikiLinksInLine(lineText: string): WikiLinkOccurrence[] {
   const results: WikiLinkOccurrence[] = [];
@@ -66,7 +164,13 @@ export function extractWikiLinksInLine(lineText: string): WikiLinkOccurrence[] {
 
 export function extractMarkdownTags(content: string): string[] {
   const tags = new Set<string>();
-  const lines = content.split(/\r?\n/);
+  const { frontmatter, body } = parseMarkdownFrontmatter(content);
+  for (const t of frontmatter.tags) {
+    if (t) {
+      tags.add(t);
+    }
+  }
+  const lines = body.split(/\r?\n/);
   let inFence = false;
   for (const line of lines) {
     if (line.trimStart().startsWith('```')) {
@@ -166,6 +270,25 @@ export function normalizeNoteRelPath(rawName: string): string {
   return path.posix.normalize(`notes/${clean}`);
 }
 
+export function sanitizeBrainSlug(raw: string): string {
+  const clean = raw
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
+  return clean || 'concept';
+}
+
+function isUtilityHumanNote(relPath: string): boolean {
+  const norm = relPath.replace(/\\/g, '/').toLowerCase();
+  const base = path.posix.basename(norm);
+  if (['comments.md', 'changes.md', 'paperchanges.md', 'agents.user.md'].includes(base)) {
+    return true;
+  }
+  return norm.startsWith('notes/daily/');
+}
+
 export function formatCommentBlock(params: {
   source: string;
   location?: string;
@@ -261,17 +384,25 @@ export function insertCommentIntoTargetNote(
   return `${normalized.replace(/\n+$/, '')}\n\n## Comments\n\n${block}\n`;
 }
 
+function escapeRegex(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export class NotesIndex {
   private notes: NoteEntry[] = [];
   private backlinksByTarget = new Map<string, BacklinkHit[]>();
   private backlinksByPaperKey = new Map<string, BacklinkHit[]>();
   private tagsIndex = new Map<string, NoteEntry[]>();
+  private contentByAbsPath = new Map<string, string>();
+  private texCitations: Array<{ relPath: string; keys: string[] }> = [];
 
   rebuild(projectRoot: string | null): void {
     this.notes = [];
     this.backlinksByTarget.clear();
     this.backlinksByPaperKey.clear();
     this.tagsIndex.clear();
+    this.contentByAbsPath.clear();
+    this.texCitations = [];
 
     if (!projectRoot) {
       return;
@@ -292,9 +423,16 @@ export class NotesIndex {
         continue;
       }
 
+      this.contentByAbsPath.set(absPath, content);
+      const { frontmatter } = parseMarkdownFrontmatter(content);
       const tags = extractMarkdownTags(content);
       const outgoingLinks: string[] = [];
       const lines = content.split(/\r?\n/);
+      const lineCount = lines.length;
+      const byteSize = Buffer.byteLength(content, 'utf8');
+      const isBloated =
+        !isUtilityHumanNote(relPath) &&
+        (lineCount > CURATED_BRAIN_MAX_LINES || byteSize > CURATED_BRAIN_MAX_BYTES);
 
       lines.forEach((lineText, idx) => {
         for (const link of extractWikiLinksInLine(lineText)) {
@@ -317,7 +455,12 @@ export class NotesIndex {
         absPath,
         slug,
         tags,
+        aliases: frontmatter.aliases,
+        frontmatterType: frontmatter.type,
         outgoingLinks,
+        lineCount,
+        byteSize,
+        isBloated,
       };
       this.notes.push(entry);
 
@@ -328,14 +471,9 @@ export class NotesIndex {
       }
     }
 
-    // Populate note backlinks after all notes are indexed so targets resolve accurately
+    // Populate note backlinks after all notes are indexed so aliases/slugs resolve accurately
     for (const note of this.notes) {
-      let content = '';
-      try {
-        content = fs.readFileSync(note.absPath, 'utf8');
-      } catch {
-        continue;
-      }
+      const content = this.contentByAbsPath.get(note.absPath) || '';
       const lines = content.split(/\r?\n/);
       lines.forEach((lineText, idx) => {
         for (const link of extractWikiLinksInLine(lineText)) {
@@ -368,6 +506,7 @@ export class NotesIndex {
         continue;
       }
       const lines = content.split(/\r?\n/);
+      const keysInFile = new Set<string>();
       lines.forEach((lineText, idx) => {
         LATEX_CITE_KEYS_RE.lastIndex = 0;
         let m: RegExpExecArray | null;
@@ -375,6 +514,7 @@ export class NotesIndex {
           for (const rawKey of m[1].split(',')) {
             const key = rawKey.trim();
             if (key) {
+              keysInFile.add(key);
               this.addPaperBacklink(key, {
                 sourceRelPath: relPath,
                 sourceAbsPath: absTex,
@@ -385,6 +525,7 @@ export class NotesIndex {
           }
         }
       });
+      this.texCitations.push({ relPath, keys: Array.from(keysInFile) });
     }
 
     this.notes.sort((a, b) => a.slug.localeCompare(b.slug));
@@ -415,13 +556,20 @@ export class NotesIndex {
   }
 
   resolveNoteTarget(target: string): NoteEntry | null {
-    const clean = target.trim().replace(/\\/g, '/').replace(/^notes\//i, '').replace(/\.md$/i, '').toLowerCase();
+    const clean = target
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/^notes\//i, '')
+      .replace(/\.md$/i, '')
+      .toLowerCase();
     if (!clean) {
       return null;
     }
     return (
       this.notes.find((n) => n.slug.toLowerCase() === clean) ||
+      this.notes.find((n) => n.slug.replace(/^concepts\//i, '').toLowerCase() === clean) ||
       this.notes.find((n) => n.title.toLowerCase() === clean) ||
+      this.notes.find((n) => (n.aliases || []).some((a) => a.toLowerCase() === clean)) ||
       null
     );
   }
@@ -432,6 +580,350 @@ export class NotesIndex {
 
   getBacklinksForPaper(bibtexKey: string): BacklinkHit[] {
     return this.backlinksByPaperKey.get(bibtexKey) || [];
+  }
+
+  getUnlinkedMentionsForNote(absPath: string): UnlinkedMentionHit[] {
+    const targetNote = this.notes.find((n) => n.absPath === absPath);
+    if (!targetNote || isUtilityHumanNote(targetNote.relPath)) {
+      return [];
+    }
+    const terms = Array.from(
+      new Set(
+        [targetNote.title, targetNote.title.replace(/[-_]+/g, ' '), ...(targetNote.aliases || [])]
+          .map((t) => t.trim())
+          .filter((t) => t.length >= 4),
+      ),
+    );
+    if (terms.length === 0) {
+      return [];
+    }
+
+    const pattern = new RegExp(`\\b(${terms.map(escapeRegex).join('|')})\\b`, 'i');
+    const hits: UnlinkedMentionHit[] = [];
+
+    for (const source of this.notes) {
+      if (source.absPath === absPath || isUtilityHumanNote(source.relPath)) {
+        continue;
+      }
+      const raw = this.contentByAbsPath.get(source.absPath) || '';
+      const { bodyStartLine } = parseMarkdownFrontmatter(raw);
+      const lines = raw.split(/\r?\n/);
+      let inFence = false;
+      lines.forEach((lineText, idx) => {
+        if (idx < bodyStartLine) {
+          return;
+        }
+        const trimmed = lineText.trim();
+        if (trimmed.startsWith('```')) {
+          inFence = !inFence;
+          return;
+        }
+        if (inFence || trimmed.startsWith('#')) {
+          return;
+        }
+        const stripped = lineText.replace(/!?\[\[[^\]\n]+\]\]/g, (m) => ' '.repeat(m.length));
+        const m = pattern.exec(stripped);
+        if (m) {
+          hits.push({
+            sourceRelPath: source.relPath,
+            sourceAbsPath: source.absPath,
+            targetSlug: targetNote.slug,
+            targetRelPath: targetNote.relPath,
+            matchedText: m[1],
+            line: idx + 1,
+            preview: trimmed,
+          });
+        }
+      });
+    }
+    return hits;
+  }
+
+  buildBrainGraphPayload(
+    projectRoot: string | null,
+    papers: Paper[],
+    options: {
+      focusPath?: string | null;
+      depth?: number;
+      includeAgentBrain?: boolean;
+    } = {},
+  ): BrainGraphPayload {
+    const nodeMap = new Map<string, BrainGraphNode>();
+    const edges: BrainGraphEdge[] = [];
+    const edgeSeen = new Set<string>();
+
+    const addEdge = (source: string, target: string, kind: BrainGraphEdge['kind']) => {
+      if (!source || !target || source === target) {
+        return;
+      }
+      const key = `${source}->${target}:${kind}`;
+      if (edgeSeen.has(key)) {
+        return;
+      }
+      edgeSeen.add(key);
+      edges.push({ source, target, kind });
+    };
+
+    const noteKind = (n: NoteEntry): BrainNodeKind => {
+      if (n.relPath === 'notes/MOC.md' || n.frontmatterType === 'moc') return 'moc';
+      if (n.relPath.startsWith('notes/artifacts/') || n.frontmatterType === 'artifact') return 'artifact';
+      if (n.relPath.startsWith('notes/concepts/') || n.frontmatterType === 'concept') return 'concept';
+      return 'note';
+    };
+
+    for (const n of this.notes) {
+      const id = `note:${n.relPath}`;
+      nodeMap.set(id, {
+        id,
+        label: n.title,
+        kind: noteKind(n),
+        path: n.relPath,
+        tags: n.tags,
+        aliases: n.aliases,
+        degree: 0,
+        backlinks: 0,
+        lines: n.lineCount,
+        bloated: n.isBloated,
+      });
+    }
+
+    const paperByKey = new Map<string, Paper>();
+    for (const p of papers) {
+      if (!p.bibtex_key) continue;
+      paperByKey.set(p.bibtex_key.toLowerCase(), p);
+      const pid = `paper:${p.bibtex_key}`;
+      nodeMap.set(pid, {
+        id: pid,
+        label: `@${p.bibtex_key}`,
+        kind: 'paper',
+        path: `refs/text/${p.bibtex_key}.md`,
+        tags: p.tags || [],
+        degree: 0,
+        backlinks: 0,
+        snippet: p.title,
+      });
+    }
+
+    const ensurePaper = (key: string): string => {
+      const found = paperByKey.get(key.toLowerCase());
+      const pid = `paper:${found ? found.bibtex_key : key}`;
+      if (!nodeMap.has(pid)) {
+        nodeMap.set(pid, {
+          id: pid,
+          label: `@${key}`,
+          kind: 'paper',
+          path: '',
+          tags: [],
+          degree: 0,
+          backlinks: 0,
+        });
+      }
+      return pid;
+    };
+
+    for (const n of this.notes) {
+      const srcId = `note:${n.relPath}`;
+      const raw = this.contentByAbsPath.get(n.absPath) || '';
+      for (const line of raw.split(/\r?\n/)) {
+        for (const link of extractWikiLinksInLine(line)) {
+          if (link.kind === 'paper') {
+            addEdge(srcId, ensurePaper(link.target), 'cite');
+          } else {
+            const resolved = this.resolveNoteTarget(link.target);
+            if (resolved) {
+              addEdge(srcId, `note:${resolved.relPath}`, 'wikilink');
+            } else {
+              const ghostSlug = sanitizeBrainSlug(link.target);
+              const gid = `ghost:${ghostSlug}`;
+              if (!nodeMap.has(gid)) {
+                nodeMap.set(gid, {
+                  id: gid,
+                  label: link.target,
+                  kind: 'ghost',
+                  path: `notes/concepts/${ghostSlug}.md`,
+                  tags: [],
+                  degree: 0,
+                  backlinks: 0,
+                });
+              }
+              addEdge(srcId, gid, 'wikilink');
+            }
+          }
+        }
+      }
+    }
+
+    for (const tex of this.texCitations) {
+      const tid = `tex:${tex.relPath}`;
+      nodeMap.set(tid, {
+        id: tid,
+        label: path.posix.basename(tex.relPath),
+        kind: 'tex',
+        path: tex.relPath,
+        tags: [],
+        degree: 0,
+        backlinks: 0,
+      });
+      for (const k of tex.keys) {
+        addEdge(tid, ensurePaper(k), 'cite');
+      }
+    }
+
+    if (projectRoot) {
+      const provPath = path.join(projectRoot, '.dupe', 'provenance.json');
+      try {
+        const rawProv = fs.readFileSync(provPath, 'utf8');
+        const entries = JSON.parse(rawProv) as Array<{ source_script?: string; target_path?: string }>;
+        if (Array.isArray(entries)) {
+          for (const pr of entries) {
+            if (!pr.source_script || !pr.target_path) continue;
+            const cid = `code:${pr.source_script}`;
+            if (!nodeMap.has(cid)) {
+              nodeMap.set(cid, {
+                id: cid,
+                label: path.posix.basename(pr.source_script),
+                kind: 'code',
+                path: pr.source_script,
+                tags: [],
+                degree: 0,
+                backlinks: 0,
+              });
+            }
+            const aid = `tex:${pr.target_path}`;
+            if (!nodeMap.has(aid)) {
+              nodeMap.set(aid, {
+                id: aid,
+                label: path.posix.basename(pr.target_path),
+                kind: 'tex',
+                path: pr.target_path,
+                tags: [],
+                degree: 0,
+                backlinks: 0,
+              });
+            }
+            addEdge(cid, aid, 'provenance');
+          }
+        }
+      } catch {
+        // provenance optional
+      }
+
+      if (options.includeAgentBrain) {
+        const brainDir = path.join(projectRoot, '.dupe', 'brain');
+        for (const absPath of this.walkFiles(brainDir, '.md')) {
+          const relPath = path.relative(projectRoot, absPath).replace(/\\/g, '/');
+          let content = '';
+          try {
+            content = fs.readFileSync(absPath, 'utf8');
+          } catch {
+            continue;
+          }
+          const bid = `blackboard:${relPath}`;
+          nodeMap.set(bid, {
+            id: bid,
+            label: path.basename(absPath, '.md'),
+            kind: 'blackboard',
+            path: relPath,
+            tags: extractMarkdownTags(content),
+            degree: 0,
+            backlinks: 0,
+            lines: content.split(/\r?\n/).length,
+          });
+          for (const line of content.split(/\r?\n/)) {
+            for (const link of extractWikiLinksInLine(line)) {
+              if (link.kind === 'paper') {
+                addEdge(bid, ensurePaper(link.target), 'cite');
+              } else {
+                const resolved = this.resolveNoteTarget(link.target);
+                if (resolved) {
+                  addEdge(bid, `note:${resolved.relPath}`, 'wikilink');
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (const e of edges) {
+      const src = nodeMap.get(e.source);
+      const dst = nodeMap.get(e.target);
+      if (src) src.degree++;
+      if (dst) {
+        dst.degree++;
+        dst.backlinks++;
+      }
+    }
+
+    let summaryCurated = 0;
+    let summaryArtifacts = 0;
+    let summaryBlackboard = 0;
+    let summaryOrphans = 0;
+    let summaryGhosts = 0;
+    let summaryBloated = 0;
+    for (const n of nodeMap.values()) {
+      if (n.kind === 'note' || n.kind === 'concept' || n.kind === 'moc') summaryCurated++;
+      else if (n.kind === 'artifact') summaryArtifacts++;
+      else if (n.kind === 'blackboard') summaryBlackboard++;
+      else if (n.kind === 'ghost') summaryGhosts++;
+      if (n.bloated) summaryBloated++;
+      if ((n.kind === 'note' || n.kind === 'concept' || n.kind === 'artifact') && !isUtilityHumanNote(n.path) && n.degree === 0) {
+        summaryOrphans++;
+      }
+    }
+
+    let focusNodeId: string | null = null;
+    if (options.focusPath && projectRoot) {
+      const rel = path.relative(projectRoot, options.focusPath).replace(/\\/g, '/');
+      for (const candidate of [`note:${rel}`, `tex:${rel}`, `blackboard:${rel}`, `code:${rel}`]) {
+        if (nodeMap.has(candidate)) {
+          focusNodeId = candidate;
+          break;
+        }
+      }
+    } else if (options.focusPath && nodeMap.has(options.focusPath)) {
+      focusNodeId = options.focusPath;
+    }
+
+    let nodesOut = Array.from(nodeMap.values());
+    let edgesOut = edges;
+
+    if (focusNodeId && (options.depth ?? 0) > 0) {
+      const depth = options.depth ?? 2;
+      const keep = new Set<string>([focusNodeId]);
+      let frontier = [focusNodeId];
+      for (let hop = 0; hop < depth && frontier.length > 0; hop++) {
+        const next: string[] = [];
+        for (const cur of frontier) {
+          for (const e of edges) {
+            if (e.source === cur && !keep.has(e.target)) {
+              keep.add(e.target);
+              next.push(e.target);
+            } else if (e.target === cur && !keep.has(e.source)) {
+              keep.add(e.source);
+              next.push(e.source);
+            }
+          }
+        }
+        frontier = next;
+      }
+      nodesOut = nodesOut.filter((n) => keep.has(n.id));
+      edgesOut = edgesOut.filter((e) => keep.has(e.source) && keep.has(e.target));
+    }
+
+    return {
+      nodes: nodesOut,
+      edges: edgesOut,
+      focusNodeId,
+      summary: {
+        curatedNoteCount: summaryCurated,
+        artifactCount: summaryArtifacts,
+        blackboardCount: summaryBlackboard,
+        orphanCount: summaryOrphans,
+        ghostCount: summaryGhosts,
+        bloatedCount: summaryBloated,
+      },
+    };
   }
 
   private addPaperBacklink(key: string, hit: BacklinkHit): void {

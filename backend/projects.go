@@ -831,17 +831,22 @@ func buildProjectAgentsMDWithSync(ctx context.Context, projectDir string, cfg Pr
 	b.WriteString("## 2. Project Structure\n\n")
 	b.WriteString("- `paper/`: Overleaf-linked LaTeX repository or linked paper subdirectories (`dupe_references.bib`, `figures/`).\n")
 	b.WriteString("- `code/`: Linked code repository or subdirectories (edited in VS Code).\n")
-	b.WriteString("- `notes/`: Markdown research notes (`*.md`) and `notes/comments.md` annotation queue.\n")
-	b.WriteString("- `notes/artifacts/`: Agent-authored reports, plans, and summaries (`YYYY-MM-DD-<slug>.md`, synced across machines).\n")
+	b.WriteString("- `notes/`: Curated human brain (`notes/MOC.md` hub, `notes/concepts/<slug>.md`, `notes/comments.md`, research notes). Keep this zone concise and uncluttered.\n")
+	b.WriteString("- `notes/artifacts/`: Agent-authored reports for humans (`YYYY-MM-DD-<slug>.md`, concise Mermaid diagrams + TL;DR).\n")
+	b.WriteString("- `.dupe/brain/`: Gitignored agent-to-agent blackboard (`blackboard.md`, `topics/<slug>.md`) for messy brainstorming, hypotheses, and swarm handoffs.\n")
 	b.WriteString("- `scratch/`: Temporary test scripts and experimental files inside this project (gitignored; never use `~/scratch` or `/tmp`).\n")
 	b.WriteString("- `refs/index.json`: Metadata and BibTeX keys for linked reference papers.\n")
 	b.WriteString("- `refs/text/<bibtex_key>.md`: Extracted full text of each reference paper.\n\n")
 
 	b.WriteString("## 3. Rules for Agents\n\n")
-	b.WriteString("- Edit LaTeX manuscripts in `paper/` and research notes in `notes/`.\n")
+	b.WriteString("- Edit LaTeX manuscripts in `paper/` and curated research notes in `notes/`.\n")
 	b.WriteString("- Enforce project-local scratch: put all temporary scripts, logs, and experimental outputs in `<project>/scratch/`, never `~/scratch` or `/tmp`.\n")
-	b.WriteString("- Communicate findings via artifacts in `notes/artifacts/<YYYY-MM-DD>-<slug>.md` and reply in chat/terminal with only the artifact path and a 2-3 line TL;DR.\n")
-	b.WriteString("- Keep all artifacts and reports succinct and to the point; prefer Mermaid diagrams (`flowchart`, `sequenceDiagram`) and compact bullets/tables over blocks of paragraphs.\n")
+	b.WriteString("- **Two-Zone Brain & Anti-Bloat Discipline:**\n")
+	b.WriteString("  - Put intermediate brainstorming, multi-agent coordination, hypotheses, and dead ends in `.dupe/brain/` via `agent_brain_post` / `agent_brain_read` MCP tools — never bloat `notes/` with raw agent chatter.\n")
+	b.WriteString("  - Human-facing notes (`notes/`, `notes/concepts/`, `notes/artifacts/`) must stay <= 150 lines / <= 8 KB, diagram-first (Mermaid + tables), with YAML frontmatter (`type`, `tags`, `aliases`, `status`).\n")
+	b.WriteString("  - Every note and artifact must connect into the knowledge graph using Obsidian `[[wikilinks]]`, `[[MOC]]`, and `[[paper:<bibtex_key>]]` links.\n")
+	b.WriteString("  - Prefer `write_brain_note` and `agent_brain_promote` MCP tools to distill brainstorms into `notes/concepts/<slug>.md` cleanly.\n")
+	b.WriteString("- Communicate final findings via succinct artifacts in `notes/artifacts/<YYYY-MM-DD>-<slug>.md` and reply in chat/terminal with only the artifact path and a 2-3 line TL;DR.\n")
 	b.WriteString("- Check **Open Comments** below (and `notes/comments.md`) for user annotations and tasks.\n")
 	b.WriteString("- When you address an open comment (`- [ ]`), mark it `- [x]` and move it under `## Addressed Comments` in `notes/comments.md`.\n")
 	b.WriteString("- When you address items in `notes/changes.md` or other feedback notes in `notes/`, mark them `- [x]` and move them under `## Addressed` at the bottom of that file.\n")
@@ -909,6 +914,40 @@ func buildProjectAgentsMDWithSync(ctx context.Context, projectDir string, cfg Pr
 				shaShort = shaShort[:7]
 			}
 			b.WriteString(fmt.Sprintf("| `%s` | `%s` | `%s` | %s |\n", pr.TargetPath, pr.SourceScript, shaShort, pr.Status))
+		}
+		b.WriteString("\n")
+	}
+
+	brainGraph := buildProjectBrainGraph(ctx, projectDir, refs, BrainGraphOptions{IncludeAgentBrain: true})
+	if brainGraph.Summary.CuratedNoteCount > 0 || brainGraph.Summary.ArtifactCount > 0 || len(brainGraph.Summary.BlackboardTopics) > 0 {
+		b.WriteString("\n### Knowledge Brain Status\n\n")
+		b.WriteString(fmt.Sprintf("- **Human Brain:** %d curated notes, %d artifacts, %d orphans, %d unresolved `[[links]]`, %d bloated (>%d lines)\n",
+			brainGraph.Summary.CuratedNoteCount,
+			brainGraph.Summary.ArtifactCount,
+			brainGraph.Summary.OrphanCount,
+			brainGraph.Summary.GhostCount,
+			brainGraph.Summary.BloatedCount,
+			curatedBrainMaxLines,
+		))
+		if len(brainGraph.Summary.TopHubs) > 0 {
+			var hubLabels []string
+			for i, h := range brainGraph.Summary.TopHubs {
+				if i >= 5 {
+					break
+				}
+				hubLabels = append(hubLabels, fmt.Sprintf("`%s` (%d)", h.Label, h.Backlinks))
+			}
+			b.WriteString("- **Top Hubs:** " + strings.Join(hubLabels, ", ") + "\n")
+		}
+		if len(brainGraph.Summary.Orphans) > 0 {
+			limit := len(brainGraph.Summary.Orphans)
+			if limit > 5 {
+				limit = 5
+			}
+			b.WriteString("- **Orphan Notes (link these):** " + strings.Join(brainGraph.Summary.Orphans[:limit], ", ") + "\n")
+		}
+		if len(brainGraph.Summary.BlackboardTopics) > 0 {
+			b.WriteString("- **Agent Blackboard Topics (`.dupe/brain/topics/`):** " + strings.Join(brainGraph.Summary.BlackboardTopics, ", ") + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -1094,6 +1133,7 @@ func ensureProjectGitIgnore(projectDir string) error {
 		".vscode/",
 		".dupe/build/",
 		".dupe/notes_history/",
+		".dupe/brain/",
 		"paper/",
 		"code/",
 		"scratch/",
@@ -1163,6 +1203,7 @@ func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir stri
 		}
 	}
 	_ = ensureProjectGitIgnore(projectDir)
+	_ = ensureAgentBrainInitialized(projectDir)
 
 	var bibEntries []string
 	seenKeys := make(map[string]bool)

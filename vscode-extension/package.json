@@ -332,6 +332,16 @@
         "command": "dupe.toggleHerdrFollow",
         "title": "dupe: Toggle Follow Herdr Space",
         "icon": "$(eye)"
+      },
+      {
+        "command": "dupe.openKnowledgeGraph",
+        "title": "dupe: Open Knowledge Graph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "dupe.openAgentBlackboard",
+        "title": "dupe: Open Agent Blackboard (.dupe/brain)",
+        "icon": "$(hubot)"
       }
     ],
     "keybindings": [
@@ -391,6 +401,10 @@
         "key": "alt+shift+c",
         "mac": "ctrl+shift+c",
         "when": "editorTextFocus && (editorLangId == markdown || editorLangId == latex || editorLangId == tex)"
+      },
+      {
+        "command": "dupe.openKnowledgeGraph",
+        "key": "alt+g"
       }
     ],
     "menus": {
@@ -487,6 +501,11 @@
         },
         {
           "command": "dupe.searchByTag",
+          "when": "view == dupe.notesView",
+          "group": "navigation"
+        },
+        {
+          "command": "dupe.openKnowledgeGraph",
           "when": "view == dupe.notesView",
           "group": "navigation"
         },

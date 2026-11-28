@@ -179,6 +179,75 @@ func (s *Server) handleMCPRequest(ctx context.Context, userID int, username stri
 							},
 						},
 					},
+					{
+						"name":        "agent_brain_post",
+						"description": "Post an agent brainstorm, hypothesis, dead-end, or handoff to the gitignored .dupe/brain/ blackboard (keeps human notes/ uncluttered).",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"topic":      map[string]any{"type": "string", "description": "Blackboard topic slug (e.g. 'sim-bug', 'ablation-plan')"},
+								"agent":      map[string]any{"type": "string", "description": "Agent role or terminal name posting this entry"},
+								"summary":    map[string]any{"type": "string", "description": "One-line summary"},
+								"body":       map[string]any{"type": "string", "description": "Markdown details, hypotheses, commands, or logs"},
+								"links":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional Obsidian [[wikilinks]] or [[paper:key]] references"},
+								"project_id": map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+							"required": []string{"topic", "body"},
+						},
+					},
+					{
+						"name":        "agent_brain_read",
+						"description": "Read shared agent brainstorming topics from .dupe/brain/blackboard.md or a specific topic shard.",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"topic":      map[string]any{"type": "string", "description": "Optional topic slug; omit to read blackboard.md overview"},
+								"query":      map[string]any{"type": "string", "description": "Optional keyword filter"},
+								"project_id": map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+						},
+					},
+					{
+						"name":        "write_brain_note",
+						"description": "Create or update a concise, Obsidian-linked human brain note in notes/ or notes/concepts/, enforcing <= 150 lines / 8 KB anti-bloat limits and required [[wikilinks]].",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"path":       map[string]any{"type": "string", "description": "Project-relative path (e.g. notes/concepts/reward-shaping.md)"},
+								"content":    map[string]any{"type": "string", "description": "Markdown note content with YAML frontmatter and [[wikilinks]]"},
+								"force":      map[string]any{"type": "boolean", "description": "Bypass anti-bloat check only if explicitly needed"},
+								"project_id": map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+							"required": []string{"path", "content"},
+						},
+					},
+					{
+						"name":        "agent_brain_promote",
+						"description": "Distill a validated insight from .dupe/brain/ into a concise curated note in notes/concepts/<slug>.md.",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"source_topic": map[string]any{"type": "string", "description": "Optional blackboard topic slug being promoted"},
+								"concept_slug": map[string]any{"type": "string", "description": "Target slug under notes/concepts/"},
+								"content":      map[string]any{"type": "string", "description": "Concise Markdown concept note with frontmatter and [[links]]"},
+								"project_id":   map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+							"required": []string{"concept_slug", "content"},
+						},
+					},
+					{
+						"name":        "get_brain_graph",
+						"description": "Inspect the project's Obsidian knowledge graph (hubs, orphans, unresolved ghost links, bloated notes, or 1-2 hop neighborhood around a node).",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"focus":               map[string]any{"type": "string", "description": "Optional note path, slug, or paper key to inspect neighborhood around"},
+								"depth":               map[string]any{"type": "integer", "description": "BFS hop depth when focus is set (default 2)"},
+								"include_agent_brain": map[string]any{"type": "boolean", "description": "Include .dupe/brain/ blackboard nodes"},
+								"project_id":          map[string]any{"type": "string", "description": "Optional project ID or folder name"},
+							},
+						},
+					},
 				},
 			},
 		}
@@ -428,6 +497,109 @@ func (s *Server) executeMCPTool(ctx context.Context, userID int, username, toolN
 			results = []ProvenanceCheckResult{}
 		}
 		out, _ := json.MarshalIndent(results, "", "  ")
+		return string(out), false
+
+	case "agent_brain_post":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		_, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		var links []string
+		if rawLinks, ok := args["links"].([]any); ok {
+			for _, item := range rawLinks {
+				if sVal, ok2 := item.(string); ok2 && strings.TrimSpace(sVal) != "" {
+					links = append(links, sVal)
+				}
+			}
+		}
+		relWritten, postErr := postAgentBlackboardEntry(projDir, strArg("topic"), strArg("agent"), strArg("summary"), strArg("body"), links)
+		if postErr != nil {
+			return fmt.Sprintf("Failed to post to agent brain: %v", postErr), true
+		}
+		return fmt.Sprintf("Posted agent brainstorm entry to %s (human notes/ kept clean).", relWritten), false
+
+	case "agent_brain_read":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		_, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		text, readErr := readAgentBlackboard(projDir, strArg("topic"), strArg("query"), 250)
+		if readErr != nil {
+			return readErr.Error(), true
+		}
+		return text, false
+
+	case "write_brain_note":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		cfg, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		forceFlag, _ := args["force"].(bool)
+		writtenRel, wErr := writeCuratedBrainNote(projDir, strArg("path"), strArg("content"), forceFlag)
+		if wErr != nil {
+			return wErr.Error(), true
+		}
+		_ = s.regenerateProjectArtifacts(ctx, projDir, userID, cfg)
+		return fmt.Sprintf("Saved curated brain note at %s and updated AGENTS.md brain status.", writtenRel), false
+
+	case "agent_brain_promote":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		cfg, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		writtenRel, pErr := promoteBlackboardTopic(projDir, strArg("source_topic"), strArg("concept_slug"), strArg("content"), false)
+		if pErr != nil {
+			return pErr.Error(), true
+		}
+		_ = s.regenerateProjectArtifacts(ctx, projDir, userID, cfg)
+		return fmt.Sprintf("Promoted brainstorm into curated concept note %s.", writtenRel), false
+
+	case "get_brain_graph":
+		projID := strArg("project_id")
+		if projID == "" {
+			projID = "default"
+		}
+		cfg, projDir, err := s.lookupProjectDir(ctx, userID, projID, username)
+		if err != nil {
+			return fmt.Sprintf("Project %q not found: %v", projID, err), true
+		}
+		papers, _ := s.queryLinkedPapersForProject(ctx, userID, cfg)
+		refs := make([]RefIndexEntry, 0, len(papers))
+		for _, p := range papers {
+			refs = append(refs, RefIndexEntry{
+				PaperID:   p.ID,
+				BibtexKey: p.BibtexKey,
+				Title:     p.Title,
+				Tags:      p.Tags,
+			})
+		}
+		includeAgent, _ := args["include_agent_brain"].(bool)
+		depth := 2
+		if rawDepth, ok := args["depth"].(float64); ok && rawDepth > 0 {
+			depth = int(rawDepth)
+		}
+		graph := buildProjectBrainGraph(ctx, projDir, refs, BrainGraphOptions{
+			IncludeAgentBrain: includeAgent,
+			Focus:             strArg("focus"),
+			Depth:             depth,
+		})
+		out, _ := json.MarshalIndent(graph, "", "  ")
 		return string(out), false
 
 	default:
