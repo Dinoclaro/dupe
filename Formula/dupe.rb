@@ -1,28 +1,28 @@
 class Dupe < Formula
   desc "Local-first academic research workspace, BibTeX manager, and MCP server"
   homepage "https://github.com/Dinoclaro/dupe"
-  version "0.4.4"
+  version "0.4.5"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.4/dupe-darwin-arm64.tar.gz"
-      sha256 "453b190e36a7aa2d0f8e70295fd67910ef4adac71161385de76c08b564b182c8"
+      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.5/dupe-darwin-arm64.tar.gz"
+      sha256 "97ee76fe716a858a3176dad1fc940c0a3dd06afc9632085cbf50854b2fa06b05"
     end
     on_intel do
-      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.4/dupe-darwin-amd64.tar.gz"
-      sha256 "60b5c96cb825f47000375a781ae6c242333e65320dcbfcff745bbd5e217a15d3"
+      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.5/dupe-darwin-amd64.tar.gz"
+      sha256 "cce6c3ecefdbe41c47542a5f2e5468b721e3428e70eae7d2593f04bf218925a6"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.4/dupe-linux-arm64.tar.gz"
-      sha256 "8eb293fbd2a4ce5e350c7f4960c84fc17182fd10beea9fe06e36e35843bac2f2"
+      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.5/dupe-linux-arm64.tar.gz"
+      sha256 "07dda1cd8e3b486a6fc67a643b48b408c2e6096e7b657277b670be80f8a94f51"
     end
     on_intel do
-      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.4/dupe-linux-amd64.tar.gz"
-      sha256 "6375fb47c7d895ae4587dba53b7216974f4a2b31733ead38d6d3d7352df51ca1"
+      url "https://github.com/Dinoclaro/dupe/releases/download/v0.4.5/dupe-linux-amd64.tar.gz"
+      sha256 "bd7753d3ca142e532f0f5dc979d42735b7dcbaf26c52414edce70d0dbcd1a1c8"
     end
   end
 
