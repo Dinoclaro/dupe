@@ -69,11 +69,13 @@ export class InfoTreeItem extends vscode.TreeItem {
 export class SectionTreeItem extends vscode.TreeItem {
   constructor(
     label: string,
-    public readonly sectionKind: 'backlinks' | 'notes',
+    public readonly sectionKind: string,
     iconId: string,
     description = '',
+    public readonly items: vscode.TreeItem[] = [],
+    collapsibleState: vscode.TreeItemCollapsibleState = vscode.TreeItemCollapsibleState.Expanded,
   ) {
-    super(label, vscode.TreeItemCollapsibleState.Expanded);
+    super(label, collapsibleState);
     this.description = description;
     this.iconPath = new vscode.ThemeIcon(iconId);
     this.contextValue = `section_${sectionKind}`;
@@ -81,17 +83,29 @@ export class SectionTreeItem extends vscode.TreeItem {
 }
 
 export class NoteTreeItem extends vscode.TreeItem {
-  constructor(public readonly note: NoteEntry) {
-    super(note.slug, vscode.TreeItemCollapsibleState.None);
-    this.description = note.tags.length > 0 ? note.tags.map((t) => `#${t}`).join(' ') : '';
-    this.iconPath = new vscode.ThemeIcon('note');
-    this.tooltip = note.relPath;
+  constructor(public readonly note: NoteEntry, openInBrainStudio = false) {
+    super(note.title, vscode.TreeItemCollapsibleState.None);
+    this.description = note.tags.length > 0 ? note.tags.map((t) => `#${t}`).join(' ') : `${note.lineCount || 0}L`;
+    this.iconPath = new vscode.ThemeIcon(
+      note.relPath.startsWith('notes/artifacts/')
+        ? 'sparkle'
+        : note.relPath.startsWith('notes/concepts/')
+          ? 'lightbulb'
+          : 'note',
+    );
+    this.tooltip = `${note.relPath} (${note.lineCount || 0} lines)`;
     this.contextValue = 'dupeNote';
-    this.command = {
-      command: 'vscode.open',
-      title: 'Open Note',
-      arguments: [vscode.Uri.file(note.absPath)],
-    };
+    this.command = openInBrainStudio
+      ? {
+          command: 'dupe.openInBrainStudio',
+          title: 'Open in Brain Studio Reader',
+          arguments: [`note:${note.relPath}`, 'docs'],
+        }
+      : {
+          command: 'vscode.open',
+          title: 'Open Note',
+          arguments: [vscode.Uri.file(note.absPath)],
+        };
   }
 }
 
@@ -208,36 +222,113 @@ export class NotesAndBacklinksProvider implements vscode.TreeDataProvider<vscode
     return element;
   }
 
-  getChildren(): vscode.TreeItem[] {
+  getChildren(element?: vscode.TreeItem): vscode.TreeItem[] {
+    if (element instanceof SectionTreeItem) {
+      return element.items;
+    }
+
     const hits = this.activeFilePath ? this.notesIndex.getBacklinksForNote(this.activeFilePath) : [];
+    const outgoing = this.activeFilePath ? this.notesIndex.getOutgoingLinksForNote(this.activeFilePath) : [];
     const unlinked = this.activeFilePath
       ? this.notesIndex.getUnlinkedMentionsForNote(this.activeFilePath)
       : [];
+    const groups = this.notesIndex.getAutoBrainGroups();
 
     const items: vscode.TreeItem[] = [
       new InfoTreeItem(
-        'Open Knowledge Graph (Alt+G)',
-        'Explore notes, artifacts, papers & code links',
+        'Open Brain Studio (Alt+G)',
+        'Interactive graph + Mermaid reader',
         'type-hierarchy',
-        { command: 'dupe.openKnowledgeGraph', title: 'Open Knowledge Graph' },
+        { command: 'dupe.openKnowledgeGraph', title: 'Open Brain Studio' },
       ),
     ];
 
-    if (hits.length === 0) {
+    if (hits.length > 0) {
       items.push(
-        new InfoTreeItem(
-          'No backlinks to current file',
-          'Link notes with [[note-name]] · Quick Switcher: Alt+O',
-          'circle-outline',
-          { command: 'dupe.quickOpenNote', title: 'Quick Switcher' },
+        new SectionTreeItem(
+          'Incoming Backlinks',
+          'backlinks',
+          'references',
+          String(hits.length),
+          hits.map((h) => new BacklinkTreeItem(h)),
         ),
       );
-    } else {
-      items.push(...hits.map((h) => new BacklinkTreeItem(h)));
+    }
+
+    if (outgoing.length > 0) {
+      const outItems = outgoing.map((o) => {
+        if (o.kind === 'paper' && o.paperKey) {
+          return new InfoTreeItem(o.label, 'paper', 'book', {
+            command: 'dupe.openPaperByKey',
+            title: 'Open Paper PDF',
+            arguments: [o.paperKey],
+          });
+        }
+        if (o.kind === 'ghost' && o.targetRelPath) {
+          return new InfoTreeItem(o.label, 'unresolved (click to create)', 'circle-outline', {
+            command: 'dupe.openInBrainStudio',
+            title: 'Inspect Ghost Note',
+            arguments: [`ghost:${o.label.toLowerCase()}`, 'graph'],
+          });
+        }
+        return new InfoTreeItem(o.label, o.targetRelPath || '', 'arrow-right', {
+          command: 'dupe.openInBrainStudio',
+          title: 'Open Note in Brain Studio',
+          arguments: [`note:${o.targetRelPath || ''}`, 'graph'],
+        });
+      });
+      items.push(
+        new SectionTreeItem('Links Out', 'outgoing', 'arrow-small-right', String(outItems.length), outItems),
+      );
     }
 
     if (unlinked.length > 0) {
-      items.push(...unlinked.map((u) => new UnlinkedMentionTreeItem(u)));
+      items.push(
+        new SectionTreeItem(
+          'Unlinked Mentions',
+          'unlinked',
+          'link',
+          String(unlinked.length),
+          unlinked.map((u) => new UnlinkedMentionTreeItem(u)),
+        ),
+      );
+    }
+
+    if (groups.artifacts.length > 0) {
+      items.push(
+        new SectionTreeItem(
+          'Living Artifacts',
+          'artifacts',
+          'sparkle',
+          String(groups.artifacts.length),
+          groups.artifacts.map((a) => new NoteTreeItem(a, true)),
+        ),
+      );
+    }
+
+    if (groups.concepts.length > 0) {
+      items.push(
+        new SectionTreeItem(
+          'Concepts',
+          'concepts',
+          'lightbulb',
+          String(groups.concepts.length),
+          groups.concepts.map((c) => new NoteTreeItem(c, true)),
+        ),
+      );
+    }
+
+    if (groups.notes.length > 0) {
+      items.push(
+        new SectionTreeItem(
+          'Notes',
+          'notes',
+          'files',
+          String(groups.notes.length),
+          groups.notes.map((n) => new NoteTreeItem(n, true)),
+          vscode.TreeItemCollapsibleState.Collapsed,
+        ),
+      );
     }
 
     return items;

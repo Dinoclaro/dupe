@@ -78,7 +78,7 @@ Start writing your introduction here.
 export function activate(context: vscode.ExtensionContext): void {
   const api = new DupeApiClient();
   const pdfViewer = new DupePdfViewer(context.extensionUri);
-  const brainGraphPanel = new BrainGraphPanel();
+  const brainGraphPanel = new BrainGraphPanel(context.extensionUri);
   const notesIndex = new NotesIndex();
   const paperProvider = new PaperLibraryProvider();
   const notesProvider = new NotesAndBacklinksProvider(notesIndex);
@@ -249,6 +249,62 @@ export function activate(context: vscode.ExtensionContext): void {
       depth: opts.localMode ? opts.depth : 0,
       includeAgentBrain: opts.includeAgentBrain,
     });
+  }
+
+  function openBrainStudioPanel(
+    selectedNodeId?: string | null,
+    initialTab: 'graph' | 'docs' = 'graph',
+  ): void {
+    if (!activeProjectRoot) {
+      void vscode.window.showWarningMessage('Open a dupe project folder first.');
+      return;
+    }
+    const rootDir = activeProjectRoot;
+    const graph = buildCurrentBrainGraph();
+    const initialId = selectedNodeId !== undefined ? selectedNodeId : graph.focusNodeId;
+    brainGraphPanel.open(
+      graph,
+      {
+        getProjectRoot: () => activeProjectRoot,
+        onOpenPath: async (relPath) => {
+          const absPath = path.join(rootDir, relPath);
+          if (fs.existsSync(absPath)) {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
+          }
+        },
+        onOpenPaperByKey: async (key) => {
+          await vscode.commands.executeCommand('dupe.openPaperByKey', key);
+        },
+        onCreateGhostNote: async (label, relPath) => {
+          const targetRel = relPath.startsWith('notes/') ? relPath : `notes/concepts/${label}.md`;
+          const absPath = path.join(rootDir, targetRel);
+          if (!fs.existsSync(absPath)) {
+            await fsp.mkdir(path.dirname(absPath), { recursive: true });
+            const seed = [
+              '---',
+              'type: concept',
+              'status: seed',
+              'tags: [concept]',
+              '---',
+              '',
+              `# ${label}`,
+              '',
+            ].join('\n');
+            await fsp.writeFile(absPath, seed, 'utf8');
+          }
+          rebuildLocalIndices();
+          brainGraphPanel.selectNode(`note:${targetRel}`);
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
+          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
+        },
+        onRequestRefresh: async () => {
+          refreshBrainGraphIfOpen();
+        },
+      },
+      initialId,
+      initialTab,
+    );
   }
 
   function refreshBrainGraphIfOpen(): void {
@@ -1041,13 +1097,14 @@ export function activate(context: vscode.ExtensionContext): void {
           description: idx === 0 ? 'latest' : a.tags.map((t) => `#${t}`).join(' '),
           detail: a.relPath,
           absPath: a.absPath,
+          relPath: a.relPath,
         })),
-        { placeHolder: 'Select an agent artifact to preview' },
+        { placeHolder: 'Select an agent artifact to preview in Brain Studio' },
       );
       if (!picked) {
         return;
       }
-      await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(picked.absPath));
+      openBrainStudioPanel(`note:${picked.relPath}`, 'docs');
     }),
 
     // Daily Note (Alt+D)
@@ -2130,50 +2187,19 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('dupe.openKnowledgeGraph', async () => {
-      if (!activeProjectRoot) {
-        void vscode.window.showWarningMessage('Open a dupe project folder first.');
-        return;
-      }
-      const rootDir = activeProjectRoot;
-      brainGraphPanel.open(buildCurrentBrainGraph(), {
-        onOpenPath: async (relPath) => {
-          const absPath = path.join(rootDir, relPath);
-          if (fs.existsSync(absPath)) {
-            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
-            await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
-          }
-        },
-        onOpenPaperByKey: async (key) => {
-          await vscode.commands.executeCommand('dupe.openPaperByKey', key);
-        },
-        onCreateGhostNote: async (label, relPath) => {
-          const targetRel = relPath.startsWith('notes/') ? relPath : `notes/concepts/${label}.md`;
-          const absPath = path.join(rootDir, targetRel);
-          if (!fs.existsSync(absPath)) {
-            await fsp.mkdir(path.dirname(absPath), { recursive: true });
-            const seed = [
-              '---',
-              'type: concept',
-              'status: seed',
-              'tags: [concept]',
-              '---',
-              '',
-              `# ${label}`,
-              '',
-              'Connected to [[MOC]].',
-              '',
-            ].join('\n');
-            await fsp.writeFile(absPath, seed, 'utf8');
-          }
-          rebuildLocalIndices();
-          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(absPath));
-          await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One });
-        },
-        onRequestRefresh: async () => {
-          refreshBrainGraphIfOpen();
-        },
-      });
+      openBrainStudioPanel(undefined, 'graph');
     }),
+
+    vscode.commands.registerCommand(
+      'dupe.openInBrainStudio',
+      async (nodeId?: string, tab: 'graph' | 'docs' = 'docs') => {
+        if (!nodeId && vscode.window.activeTextEditor?.document.uri.scheme === 'file' && activeProjectRoot) {
+          const rel = path.relative(activeProjectRoot, vscode.window.activeTextEditor.document.uri.fsPath).replace(/\\/g, '/');
+          nodeId = `note:${rel}`;
+        }
+        openBrainStudioPanel(nodeId, tab);
+      },
+    ),
 
     vscode.commands.registerCommand('dupe.openAgentBlackboard', async () => {
       if (!activeProjectRoot) {

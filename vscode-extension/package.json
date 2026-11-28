@@ -93,7 +93,7 @@
       "explorer": [
         {
           "id": "dupe.notesView",
-          "name": "dupe: Backlinks"
+          "name": "dupe: Brain & Links"
         },
         {
           "id": "dupe.papersView",
@@ -335,8 +335,13 @@
       },
       {
         "command": "dupe.openKnowledgeGraph",
-        "title": "dupe: Open Knowledge Graph",
+        "title": "dupe: Open Brain Studio & Graph",
         "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "dupe.openInBrainStudio",
+        "title": "dupe: Open Note in Brain Studio Reader",
+        "icon": "$(book)"
       },
       {
         "command": "dupe.openAgentBlackboard",
@@ -612,6 +617,7 @@
     }
   },
   "dependencies": {
+    "mermaid": "^11.17.2",
     "pdfjs-dist": "^4.8.69"
   },
   "devDependencies": {

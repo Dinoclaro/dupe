@@ -35,6 +35,10 @@ const WIKI_LINK_RE = /(!?)\[\[([^\]\n]+)\]\]/g;
 const MARKDOWN_TAG_RE = /(?:^|[\s,(])#([a-zA-Z][a-zA-Z0-9_/-]*)/g;
 const LATEX_CITE_KEYS_RE = /\\cite[a-zA-Z*]*\{([^}]+)\}/g;
 
+function maskInlineCode(lineText: string): string {
+  return lineText.replace(/`[^`\n]*`/g, (m) => ' '.repeat(m.length));
+}
+
 export function parseMarkdownFrontmatter(content: string): {
   frontmatter: ParsedFrontmatter;
   body: string;
@@ -116,9 +120,10 @@ export function parseMarkdownFrontmatter(content: string): {
 
 export function extractWikiLinksInLine(lineText: string): WikiLinkOccurrence[] {
   const results: WikiLinkOccurrence[] = [];
+  const cleanedLine = maskInlineCode(lineText);
   WIKI_LINK_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = WIKI_LINK_RE.exec(lineText)) !== null) {
+  while ((m = WIKI_LINK_RE.exec(cleanedLine)) !== null) {
     const isEmbed = m[1] === '!';
     const inner = m[2].trim();
     const pipeIdx = inner.indexOf('|');
@@ -182,7 +187,8 @@ export function extractMarkdownTags(content: string): string[] {
     }
     MARKDOWN_TAG_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
-    while ((m = MARKDOWN_TAG_RE.exec(line)) !== null) {
+    const cleanedLine = maskInlineCode(line);
+    while ((m = MARKDOWN_TAG_RE.exec(cleanedLine)) !== null) {
       tags.add(m[1]);
     }
   }
@@ -580,6 +586,75 @@ export class NotesIndex {
 
   getBacklinksForPaper(bibtexKey: string): BacklinkHit[] {
     return this.backlinksByPaperKey.get(bibtexKey) || [];
+  }
+
+  getOutgoingLinksForNote(absPath: string): Array<{
+    kind: 'note' | 'ghost' | 'paper';
+    label: string;
+    targetAbsPath?: string;
+    targetRelPath?: string;
+    paperKey?: string;
+  }> {
+    const content = this.contentByAbsPath.get(absPath) || '';
+    const seen = new Set<string>();
+    const out: Array<{
+      kind: 'note' | 'ghost' | 'paper';
+      label: string;
+      targetAbsPath?: string;
+      targetRelPath?: string;
+      paperKey?: string;
+    }> = [];
+    for (const line of content.split(/\r?\n/)) {
+      for (const link of extractWikiLinksInLine(line)) {
+        if (link.kind === 'paper') {
+          const k = `paper:${link.target}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          out.push({ kind: 'paper', label: `@${link.target}`, paperKey: link.target });
+        } else {
+          const resolved = this.resolveNoteTarget(link.target);
+          if (resolved && resolved.absPath === absPath) continue;
+          const k = resolved ? `note:${resolved.relPath}` : `ghost:${link.target.toLowerCase()}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          if (resolved) {
+            out.push({
+              kind: 'note',
+              label: resolved.title,
+              targetAbsPath: resolved.absPath,
+              targetRelPath: resolved.relPath,
+            });
+          } else {
+            out.push({
+              kind: 'ghost',
+              label: link.target,
+              targetRelPath: `notes/concepts/${sanitizeBrainSlug(link.target)}.md`,
+            });
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  getAutoBrainGroups(): {
+    artifacts: NoteEntry[];
+    concepts: NoteEntry[];
+    notes: NoteEntry[];
+  } {
+    const artifacts = this.getArtifacts();
+    const concepts = this.notes.filter(
+      (n) =>
+        (n.relPath.startsWith('notes/concepts/') || n.frontmatterType === 'concept') &&
+        !n.relPath.startsWith('notes/artifacts/'),
+    );
+    const notes = this.notes.filter(
+      (n) =>
+        !n.relPath.startsWith('notes/artifacts/') &&
+        !n.relPath.startsWith('notes/concepts/') &&
+        n.frontmatterType !== 'concept',
+    );
+    return { artifacts, concepts, notes };
   }
 
   getUnlinkedMentionsForNote(absPath: string): UnlinkedMentionHit[] {

@@ -20,6 +20,16 @@ function copyPdfJsAssets() {
   }
 }
 
+function copyMermaidAssets() {
+  const src = path.resolve(__dirname, 'node_modules/mermaid/dist/mermaid.min.js');
+  const outDir = path.resolve(__dirname, 'media/mermaid');
+  fs.mkdirSync(outDir, { recursive: true });
+  if (!fs.existsSync(src)) {
+    throw new Error(`Missing mermaid asset: ${src}`);
+  }
+  fs.copyFileSync(src, path.join(outDir, 'mermaid.min.js'));
+}
+
 function buildCompressedDictionaries() {
   const outDir = path.resolve(__dirname, 'media/dict');
   fs.mkdirSync(outDir, { recursive: true });
@@ -39,6 +49,7 @@ function buildCompressedDictionaries() {
 
 async function main() {
   copyPdfJsAssets();
+  copyMermaidAssets();
   buildCompressedDictionaries();
   const ctx = await esbuild.context({
     entryPoints: ['src/extension.ts'],

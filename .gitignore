@@ -33,6 +33,7 @@ web/dist/
 vscode-extension/node_modules/
 vscode-extension/dist/
 vscode-extension/media/pdfjs/
+vscode-extension/media/mermaid/
 vscode-extension/*.vsix
 
 # OS and editor files

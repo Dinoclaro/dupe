@@ -34,7 +34,7 @@ describe('Knowledge Brain & Unlinked Mentions', () => {
       fs.writeFileSync(path.join(tmp, 'notes', 'MOC.md'), '# Map of Content\n\nHub note.\n', 'utf8');
       fs.writeFileSync(
         path.join(tmp, 'notes', 'ablation.md'),
-        '# Ablation\n\nEarlier pass mentioned Action Smoothing in plain text.\nNext pass links [[Action Smoothing]].\n',
+        '# Ablation\n\nEarlier pass mentioned Action Smoothing in plain text.\nSyntax example `[[not-a-ghost]]` should stay ignored.\nNext pass links [[Action Smoothing]].\n',
         'utf8',
       );
       fs.writeFileSync(
@@ -60,11 +60,14 @@ describe('Knowledge Brain & Unlinked Mentions', () => {
       expect(mentions.length).toBe(1);
       expect(mentions[0].matchedText).toBe('Action Smoothing');
 
-      // Graph without agent blackboard omits .dupe/brain/, finds unresolved ghost
+      // Graph without agent blackboard omits .dupe/brain/, finds unresolved ghost (ignoring backtick code)
       const humanGraph = idx.buildBrainGraphPayload(tmp, [], { includeAgentBrain: false });
       expect(humanGraph.nodes.some((n) => n.kind === 'blackboard')).toBe(false);
       expect(humanGraph.nodes.some((n) => n.kind === 'ghost' && n.label === 'missing-ablation')).toBe(true);
+      expect(humanGraph.nodes.some((n) => n.kind === 'ghost' && n.label === 'not-a-ghost')).toBe(false);
       expect(humanGraph.nodes.some((n) => n.kind === 'tex' && n.path === 'paper/main.tex')).toBe(true);
+      expect(idx.getOutgoingLinksForNote(conceptAbs).some((o) => o.kind === 'ghost')).toBe(true);
+      expect(idx.getAutoBrainGroups().concepts.length).toBe(1);
 
       // Graph with agent blackboard includes .dupe/brain/
       const fullGraph = idx.buildBrainGraphPayload(tmp, [], { includeAgentBrain: true });

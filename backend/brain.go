@@ -21,6 +21,7 @@ const (
 
 var (
 	wikiLinkPattern   = regexp.MustCompile(`(!?)\[\[([^\]\n]+)\]\]`)
+	inlineCodePattern = regexp.MustCompile("`[^`\n]*`")
 	inlineTagPattern  = regexp.MustCompile(`(?:^|[\s,(])#([a-zA-Z][a-zA-Z0-9_/-]*)`)
 	latexCitePattern  = regexp.MustCompile(`\\cite[a-zA-Z*]*\{([^}]+)\}`)
 	slugSanitizeRegex = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
@@ -188,7 +189,8 @@ func extractNoteTags(content string, fm parsedFrontmatter) []string {
 		if inFence {
 			continue
 		}
-		for _, m := range inlineTagPattern.FindAllStringSubmatch(line, -1) {
+		cleanedLine := inlineCodePattern.ReplaceAllString(line, "")
+		for _, m := range inlineTagPattern.FindAllStringSubmatch(cleanedLine, -1) {
 			if len(m) >= 2 {
 				add(m[1])
 			}
@@ -207,7 +209,8 @@ func extractWikiTargets(content string) (noteTargets []string, paperKeys []strin
 		if inFence {
 			continue
 		}
-		for _, m := range wikiLinkPattern.FindAllStringSubmatch(line, -1) {
+		cleanedLine := inlineCodePattern.ReplaceAllString(line, "")
+		for _, m := range wikiLinkPattern.FindAllStringSubmatch(cleanedLine, -1) {
 			if len(m) < 3 {
 				continue
 			}
@@ -706,55 +709,13 @@ func buildProjectBrainGraph(ctx context.Context, projectDir string, refs []RefIn
 }
 
 func ensureAgentBrainInitialized(projectDir string) error {
-	brainDir := filepath.Join(projectDir, ".dupe", "brain")
-	topicsDir := filepath.Join(brainDir, "topics")
+	topicsDir := filepath.Join(projectDir, ".dupe", "brain", "topics")
 	if err := os.MkdirAll(topicsDir, 0o755); err != nil {
 		return err
 	}
-	boardPath := filepath.Join(brainDir, "blackboard.md")
-	if _, err := os.Stat(boardPath); os.IsNotExist(err) {
-		seed := strings.Join([]string{
-			"# Agent Brain & Blackboard (Gitignored)",
-			"",
-			"Agents use `.dupe/brain/` to share hypotheses, dead ends, and intermediate handoffs without bloating `notes/`.",
-			"Promote verified, concise findings into `notes/concepts/<slug>.md` with `agent_brain_promote`.",
-			"",
-			"## Active Topics",
-			"",
-			"_No agent brainstorm entries yet._",
-			"",
-		}, "\n")
-		if err := os.WriteFile(boardPath, []byte(seed), 0o644); err != nil {
-			return err
-		}
-	}
-
-	notesDir := filepath.Join(projectDir, "notes")
-	conceptsDir := filepath.Join(notesDir, "concepts")
+	conceptsDir := filepath.Join(projectDir, "notes", "concepts")
 	if err := os.MkdirAll(conceptsDir, 0o755); err != nil {
 		return err
-	}
-	mocPath := filepath.Join(notesDir, "MOC.md")
-	if _, err := os.Stat(mocPath); os.IsNotExist(err) {
-		mocSeed := strings.Join([]string{
-			"---",
-			"type: moc",
-			"status: active",
-			"tags: [moc, brain]",
-			"---",
-			"",
-			"# Map of Content",
-			"",
-			"Central index linking concise research claims in `notes/concepts/`, key results in `notes/artifacts/`, and references in `refs/`.",
-			"",
-			"## Core Concepts",
-			"",
-			"## Key Artifacts",
-			"",
-			"## Open Questions",
-			"",
-		}, "\n")
-		_ = os.WriteFile(mocPath, []byte(mocSeed), 0o644)
 	}
 	return nil
 }
@@ -914,16 +875,10 @@ func writeCuratedBrainNote(projectDir, relPath, content string, force bool) (str
 
 	if !force {
 		if lines > curatedBrainMaxLines {
-			return "", fmt.Errorf("anti-bloat rejection: %s has %d lines (limit %d); condense it with Mermaid/bullets or post raw thoughts to agent_brain_post in .dupe/brain/", cleanRel, lines, curatedBrainMaxLines)
+			return "", fmt.Errorf("anti-bloat rejection: %s has %d lines (limit %d); condense it or post raw thinking to agent_brain_post in .dupe/brain/", cleanRel, lines, curatedBrainMaxLines)
 		}
 		if bytesLen > curatedBrainMaxBytes {
 			return "", fmt.Errorf("anti-bloat rejection: %s is %d bytes (limit %d); condense it or move verbose brainstorming to .dupe/brain/", cleanRel, bytesLen, curatedBrainMaxBytes)
-		}
-		if !isUtilityHumanNote(cleanRel) && cleanRel != "notes/MOC.md" {
-			noteTargets, paperKeys := extractWikiTargets(norm)
-			if len(noteTargets) == 0 && len(paperKeys) == 0 {
-				return "", fmt.Errorf("curated brain note %s must include at least one Obsidian link (e.g. [[MOC]], [[related-concept]], or [[paper:key]]) to avoid orphan clutter", cleanRel)
-			}
 		}
 	}
 
