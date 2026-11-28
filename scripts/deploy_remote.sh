@@ -11,9 +11,10 @@ npm run build
 
 echo "[2/3] Building Linux amd64 backend binary (backend/server)..."
 cd "$REPO_ROOT/backend"
+APP_VER="$(git -C "$REPO_ROOT" describe --tags --abbrev=0 2>/dev/null || git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
 go vet ./...
 go test ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ./server .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.appVersion=${APP_VER}" -o ./server .
 
 # Automatically pick direct SSH ('dinoclaro') if reachable, otherwise use Cloudflare Tunnel ('ssh.dupe.ing')
 SSH_TARGET="dinoclaro"

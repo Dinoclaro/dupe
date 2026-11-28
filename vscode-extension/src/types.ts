@@ -113,6 +113,7 @@ export interface SyncTexForwardResult {
 
 export interface LocalStatus {
   mode: string;
+  version?: string;
   projects_dir: string;
   recent_projects_dirs?: string[];
   home_dir: string;
@@ -120,6 +121,27 @@ export interface LocalStatus {
   sync_remote_url: string;
   python_available: boolean;
   tectonic_available: boolean;
+}
+
+export interface LocalUpdateInfo {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  release_url: string;
+  release_notes?: string;
+  install_method?: string;
+  checked_at?: string;
+}
+
+export interface LocalUpdateApplyResponse {
+  status: string;
+  previous_version: string;
+  version: string;
+  method: string;
+  extension_updated: boolean;
+  herdr_updated: boolean;
+  restarting: boolean;
+  message: string;
 }
 
 export interface LocalBrowseDir {

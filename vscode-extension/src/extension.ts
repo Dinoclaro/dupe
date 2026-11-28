@@ -35,6 +35,7 @@ import {
   BibMetadata,
   LatexDiagnostic,
   LocalStatus,
+  LocalUpdateInfo,
   Paper,
   ProjectConfig,
   RemoteSyncStatus,
@@ -137,6 +138,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let activeProjectRoot: string | null = null;
   let localStatus: LocalStatus | null = null;
   let syncStatus: RemoteSyncStatus | null = null;
+  let updateInfo: LocalUpdateInfo | null = null;
   let codeTargets: string[] = [];
   let paperTargets: string[] = [];
   let daemonError: string | null = null;
@@ -352,9 +354,173 @@ export function activate(context: vscode.ExtensionContext): void {
       codeTargets,
       paperTargets,
       daemonError,
+      updateInfo,
     });
     updateStatusBar();
     void syncVSCodeGitRepositories(activeProjectRoot);
+  }
+
+  async function waitForDaemonHealth(timeoutMs = 10000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        await api.health();
+        return true;
+      } catch {
+        // daemon still restarting
+      }
+    }
+    return false;
+  }
+
+  function isNewerVersion(currentRaw: string, latestRaw: string): boolean {
+    const parse = (raw: string): number[] | null => {
+      const clean = raw.trim().replace(/^v/i, '').split(/[-+]/)[0];
+      if (!clean || clean.toLowerCase() === 'dev') {
+        return null;
+      }
+      const nums = clean.split('.').map((n) => Number.parseInt(n, 10));
+      if (nums.length < 2 || nums.length > 3 || nums.some((n) => Number.isNaN(n))) {
+        return null;
+      }
+      return [nums[0] || 0, nums[1] || 0, nums[2] || 0];
+    };
+    const l = parse(latestRaw);
+    if (!l) {
+      return false;
+    }
+    const c = parse(currentRaw);
+    if (!c) {
+      return true;
+    }
+    for (let i = 0; i < 3; i++) {
+      if (c[i] < l[i]) return true;
+      if (c[i] > l[i]) return false;
+    }
+    return false;
+  }
+
+  async function checkUpdatesFromGitHubFallback(): Promise<LocalUpdateInfo | null> {
+    const extVer = String((context.extension.packageJSON as { version?: string })?.version || '0.0.0');
+    const res = await fetch('https://api.github.com/repos/Dinoclaro/dupe/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `dupe-studio/${extVer}` },
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const rel = (await res.json()) as { tag_name?: string; html_url?: string; body?: string };
+    const latest = String(rel.tag_name || '').trim();
+    if (!latest) {
+      return null;
+    }
+    return {
+      current_version: `v${extVer.replace(/^v/i, '')}`,
+      latest_version: latest,
+      update_available: isNewerVersion(extVer, latest),
+      release_url: rel.html_url || 'https://github.com/Dinoclaro/dupe/releases',
+      release_notes: rel.body || '',
+    };
+  }
+
+  async function runUpdateCheck(interactive: boolean): Promise<void> {
+    let info: LocalUpdateInfo | null = null;
+    try {
+      info = await api.checkUpdates(interactive);
+    } catch {
+      try {
+        info = await checkUpdatesFromGitHubFallback();
+      } catch (err) {
+        if (interactive) {
+          void vscode.window.showWarningMessage(
+            `Could not check for dupe updates: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        return;
+      }
+    }
+    if (!info) {
+      if (interactive) {
+        void vscode.window.showInformationMessage('No published dupe release found yet.');
+      }
+      return;
+    }
+
+    updateInfo = info;
+    projectProvider.update({
+      activeProject,
+      localStatus,
+      syncStatus,
+      codeTargets,
+      paperTargets,
+      daemonError,
+      updateInfo,
+    });
+
+    if (!info.update_available) {
+      if (interactive) {
+        void vscode.window.showInformationMessage(
+          `dupe is up to date (${info.current_version}).`,
+        );
+      }
+      return;
+    }
+
+    const skippedVer = context.globalState.get<string>('dupe.skippedUpdateVersion', '');
+    if (!interactive && skippedVer === info.latest_version) {
+      return;
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+      `dupe ${info.latest_version} is available (installed: ${info.current_version}).`,
+      'Update Now',
+      'Release Notes',
+      'Skip Version',
+    );
+    if (choice === 'Release Notes' && info.release_url) {
+      await vscode.env.openExternal(vscode.Uri.parse(info.release_url));
+      return;
+    }
+    if (choice === 'Skip Version') {
+      await context.globalState.update('dupe.skippedUpdateVersion', info.latest_version);
+      return;
+    }
+    if (choice !== 'Update Now') {
+      return;
+    }
+
+    try {
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Updating dupe to ${info.latest_version}...`,
+          cancellable: false,
+        },
+        async () => {
+          const applied = await api.applyUpdate(info!.latest_version);
+          if (applied.restarting) {
+            await waitForDaemonHealth(10000);
+          }
+          return applied;
+        },
+      );
+      await refreshAll();
+      if (result.extension_updated) {
+        const reload = await vscode.window.showInformationMessage(
+          `${result.message} Reload VS Code to activate the new dupe-studio extension.`,
+          'Reload Window',
+        );
+        if (reload === 'Reload Window') {
+          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+      } else {
+        void vscode.window.showInformationMessage(result.message);
+      }
+    } catch (err) {
+      void vscode.window.showErrorMessage(
+        `dupe update failed: ${err instanceof Error ? err.message : String(err)}. You can also run "dupe update" in a terminal.`,
+      );
+    }
   }
 
   function applyCompilerDiagnostics(
@@ -1769,6 +1935,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
+    vscode.commands.registerCommand('dupe.checkUpdates', async () => {
+      await runUpdateCheck(true);
+    }),
+
     vscode.workspace.onDidOpenTextDocument((doc) => spellProvider.checkDocument(doc)),
     vscode.workspace.onDidChangeTextDocument((ev) => spellProvider.scheduleCheck(ev.document)),
     vscode.workspace.onDidCloseTextDocument((doc) => spellProvider.clearDocument(doc.uri)),
@@ -1828,7 +1998,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  void refreshAll();
+  void refreshAll().then(() => {
+    const autoCheck = vscode.workspace.getConfiguration('dupe').get<boolean>('autoCheckUpdates', true);
+    if (!autoCheck) {
+      return;
+    }
+    const lastCheck = context.globalState.get<number>('dupe.lastUpdateCheckMs', 0);
+    if (Date.now() - lastCheck < 6 * 60 * 60 * 1000) {
+      return;
+    }
+    void context.globalState.update('dupe.lastUpdateCheckMs', Date.now());
+    void runUpdateCheck(false);
+  });
   spellProvider.refreshAllOpenDocuments();
 }
 

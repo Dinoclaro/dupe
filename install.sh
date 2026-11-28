@@ -8,6 +8,22 @@ INSTALL_DIR="${DUPE_INSTALL_DIR:-$HOME/.local/share/dupe}"
 BIN_DIR="${DUPE_BIN_DIR:-$HOME/.local/bin}"
 STORAGE_DIR="${DUPE_STORAGE_DIR:-$INSTALL_DIR/storage_local}"
 PROJECTS_DIR="${DUPE_PROJECTS_DIR:-$HOME/dupe_projects}"
+AUTOSTART="${DUPE_AUTOSTART:-0}"
+
+for arg in "$@"; do
+  case "$arg" in
+    --autostart) AUTOSTART="1" ;;
+  esac
+done
+
+gh_curl() {
+  local tok="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -n "$tok" ]; then
+    curl -fsSL -H "Authorization: Bearer $tok" "$@"
+  else
+    curl -fsSL "$@"
+  fi
+}
 
 OS_RAW="$(uname -s)"
 case "$OS_RAW" in
@@ -36,7 +52,8 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 TAR_URL="$BASE_DL/dupe-${OS_NAME}-${ARCH_NAME}.tar.gz"
-curl -fsSL "$TAR_URL" -o "$TMP_DIR/dupe.tar.gz"
+gh_curl "$TAR_URL" -o "$TMP_DIR/dupe.tar.gz"
+rm -rf "$INSTALL_DIR/web/dist"
 tar -xzf "$TMP_DIR/dupe.tar.gz" -C "$(dirname "$INSTALL_DIR")"
 chmod +x "$INSTALL_DIR/backend/server"
 if [ "$OS_NAME" = "darwin" ]; then
@@ -131,13 +148,98 @@ fi
 CODE_BIN="$(command -v code || echo "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code")"
 if command -v code >/dev/null 2>&1 || [ -x "$CODE_BIN" ]; then
   echo "==> Installing dupe-studio VS Code extension..."
-  if curl -fsSL "$BASE_DL/dupe-studio-latest.vsix" -o "$TMP_DIR/dupe-studio.vsix"; then
+  if gh_curl "$BASE_DL/dupe-studio-latest.vsix" -o "$TMP_DIR/dupe-studio.vsix"; then
     "$CODE_BIN" --install-extension "$TMP_DIR/dupe-studio.vsix" --force || true
   fi
 fi
 
-echo "==> Done!"
+if [ "$OS_NAME" = "darwin" ] && [ -f "$HOME/Library/LaunchAgents/io.dupe.local.plist" ]; then
+  echo "==> Restarting io.dupe.local LaunchAgent..."
+  launchctl kickstart -k "gui/$(id -u)/io.dupe.local" >/dev/null 2>&1 || {
+    launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/io.dupe.local.plist" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/io.dupe.local.plist" >/dev/null 2>&1 || true
+  }
+elif [ "$OS_NAME" = "darwin" ] && [ "$AUTOSTART" = "1" ]; then
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  PLIST_PATH="$HOME/Library/LaunchAgents/io.dupe.local.plist"
+  cat > "$PLIST_PATH" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.dupe.local</string>
+  <key>WorkingDirectory</key>
+  <string>$INSTALL_DIR/backend</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>STORAGE_DIR</key>
+    <string>$STORAGE_DIR</string>
+    <key>PROJECTS_DIR</key>
+    <string>$PROJECTS_DIR</string>
+    <key>WEB_DIST_DIR</key>
+    <string>$INSTALL_DIR/web/dist</string>
+    <key>PYTHON_BIN</key>
+    <string>$PYTHON_BIN_VAL</string>
+    <key>EXTRACT_SCRIPT</key>
+    <string>$INSTALL_DIR/scripts/extract_meta.py</string>
+    <key>PATH</key>
+    <string>$BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/Library/TeX/texbin:/usr/bin:/bin</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$INSTALL_DIR/backend/server</string>
+    <string>serve</string>
+    <string>--mode</string>
+    <string>local</string>
+    <string>--projects</string>
+    <string>$PROJECTS_DIR</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$HOME/Library/Logs/dupe-local.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/Library/Logs/dupe-local.log</string>
+</dict>
+</plist>
+PLIST
+  launchctl bootout "gui/$(id -u)" "$PLIST_PATH" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user cat dupe-local.service >/dev/null 2>&1; then
+  echo "==> Restarting dupe-local.service..."
+  systemctl --user restart dupe-local.service || true
+elif [ "$AUTOSTART" = "1" ] && command -v systemctl >/dev/null 2>&1; then
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$HOME/.config/systemd/user/dupe-local.service" <<UNIT
+[Unit]
+Description=dupe Local Studio Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR/backend
+Environment="STORAGE_DIR=$STORAGE_DIR"
+Environment="PROJECTS_DIR=$PROJECTS_DIR"
+Environment="WEB_DIST_DIR=$INSTALL_DIR/web/dist"
+Environment="PYTHON_BIN=$PYTHON_BIN_VAL"
+Environment="EXTRACT_SCRIPT=$INSTALL_DIR/scripts/extract_meta.py"
+Environment="PATH=$BIN_DIR:/usr/local/bin:/usr/bin:/bin"
+ExecStart=$INSTALL_DIR/backend/server serve --mode local --projects "$PROJECTS_DIR"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable --now dupe-local.service
+fi
+
+echo "==> Done! ($("$BIN_DIR/dupe" --version 2>/dev/null || echo "installed"))"
 echo "Next steps:"
 echo "  1. Ensure $BIN_DIR is in PATH"
 echo "  2. Initialize a project:   cd ~/my-paper && dupe init"
-echo "  3. Start local daemon:     dupe serve"
+echo "  3. Future updates:         dupe update"

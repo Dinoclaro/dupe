@@ -76,6 +76,12 @@ export const App: React.FC = () => {
   );
   const [serverOnline, setServerOnline] = useState<boolean>(true);
   const [outboxCount, setOutboxCount] = useState<number>(() => getOutboxQueue().length);
+  const [availableUpdate, setAvailableUpdate] = useState<{
+    latest_version: string;
+    current_version: string;
+  } | null>(null);
+  const [applyingUpdate, setApplyingUpdate] = useState<boolean>(false);
+  const checkedUpdateRef = useRef<boolean>(false);
 
   const [showSidebar, setShowSidebar] = useState(true);
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -496,6 +502,20 @@ export const App: React.FC = () => {
         setServerOnline(true);
         if (h.mode) {
           setRuntimeMode(h.mode);
+          if (h.mode === 'local' && !checkedUpdateRef.current) {
+            checkedUpdateRef.current = true;
+            void api
+              .checkLocalUpdate()
+              .then((u) => {
+                if (u.update_available) {
+                  setAvailableUpdate({
+                    latest_version: u.latest_version,
+                    current_version: u.current_version,
+                  });
+                }
+              })
+              .catch(() => null);
+          }
         }
         const flushed = await api.flushOutbox();
         if (flushed > 0) {
@@ -1733,6 +1753,44 @@ export const App: React.FC = () => {
           <span className="user-badge">
             {user.username} ({runtimeMode})
           </span>
+          {runtimeMode === 'local' && availableUpdate && (
+            <button
+              type="button"
+              className="btn-tiny"
+              disabled={applyingUpdate}
+              title={`Update dupe from ${availableUpdate.current_version} to ${availableUpdate.latest_version}`}
+              onClick={async () => {
+                setApplyingUpdate(true);
+                setStatusMessage(`Updating dupe to ${availableUpdate.latest_version}…`);
+                try {
+                  const res = await api.applyLocalUpdate(availableUpdate.latest_version);
+                  setStatusMessage(res.message);
+                  if (res.restarting) {
+                    const deadline = Date.now() + 10000;
+                    while (Date.now() < deadline) {
+                      await new Promise((r) => setTimeout(r, 500));
+                      try {
+                        await api.health();
+                        window.location.reload();
+                        return;
+                      } catch {
+                        // waiting for daemon restart
+                      }
+                    }
+                  }
+                  setAvailableUpdate(null);
+                } catch (err) {
+                  setStatusMessage(
+                    `Update failed: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                } finally {
+                  setApplyingUpdate(false);
+                }
+              }}
+            >
+              {applyingUpdate ? 'Updating…' : `⬇ Update ${availableUpdate.latest_version}`}
+            </button>
+          )}
           {runtimeMode !== 'local' && (
             <>
               <button

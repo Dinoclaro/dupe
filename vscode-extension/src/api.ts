@@ -5,6 +5,8 @@ import {
   CompileProjectResponse,
   LocalBrowseDir,
   LocalStatus,
+  LocalUpdateApplyResponse,
+  LocalUpdateInfo,
   Paper,
   ProjectConfig,
   ProjectTreeResponse,
@@ -82,6 +84,17 @@ export class DupeApiClient {
 
   getLocalStatus(): Promise<LocalStatus> {
     return this.requestJson('GET', '/api/local/status');
+  }
+
+  checkUpdates(refresh = false): Promise<LocalUpdateInfo> {
+    return this.requestJson('GET', `/api/local/update${refresh ? '?refresh=1' : ''}`);
+  }
+
+  applyUpdate(version?: string, force = false): Promise<LocalUpdateApplyResponse> {
+    return this.requestJson('POST', '/api/local/update', {
+      version: version || '',
+      force,
+    });
   }
 
   browseLocalDir(dirPath?: string): Promise<{ current_path: string; parent_path: string; home_dir: string; dirs: LocalBrowseDir[] }> {

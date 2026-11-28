@@ -71,6 +71,11 @@
           "type": "string",
           "default": "notes/comments.md",
           "description": "Project note file where inline selection comments are appended (e.g. notes/comments.md or notes/paperChanges.md)."
+        },
+        "dupe.autoCheckUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check GitHub Releases for dupe and dupe-studio updates."
         }
       }
     },
@@ -297,6 +302,11 @@
         "command": "dupe.selectCommentTarget",
         "title": "dupe: Select Comment Target Note",
         "icon": "$(list-selection)"
+      },
+      {
+        "command": "dupe.checkUpdates",
+        "title": "dupe: Check for Updates",
+        "icon": "$(cloud-download)"
       }
     ],
     "keybindings": [
@@ -489,6 +499,11 @@
           "command": "dupe.refresh",
           "when": "view == dupe.projectView || view == dupe.papersView || view == dupe.notesView",
           "group": "navigation"
+        },
+        {
+          "command": "dupe.checkUpdates",
+          "when": "view == dupe.projectView",
+          "group": "9_updates@1"
         }
       ],
       "view/item/context": [

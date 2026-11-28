@@ -53,13 +53,18 @@ jobs:
 
       - name: Build cross-platform dupe release bundles
         run: |
+          EXT_VER=$(node -p "require('./vscode-extension/package.json').version")
+          RELEASE_VERSION="${GITHUB_REF_NAME:-v${EXT_VER}}"
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            RELEASE_VERSION="v${EXT_VER}"
+          fi
           mkdir -p dist-release
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             GOOS="${target%/*}"
             GOARCH="${target#*/}"
             STAGE="$(mktemp -d)"
             mkdir -p "$STAGE/dupe/backend" "$STAGE/dupe/web" "$STAGE/dupe/scripts" "$STAGE/dupe/herdr"
-            (cd backend && CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags="-s -w" -o "$STAGE/dupe/backend/server" .)
+            (cd backend && CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -ldflags="-s -w -X main.appVersion=${RELEASE_VERSION}" -o "$STAGE/dupe/backend/server" .)
             cp -R web/dist "$STAGE/dupe/web/dist"
             cp scripts/extract_meta.py scripts/requirements.txt "$STAGE/dupe/scripts/"
             cp -R herdr/. "$STAGE/dupe/herdr/"
@@ -75,3 +80,45 @@ jobs:
         with:
           generate_release_notes: true
           files: dist-release/*
+
+      - name: Update Homebrew Formula
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          python3 - "$TAG" "$VER" <<'PY'
+          import pathlib, re, sys
+
+          tag, ver = sys.argv[1], sys.argv[2]
+          sums = {}
+          for line in pathlib.Path("dist-release/SHA256SUMS.txt").read_text().splitlines():
+              parts = line.split()
+              if len(parts) == 2:
+                  sums[parts[1]] = parts[0]
+
+          formula = pathlib.Path("Formula/dupe.rb")
+          text = formula.read_text()
+          text = re.sub(r'^(\s*version\s+)"[^"]+"', rf'\1"{ver}"', text, flags=re.M)
+
+          for asset in (
+              "dupe-darwin-arm64.tar.gz",
+              "dupe-darwin-amd64.tar.gz",
+              "dupe-linux-arm64.tar.gz",
+              "dupe-linux-amd64.tar.gz",
+          ):
+              sha = sums.get(asset)
+              if not sha:
+                  raise RuntimeError(f"Missing sha256 for {asset}")
+              pattern = rf'(url\s+"https://github\.com/[^"]+/releases/download/)[^/]+(/{re.escape(asset)}"\s*\n\s*sha256\s+)"[^"]+"'
+              text = re.sub(pattern, rf'\g<1>{tag}\g<2>"{sha}"', text)
+
+          formula.write_text(text)
+          PY
+          if ! git diff --quiet Formula/dupe.rb; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Formula/dupe.rb
+            git commit -m "chore(release): update Homebrew formula for ${TAG} [skip ci]"
+            git pull --rebase origin main || true
+            git push origin HEAD:main
+          fi

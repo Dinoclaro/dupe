@@ -332,6 +332,7 @@ chmod +x "$INSTALL_DIR/backend/server"
 if [ "$OS_NAME" = "darwin" ]; then
   xattr -d com.apple.quarantine "$INSTALL_DIR/backend/server" >/dev/null 2>&1 || true
 fi
+ln -sf "$INSTALL_DIR/backend/server" "$BIN_DIR/dupe"
 
 if ! command -v tectonic >/dev/null 2>&1 && [ ! -x "$BIN_DIR/tectonic" ]; then
   TECT_URL=""
@@ -557,6 +558,7 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	recentDirs := appendUniqueDir(lc.RecentProjectsDirs, s.getProjectsDir())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":                 s.mode,
+		"version":              normalizeSemver(appVersion),
 		"projects_dir":         s.getProjectsDir(),
 		"recent_projects_dirs": recentDirs,
 		"storage_dir":          s.storageDir,

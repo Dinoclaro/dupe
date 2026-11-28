@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +23,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+var appVersion = "dev"
 
 var uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -32,16 +35,22 @@ type pgxQuerier interface {
 }
 
 type Server struct {
-	db            pgxQuerier
-	jwtSecret     []byte
-	storageDir    string
-	projectsMu    sync.RWMutex
-	projectsDir   string
-	mode          string
-	pythonBin     string
-	extractScript string
-	webDistDir    string
-	offlineMeta   bool
+	db                 pgxQuerier
+	jwtSecret          []byte
+	storageDir         string
+	projectsMu         sync.RWMutex
+	projectsDir        string
+	mode               string
+	pythonBin          string
+	extractScript      string
+	webDistDir         string
+	offlineMeta        bool
+	updateCacheMu      sync.Mutex
+	updateCacheAt      time.Time
+	updateCachedResult *UpdateCheckResult
+	skipUpdateRestart  bool
+	updateInstallDir   string
+	updateBinDir       string
 }
 
 func isValidUUID(value string) bool {
@@ -98,8 +107,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		mode = "hosted"
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status": "ok",
-		"mode":   mode,
+		"status":  "ok",
+		"mode":    mode,
+		"version": normalizeSemver(appVersion),
 	})
 }
 
@@ -111,6 +121,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/local/bundle.tar.gz", s.requireAuth(s.handleLocalBundle))
 	mux.HandleFunc("GET /api/local/setup.sh", s.requireAuth(s.handleLocalSetupScript))
 	mux.HandleFunc("GET /api/local/status", s.requireAuth(s.handleLocalStatus))
+	mux.HandleFunc("GET /api/local/update", s.requireAuth(s.handleCheckLocalUpdate))
+	mux.HandleFunc("POST /api/local/update", s.requireAuth(s.handleApplyLocalUpdate))
 	mux.HandleFunc("GET /api/local/browse", s.requireAuth(s.handleLocalBrowse))
 	mux.HandleFunc("POST /api/local/projects-root", s.requireAuth(s.handleSetLocalProjectsRoot))
 	mux.HandleFunc("POST /api/local/link-folder", s.requireAuth(s.handleLinkLocalFolder))
@@ -330,6 +342,21 @@ func resolveDefaultStorageDir() string {
 }
 
 func main() {
+	rawArgs := os.Args[1:]
+	if len(rawArgs) > 0 {
+		switch rawArgs[0] {
+		case "version", "--version", "-version", "-v":
+			fmt.Printf("dupe %s (%s/%s)\n", normalizeSemver(appVersion), runtime.GOOS, runtime.GOARCH)
+			return
+		case "update":
+			if err := runUpdateCLI(rawArgs[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "update failed: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	createUser := flag.String("create-user", "", "Create or update a user account and exit")
 	password := flag.String("password", "", "Password for --create-user")
 	colorHex := flag.String("color", "#FFEB3B", "Highlight color hex for --create-user")

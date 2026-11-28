@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { filterPapersByQuery } from './citations';
 import { NotesIndex } from './notesIndex';
-import { BacklinkHit, LocalStatus, NoteEntry, Paper, ProjectConfig, RemoteSyncStatus } from './types';
+import { BacklinkHit, LocalStatus, LocalUpdateInfo, NoteEntry, Paper, ProjectConfig, RemoteSyncStatus } from './types';
 
 export class PaperTreeItem extends vscode.TreeItem {
   constructor(
@@ -211,6 +211,7 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
   private codeTargets: string[] = [];
   private paperTargets: string[] = [];
   private daemonError: string | null = null;
+  private updateInfo: LocalUpdateInfo | null = null;
 
   update(params: {
     activeProject: ProjectConfig | null;
@@ -219,6 +220,7 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
     codeTargets: string[];
     paperTargets: string[];
     daemonError: string | null;
+    updateInfo?: LocalUpdateInfo | null;
   }): void {
     this.activeProject = params.activeProject;
     this.localStatus = params.localStatus;
@@ -226,6 +228,9 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
     this.codeTargets = params.codeTargets;
     this.paperTargets = params.paperTargets;
     this.daemonError = params.daemonError;
+    if (params.updateInfo !== undefined) {
+      this.updateInfo = params.updateInfo;
+    }
     this.onDidChangeEmitter.fire(undefined);
   }
 
@@ -359,6 +364,19 @@ export class ProjectSyncProvider implements vscode.TreeDataProvider<vscode.TreeI
         'globe',
         { command: 'dupe.openWebUI', title: 'Open Web UI' },
       ),
+      this.updateInfo?.update_available
+        ? new InfoTreeItem(
+            `Update Available: ${this.updateInfo.latest_version}`,
+            `Installed: ${this.updateInfo.current_version} — Click to update`,
+            'cloud-download',
+            { command: 'dupe.checkUpdates', title: 'Update dupe' },
+          )
+        : new InfoTreeItem(
+            'Check for Updates',
+            this.localStatus?.version ? `Installed: ${this.localStatus.version}` : 'GitHub Releases',
+            'cloud-download',
+            { command: 'dupe.checkUpdates', title: 'Check for Updates' },
+          ),
     );
 
     return items;

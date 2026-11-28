@@ -665,8 +665,29 @@ async function apiFetch<T>(
 }
 
 export const api = {
-  async health(): Promise<{ status: string; mode?: string }> {
-    return apiFetch<{ status: string; mode?: string }>('/api/health');
+  async health(): Promise<{ status: string; mode?: string; version?: string }> {
+    return apiFetch<{ status: string; mode?: string; version?: string }>('/api/health');
+  },
+
+  async checkLocalUpdate(refresh = false): Promise<{
+    current_version: string;
+    latest_version: string;
+    update_available: boolean;
+    release_url: string;
+  }> {
+    return apiFetch(`/api/local/update${refresh ? '?refresh=1' : ''}`);
+  },
+
+  async applyLocalUpdate(version?: string): Promise<{
+    status: string;
+    version: string;
+    restarting: boolean;
+    message: string;
+  }> {
+    return apiFetch('/api/local/update', {
+      method: 'POST',
+      body: JSON.stringify({ version: version || '' }),
+    });
   },
 
   async login(username: string, password: string): Promise<{ token: string; user: User }> {
