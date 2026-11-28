@@ -1,5 +1,9 @@
 # Local runtime storage (PDFs and cloned Git repositories)
 storage/
+storage_*/
+scratch/
+**/scratch/
+herdr-shot*.png
 
 # Environment variables and secrets
 .env

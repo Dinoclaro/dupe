@@ -1,11 +1,19 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { DupeApiClient } from './api';
 import { loadProjectBibMetadata } from './bibParser';
 import { DupeCitationFeatures } from './citationFeatures';
 import { formatCitationSnippet, paperFromLocalRefIndex } from './citations';
+import {
+  HerdrSpaceSummary,
+  HerdrSpaceWatcher,
+  listHerdrSpaces,
+  matchWorkspaceFolderForSpace,
+  pickRevealAnchorPath,
+} from './herdrFollower';
 import {
   NotesAndBacklinksProvider,
   NoteTreeItem,
@@ -136,6 +144,8 @@ export function activate(context: vscode.ExtensionContext): void {
   let projects: ProjectConfig[] = [];
   let activeProject: ProjectConfig | null = null;
   let activeProjectRoot: string | null = null;
+  let preferredProjectRootOverride: string | null = null;
+  let activeHerdrSpace: HerdrSpaceSummary | null = null;
   let localStatus: LocalStatus | null = null;
   let syncStatus: RemoteSyncStatus | null = null;
   let updateInfo: LocalUpdateInfo | null = null;
@@ -149,11 +159,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const statusCompileItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
   const statusLibraryItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
   const statusNoteItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+  const statusHerdrItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
 
   statusSyncItem.command = 'dupe.syncProject';
   statusCompileItem.command = 'dupe.compileLatex';
   statusLibraryItem.command = 'dupe.searchPapers';
   statusNoteItem.command = 'dupe.quickOpenNote';
+  statusHerdrItem.command = 'dupe.toggleHerdrFollow';
 
   function updateStatusBar(): void {
     if (daemonError) {
@@ -197,6 +209,21 @@ export function activate(context: vscode.ExtensionContext): void {
     statusLibraryItem.text = `$(book) ${papers.length} PDFs`;
     statusLibraryItem.tooltip = 'Search dupe Paper Library';
     statusLibraryItem.show();
+
+    const followSpace = vscode.workspace
+      .getConfiguration('dupe')
+      .get<boolean>('herdr.followSpace', true);
+    if (activeHerdrSpace) {
+      statusHerdrItem.text = followSpace
+        ? `$(layers) ${activeHerdrSpace.name}`
+        : `$(layers) ${activeHerdrSpace.name} (paused)`;
+      statusHerdrItem.tooltip = followSpace
+        ? 'Following active Herdr space in Explorer — Click to pause'
+        : 'Herdr space following paused — Click to resume';
+      statusHerdrItem.show();
+    } else {
+      statusHerdrItem.hide();
+    }
   }
 
   function resolveWorkspaceRoots(): string[] {
@@ -254,10 +281,15 @@ export function activate(context: vscode.ExtensionContext): void {
       const wsRoots = resolveWorkspaceRoots();
       const editorRoot = getActiveEditorProjectRoot();
       const discovered = discoverProjectsInWorkspace(wsRoots);
-      const preferredDiscovered = editorRoot
-        ? discovered.find((d) => path.resolve(d.rootDir) === path.resolve(editorRoot)) || {
-            rootDir: editorRoot,
-            config: readLocalProjectConfig(editorRoot),
+      const preferredRoot =
+        preferredProjectRootOverride &&
+        wsRoots.some((ws) => path.resolve(ws) === path.resolve(preferredProjectRootOverride!))
+          ? preferredProjectRootOverride
+          : editorRoot;
+      const preferredDiscovered = preferredRoot
+        ? discovered.find((d) => path.resolve(d.rootDir) === path.resolve(preferredRoot)) || {
+            rootDir: preferredRoot,
+            config: readLocalProjectConfig(preferredRoot),
           }
         : discovered.find((d) => d.config.folder_name !== 'default-paper-project') || discovered[0];
 
@@ -522,6 +554,45 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }
   }
+
+  async function applyHerdrSpaceFocus(space: HerdrSpaceSummary, forceEvenIfPaused = false): Promise<void> {
+    activeHerdrSpace = space;
+    const followSpace = vscode.workspace
+      .getConfiguration('dupe')
+      .get<boolean>('herdr.followSpace', true);
+    if (!followSpace && !forceEvenIfPaused) {
+      updateStatusBar();
+      return;
+    }
+
+    const wsFolders = (vscode.workspace.workspaceFolders || []).map((f) => ({
+      name: f.name,
+      fsPath: f.uri.fsPath,
+    }));
+    const matched = matchWorkspaceFolderForSpace(space, wsFolders);
+    if (matched) {
+      const matchedProjectRoot = findDupeProjectRoot(matched.fsPath) || matched.fsPath;
+      preferredProjectRootOverride = matchedProjectRoot;
+
+      if (wsFolders.length > 1) {
+        const wasFocused = vscode.window.state.focused;
+        const hadEditor = Boolean(vscode.window.activeTextEditor);
+        await vscode.commands.executeCommand('workbench.files.action.collapseExplorerFolders');
+        const anchorPath = pickRevealAnchorPath(matched.fsPath);
+        await vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(anchorPath));
+        if (wasFocused && hadEditor) {
+          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+        }
+      }
+      await refreshAll();
+    } else {
+      updateStatusBar();
+    }
+  }
+
+  const herdrWatcher = new HerdrSpaceWatcher(async (space) => {
+    await applyHerdrSpaceFocus(space, false);
+  });
 
   function applyCompilerDiagnostics(
     projectRoot: string | null,
@@ -1939,6 +2010,108 @@ export function activate(context: vscode.ExtensionContext): void {
       await runUpdateCheck(true);
     }),
 
+    vscode.commands.registerCommand('dupe.toggleHerdrFollow', async () => {
+      const cfg = vscode.workspace.getConfiguration('dupe');
+      const next = !cfg.get<boolean>('herdr.followSpace', true);
+      await cfg.update('herdr.followSpace', next, vscode.ConfigurationTarget.Global);
+      if (next) {
+        await herdrWatcher.checkNow(true);
+      }
+      updateStatusBar();
+      void vscode.window.showInformationMessage(
+        `Herdr space following ${next ? 'enabled' : 'paused'}.`,
+      );
+    }),
+
+    vscode.commands.registerCommand('dupe.syncWithHerdrNow', async () => {
+      const space = await herdrWatcher.checkNow(true);
+      if (!space) {
+        void vscode.window.showInformationMessage('No active Herdr space detected.');
+        return;
+      }
+      await applyHerdrSpaceFocus(space, true);
+    }),
+
+    vscode.commands.registerCommand('dupe.openAllProjectsWorkspace', async () => {
+      const folderMap = new Map<string, { name: string; path: string }>();
+      const addCandidate = (dirPath: string | null | undefined, customName?: string) => {
+        if (!dirPath) {
+          return;
+        }
+        const resolved = path.resolve(dirPath);
+        if (!fs.existsSync(resolved)) {
+          return;
+        }
+        const key = resolved;
+        if (!folderMap.has(key)) {
+          const cfg = readLocalProjectConfig(resolved);
+          folderMap.set(key, {
+            name: customName || cfg?.name || path.basename(resolved),
+            path: resolved,
+          });
+        }
+      };
+
+      for (const ws of vscode.workspace.workspaceFolders || []) {
+        addCandidate(ws.uri.fsPath, ws.name);
+      }
+
+      try {
+        const spaces = await listHerdrSpaces();
+        for (const sp of spaces) {
+          if (sp.folder && fs.existsSync(path.join(sp.folder, '.dupe', 'project.json'))) {
+            addCandidate(sp.folder, sp.name);
+          }
+        }
+      } catch {
+        // herdr-app optional
+      }
+
+      const rootsToScan = new Set<string>();
+      if (localStatus?.projects_dir) {
+        rootsToScan.add(localStatus.projects_dir);
+      }
+      for (const r of localStatus?.recent_projects_dirs || []) {
+        rootsToScan.add(r);
+      }
+      for (const rootDir of rootsToScan) {
+        try {
+          for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const full = path.join(rootDir, entry.name);
+            if (entry.name === 'default-paper-project') continue;
+            if (fs.existsSync(path.join(full, '.dupe', 'project.json'))) {
+              addCandidate(full);
+            }
+          }
+        } catch {
+          // ignore unreadable root
+        }
+      }
+
+      if (folderMap.size === 0) {
+        void vscode.window.showWarningMessage('No dupe project folders found to open.');
+        return;
+      }
+
+      const wsDir = path.join(os.homedir(), '.local', 'share', 'dupe');
+      await fsp.mkdir(wsDir, { recursive: true });
+      const wsFile = path.join(wsDir, 'dupe-all.code-workspace');
+      const payload = {
+        folders: Array.from(folderMap.values()),
+        settings: {
+          'dupe.herdr.followSpace': true,
+        },
+      };
+      await fsp.writeFile(wsFile, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+      await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(wsFile), {
+        forceReuseWindow: false,
+      });
+    }),
+
+    herdrWatcher,
+    statusHerdrItem,
+
     vscode.workspace.onDidOpenTextDocument((doc) => spellProvider.checkDocument(doc)),
     vscode.workspace.onDidChangeTextDocument((ev) => spellProvider.scheduleCheck(ev.document)),
     vscode.workspace.onDidCloseTextDocument((doc) => spellProvider.clearDocument(doc.uri)),
@@ -1959,6 +2132,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const fsPath = editor.document.uri.fsPath;
       const hitRoot = findDupeProjectRoot(path.dirname(fsPath));
       if (hitRoot && hitRoot !== activeProjectRoot) {
+        preferredProjectRootOverride = hitRoot;
         void refreshAll();
       } else {
         notesProvider.refresh(fsPath);
@@ -1999,6 +2173,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void refreshAll().then(() => {
+    herdrWatcher.start();
     const autoCheck = vscode.workspace.getConfiguration('dupe').get<boolean>('autoCheckUpdates', true);
     if (!autoCheck) {
       return;

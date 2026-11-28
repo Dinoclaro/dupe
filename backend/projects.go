@@ -1039,16 +1039,29 @@ func writeFileIfChanged(path string, content []byte, perm os.FileMode) error {
 	return os.WriteFile(path, content, perm)
 }
 
-func ensureProjectGitIgnore(projectDir string) error {
-	required := []string{
-		".vscode/",
-		".dupe/build/",
-		".dupe/notes_history/",
-		"paper/",
-		"code/",
-		"scratch/",
+func untrackGitIgnoredFiles(ctx context.Context, repoDir string) {
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		return
 	}
-	giPath := filepath.Join(projectDir, ".gitignore")
+	out, err := runGitCommand(ctx, repoDir, "ls-files", "-c", "-i", "--exclude-standard")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return
+	}
+	var tracked []string
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		p := strings.TrimSpace(line)
+		if p != "" {
+			tracked = append(tracked, p)
+		}
+	}
+	if len(tracked) == 0 {
+		return
+	}
+	args := append([]string{"rm", "-r", "--cached", "--ignore-unmatch", "--"}, tracked...)
+	_, _ = runGitCommand(ctx, repoDir, args...)
+}
+
+func appendGitIgnoreEntries(giPath string, required []string) error {
 	existingRaw, _ := os.ReadFile(giPath)
 	seen := make(map[string]bool)
 	var lines []string
@@ -1074,6 +1087,60 @@ func ensureProjectGitIgnore(projectDir string) error {
 		return nil
 	}
 	return writeFileIfChanged(giPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func ensureProjectGitIgnore(projectDir string) error {
+	required := []string{
+		".vscode/",
+		".dupe/build/",
+		".dupe/notes_history/",
+		"paper/",
+		"code/",
+		"scratch/",
+		"**/scratch/",
+		"refs/*.pdf",
+		".venv/",
+		"venv/",
+		"__pycache__/",
+		"*.py[cod]",
+		".pytest_cache/",
+		"node_modules/",
+		".DS_Store",
+		"Thumbs.db",
+		"*.log",
+		"*.aux",
+		"*.synctex.gz",
+		"*.fdb_latexmk",
+		"*.fls",
+		"*.blg",
+		"*.bbl",
+		"*.toc",
+		"*.out",
+		"*.tmp",
+		"*.swp",
+	}
+	giPath := filepath.Join(projectDir, ".gitignore")
+	if err := appendGitIgnoreEntries(giPath, required); err != nil {
+		return err
+	}
+	untrackGitIgnoredFiles(context.Background(), projectDir)
+	return nil
+}
+
+func ensurePaperGitIgnore(paperDir string) {
+	if _, err := os.Stat(paperDir); err != nil {
+		return
+	}
+	_ = appendGitIgnoreEntries(filepath.Join(paperDir, ".gitignore"), []string{
+		"*.aux",
+		"*.log",
+		"*.synctex.gz",
+		"*.fdb_latexmk",
+		"*.fls",
+		"scratch/",
+		".DS_Store",
+	})
+	untrackGitIgnoredFiles(context.Background(), paperDir)
 }
 
 func (s *Server) regenerateProjectArtifacts(ctx context.Context, projectDir string, userID int, cfg ProjectConfig) error {
@@ -2482,6 +2549,8 @@ func (s *Server) handleSyncProject(w http.ResponseWriter, r *http.Request) {
 	paperDir := filepath.Join(projDir, "paper")
 	initGitRepoIfNeeded(r.Context(), projDir, claims.Username)
 	initGitRepoIfNeeded(r.Context(), paperDir, claims.Username)
+	_ = ensureProjectGitIgnore(projDir)
+	ensurePaperGitIgnore(paperDir)
 
 	rootCommitted, rootSHA, _ := commitAllIfDirty(r.Context(), projDir, commitMsg)
 	paperCommitted, paperSHA, _ := commitAllIfDirty(r.Context(), paperDir, commitMsg)

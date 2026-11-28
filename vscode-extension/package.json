@@ -81,6 +81,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically check GitHub Releases for dupe and dupe-studio updates."
+        },
+        "dupe.herdr.followSpace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically collapse inactive project folders in VS Code Explorer and expand/focus the project matching your active Herdr space."
         }
       }
     },
@@ -312,6 +317,21 @@
         "command": "dupe.checkUpdates",
         "title": "dupe: Check for Updates",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "dupe.openAllProjectsWorkspace",
+        "title": "dupe: Open All Projects in One Window",
+        "icon": "$(root-folder-opened)"
+      },
+      {
+        "command": "dupe.syncWithHerdrNow",
+        "title": "dupe: Focus Active Herdr Space Project",
+        "icon": "$(layers)"
+      },
+      {
+        "command": "dupe.toggleHerdrFollow",
+        "title": "dupe: Toggle Follow Herdr Space",
+        "icon": "$(eye)"
       }
     ],
     "keybindings": [
@@ -509,6 +529,16 @@
           "command": "dupe.checkUpdates",
           "when": "view == dupe.projectView",
           "group": "9_updates@1"
+        },
+        {
+          "command": "dupe.openAllProjectsWorkspace",
+          "when": "view == dupe.projectView",
+          "group": "9_updates@2"
+        },
+        {
+          "command": "dupe.toggleHerdrFollow",
+          "when": "view == dupe.projectView",
+          "group": "9_updates@3"
         }
       ],
       "view/item/context": [
