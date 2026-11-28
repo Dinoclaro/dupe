@@ -2,7 +2,7 @@
   "name": "dupe-studio",
   "displayName": "dupe Research Studio",
   "description": "Explorer-integrated paper library, Obsidian-style notes & lists, citation intelligence, SyncTeX PDF reader, and Overleaf sync backed by the local dupe daemon.",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "publisher": "dinoclaro",
   "engines": {
     "vscode": "^1.90.0"
@@ -57,13 +57,18 @@
         },
         "dupe.spellCheck.dialect": {
           "type": "string",
-          "enum": ["en-US", "en-GB"],
+          "enum": [
+            "en-US",
+            "en-GB"
+          ],
           "default": "en-US",
           "description": "English spelling dictionary dialect."
         },
         "dupe.spellCheck.extraWords": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "User dictionary words ignored by the dupe spell checker."
         },
