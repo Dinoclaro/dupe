@@ -1,0 +1,9 @@
+# Herdr Core configuration
+# Seconds to wait before sending automated prompts/notes after user typing
+draft_wait = 5
+
+# Default seconds before `hc wait` / `hc run` checks in while leaving long tasks running
+wait_timeout = 180
+
+# Restore last screen text above recovery shells when a kept terminal restarts
+restore_screen = true

@@ -232,6 +232,23 @@ func (s *Server) handleLocalBundle(w http.ResponseWriter, r *http.Request) {
 			if _, reqErr := os.Stat(reqTxt); reqErr == nil {
 				_ = addFileToTar(tw, reqTxt, "dupe/scripts/requirements.txt", 0o644)
 			}
+			herdrDir := filepath.Join(filepath.Dir(filepath.Dir(s.extractScript)), "herdr")
+			if hInfo, hErr := os.Stat(herdrDir); hErr == nil && hInfo.IsDir() {
+				_ = filepath.WalkDir(herdrDir, func(path string, d fs.DirEntry, walkErr error) error {
+					if walkErr != nil || d.IsDir() {
+						return nil
+					}
+					rel, relErr := filepath.Rel(herdrDir, path)
+					if relErr != nil {
+						return nil
+					}
+					mode := int64(0o644)
+					if strings.HasSuffix(rel, ".sh") || strings.HasPrefix(filepath.ToSlash(rel), "bin/") {
+						mode = 0o755
+					}
+					return addFileToTar(tw, path, filepath.Join("dupe/herdr", rel), mode)
+				})
+			}
 		}
 	}
 }
@@ -419,6 +436,10 @@ for raw_path in ("~/.gemini/config/mcp_config.json", "~/.claude.json"):
         json.dump(data, fh, indent=2)
         fh.write("\n")
 PY
+fi
+
+if [ -x "$INSTALL_DIR/herdr/install_herdr_dupe.sh" ]; then
+  bash "$INSTALL_DIR/herdr/install_herdr_dupe.sh" || true
 fi
 
 if [ "$AUTOSTART" = "1" ] && [ "$OS_NAME" = "darwin" ]; then

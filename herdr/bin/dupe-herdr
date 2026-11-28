@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OPEN_CODE=0
+if [ "${1:-}" = "--code" ]; then
+  OPEN_CODE=1
+  shift
+fi
+
+PROJ_DIR="${1:-$PWD}"
+if [ ! -f "$PROJ_DIR/.dupe/project.json" ]; then
+  for candidate in "$HOME/dupe_mimic/mimic" "$HOME/dupe_pele/ra-l_pele_offline_mbrl" "$HOME/dupe_projects/default-paper-project"; do
+    if [ -f "$candidate/.dupe/project.json" ]; then
+      PROJ_DIR="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ ! -f "$PROJ_DIR/.dupe/project.json" ]; then
+  echo "Usage: dupe-herdr [--code] <path-to-dupe-project>" >&2
+  exit 1
+fi
+
+PROJ_DIR="$(cd "$PROJ_DIR" && pwd)"
+SPACE_NAME="$(basename "$PROJ_DIR")"
+
+HC_BIN="$(command -v hc || command -v herdr-core || echo "$HOME/.local/bin/hc")"
+HERDR_APP_BIN="$(command -v herdr-app || true)"
+if [ -z "$HERDR_APP_BIN" ]; then
+  for cand in "$HOME/.local/bin/herdr-app" "/Applications/Herdr.app/Contents/MacOS/herdr-app"; do
+    if [ -x "$cand" ]; then
+      HERDR_APP_BIN="$cand"
+      break
+    fi
+  done
+fi
+
+if [ -z "$HERDR_APP_BIN" ] || [ ! -x "$HC_BIN" ]; then
+  echo "herdr-app / hc not installed. Install with: curl -fsSL https://releases.herdr.dev/app/install.sh | sh" >&2
+  exit 1
+fi
+
+"$HC_BIN" server status >/dev/null 2>&1 || "$HC_BIN" server start >/dev/null
+
+if ! "$HERDR_APP_BIN" status >/dev/null 2>&1; then
+  if [ "$(uname -s)" = "Darwin" ] && [ -d "/Applications/Herdr.app" ]; then
+    open -a Herdr >/dev/null 2>&1 || nohup "$HERDR_APP_BIN" >/dev/null 2>&1 &
+  else
+    nohup "$HERDR_APP_BIN" >/dev/null 2>&1 &
+  fi
+  for _ in $(seq 1 40); do
+    if "$HERDR_APP_BIN" status >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+fi
+
+SPACE_JSON="$("$HERDR_APP_BIN" do space.new --name "$SPACE_NAME" --folder "$PROJ_DIR" --tab "lead" --argv '["claude"]')"
+SPACE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("space") or d.get("id") or "")' <<<"$SPACE_JSON" 2>/dev/null || true)"
+
+if [ -n "$SPACE_ID" ]; then
+  "$HERDR_APP_BIN" do tab.new --space "$SPACE_ID" --name "shell" --folder "$PROJ_DIR" --focus false >/dev/null || true
+fi
+
+if [ "$OPEN_CODE" = "1" ]; then
+  CODE_BIN="$(command -v code || echo "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code")"
+  if [ -x "$CODE_BIN" ] || command -v code >/dev/null 2>&1; then
+    "$CODE_BIN" "$PROJ_DIR" >/dev/null 2>&1 &
+  fi
+fi
+
+echo "Opened Herdr agent space '$SPACE_NAME' for $PROJ_DIR"

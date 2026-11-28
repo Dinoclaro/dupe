@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "link_handlers": [
+    {
+      "kind": "file",
+      "pattern": "(?i)\\.(md|tex|bib|py|go|ts|tsx|js|jsx|json|ya?ml|toml|rs|sh)$"
+    }
+  ]
+}

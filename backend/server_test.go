@@ -942,6 +942,7 @@ func TestAgentsUserSectionMultiSymlinkAndURLImport(t *testing.T) {
 		"mcp_config.json",
 		".claude.json",
 		"requirements.txt",
+		"install_herdr_dupe.sh",
 	} {
 		if !strings.Contains(scriptBody, want) {
 			t.Fatalf("expected setup.sh to contain %q", want)
